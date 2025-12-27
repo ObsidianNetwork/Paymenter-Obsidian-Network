@@ -1,5 +1,4 @@
 <div>
-    {{-- In work, do what you enjoy. --}}
     <x-dropdown width="w-84" :showArrow="false">
         <x-slot:trigger>
             <div class="relative w-10 h-10 flex items-center justify-center rounded-lg hover:bg-neutral transition" x-data="{ hasNew: false }" x-on:new-notification.window="hasNew = true"
@@ -15,6 +14,19 @@
         </x-slot:trigger>
         <x-slot:content>
             <div class="w-full max-h-96 overflow-y-auto">
+                @if ($this->notifications->isNotEmpty())
+                <div class="flex items-center justify-between px-4 py-2 border-b border-neutral/50">
+                    <span class="font-medium text-sm">{{ __('Notifications') }}</span>
+                    <div class="flex items-center gap-2">
+                        <button wire:click="markAllAsRead" class="text-xs text-base/60 hover:text-primary cursor-pointer" type="button" title="{{ __('Mark all as read') }}">
+                            <x-ri-check-double-line class="size-4" />
+                        </button>
+                        <button wire:click="deleteAllNotifications" class="text-xs text-base/60 hover:text-red-500 cursor-pointer" type="button" title="{{ __('Clear all') }}">
+                            <x-ri-delete-bin-line class="size-4" />
+                        </button>
+                    </div>
+                </div>
+                @endif
                 @if ($this->notifications->isEmpty())
                 <div class="p-4 text-center text-sm text-base/80">
                     {{ __('No new notifications') }}
@@ -26,18 +38,25 @@
                     <div class="flex items-start gap-3">
                         <x-ri-notification-3-fill
                             class="size-5 mt-1 flex-shrink-0 {{ $notification->read_at ? 'text-base/80' : 'text-primary' }}" />
-                        <div class="flex flex-col">
+                        <div class="flex-1 flex flex-col">
                             <span class="font-medium">{{ $notification->title }}</span>
                             <span class="text-sm text-base/80">{{ $notification->body }}</span>
-                            <div class="flex flex-row justify-between mt-1 text-xs text-base/60">
-                                <p>
-                                    {{ $notification->created_at->diffForHumans() }}
-                                </p>
-
-                                <button wire:click.stop="markAsRead({{ $notification->id }})" class="cursor-pointer"
-                                    type="button">
-                                    {{ __('Mark as read') }}
-                                </button>
+                            <div class="flex flex-row items-center justify-between mt-1 text-xs text-base/60">
+                                <span>{{ $notification->created_at->diffForHumans() }}</span>
+                                <div class="flex items-center gap-2">
+                                    @if ($notification->read_at)
+                                    <button wire:click.stop="markAsUnread({{ $notification->id }})" class="hover:text-primary cursor-pointer" type="button" title="{{ __('Mark as unread') }}">
+                                        <x-ri-mail-unread-line class="size-4" />
+                                    </button>
+                                    @else
+                                    <button wire:click.stop="markAsRead({{ $notification->id }})" class="hover:text-primary cursor-pointer" type="button" title="{{ __('Mark as read') }}">
+                                        <x-ri-mail-check-line class="size-4" />
+                                    </button>
+                                    @endif
+                                    <button wire:click.stop="deleteNotification({{ $notification->id }})" class="hover:text-red-500 cursor-pointer" type="button" title="{{ __('Delete') }}">
+                                        <x-ri-delete-bin-line class="size-4" />
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

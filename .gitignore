@@ -24,3 +24,7 @@ extensions/Servers/Proxmox
 !themes/default
 /Claude
 /.claude
+nul
+Dockerfile.dev
+docker-compose.dev.yml
+package-lock.json

@@ -25,4 +25,10 @@ class Notification extends Model
         $this->read_at = now();
         $this->save();
     }
+
+    public function markAsUnread()
+    {
+        $this->read_at = null;
+        $this->save();
+    }
 }

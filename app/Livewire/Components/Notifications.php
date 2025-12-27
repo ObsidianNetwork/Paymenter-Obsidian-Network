@@ -39,6 +39,36 @@ class Notifications extends Component
         $notification->markAsRead();
     }
 
+    public function markAsUnread($id)
+    {
+        $notification = Auth::user()->notifications()->where('id', $id)->first();
+        if (!$notification) {
+            return;
+        }
+
+        $notification->markAsUnread();
+    }
+
+    public function markAllAsRead()
+    {
+        Auth::user()->notifications()->whereNull('read_at')->update(['read_at' => now()]);
+    }
+
+    public function deleteNotification($id)
+    {
+        $notification = Auth::user()->notifications()->where('id', $id)->first();
+        if (!$notification) {
+            return;
+        }
+
+        $notification->delete();
+    }
+
+    public function deleteAllNotifications()
+    {
+        Auth::user()->notifications()->delete();
+    }
+
     public function render()
     {
         return view('components.notifications');
