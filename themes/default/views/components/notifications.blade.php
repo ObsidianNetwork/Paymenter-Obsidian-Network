@@ -15,14 +15,16 @@
         <x-slot:content>
             <div class="w-full max-h-96 overflow-y-auto">
                 @if ($this->notifications->isNotEmpty())
-                <div class="flex items-center justify-between px-4 py-2 border-b border-neutral/50">
-                    <span class="font-medium text-sm">{{ __('Notifications') }}</span>
+                <div class="flex items-center justify-between px-4 py-3 border-b border-neutral/50">
+                    <span class="font-semibold text-sm">{{ __('Notifications') }}</span>
                     <div class="flex items-center gap-2">
-                        <button wire:click="markAllAsRead" class="text-xs text-base/60 hover:text-primary cursor-pointer" type="button" title="{{ __('Mark all as read') }}">
+                        <button wire:click="markAllAsRead" class="inline-flex items-center gap-1 px-2 py-1 text-xs text-base/70 hover:text-primary hover:bg-primary/10 rounded-md transition cursor-pointer" type="button" title="{{ __('Mark all as read') }}">
                             <x-ri-check-double-line class="size-4" />
+                            <span>{{ __('Mark all read') }}</span>
                         </button>
-                        <button wire:click="deleteAllNotifications" class="text-xs text-base/60 hover:text-red-500 cursor-pointer" type="button" title="{{ __('Clear all') }}">
+                        <button wire:click="deleteAllNotifications" class="inline-flex items-center gap-1 px-2 py-1 text-xs text-base/70 hover:text-red-500 hover:bg-red-500/10 rounded-md transition cursor-pointer" type="button" title="{{ __('Clear all') }}">
                             <x-ri-delete-bin-line class="size-4" />
+                            <span>{{ __('Clear all') }}</span>
                         </button>
                     </div>
                 </div>
@@ -37,24 +39,24 @@
                     class="block px-4 py-3 hover:bg-background-secondary/50 cursor-pointer @if (!$loop->last) border-b border-neutral/50 @endif">
                     <div class="flex items-start gap-3">
                         <x-ri-notification-3-fill
-                            class="size-5 mt-1 flex-shrink-0 {{ $notification->read_at ? 'text-base/80' : 'text-primary' }}" />
-                        <div class="flex-1 flex flex-col">
-                            <span class="font-medium">{{ $notification->title }}</span>
-                            <span class="text-sm text-base/80">{{ $notification->body }}</span>
-                            <div class="flex flex-row items-center justify-between mt-1 text-xs text-base/60">
-                                <span>{{ $notification->created_at->diffForHumans() }}</span>
-                                <div class="flex items-center gap-2">
+                            class="size-5 mt-1 flex-shrink-0 {{ $notification->read_at ? 'text-base/40' : 'text-primary' }}" />
+                        <div class="flex-1 flex flex-col gap-1">
+                            <span class="font-medium {{ $notification->read_at ? 'text-base/70' : '' }}">{{ $notification->title }}</span>
+                            <span class="text-sm text-base/60">{{ $notification->body }}</span>
+                            <div class="flex flex-row items-center justify-between mt-2">
+                                <span class="text-xs text-base/50">{{ $notification->created_at->diffForHumans() }}</span>
+                                <div class="flex items-center gap-1">
                                     @if ($notification->read_at)
-                                    <button wire:click.stop="markAsUnread({{ $notification->id }})" class="hover:text-primary cursor-pointer" type="button" title="{{ __('Mark as unread') }}">
-                                        <x-ri-mail-unread-line class="size-4" />
+                                    <button wire:click.stop="markAsUnread({{ $notification->id }})" class="p-1.5 text-base/50 hover:text-primary hover:bg-primary/10 rounded-full transition cursor-pointer" type="button" title="{{ __('Mark as unread') }}">
+                                        <x-ri-checkbox-blank-circle-line class="size-5" />
                                     </button>
                                     @else
-                                    <button wire:click.stop="markAsRead({{ $notification->id }})" class="hover:text-primary cursor-pointer" type="button" title="{{ __('Mark as read') }}">
-                                        <x-ri-mail-check-line class="size-4" />
+                                    <button wire:click.stop="markAsRead({{ $notification->id }})" class="p-1.5 text-base/50 hover:text-primary hover:bg-primary/10 rounded-full transition cursor-pointer" type="button" title="{{ __('Mark as read') }}">
+                                        <x-ri-checkbox-circle-line class="size-5" />
                                     </button>
                                     @endif
-                                    <button wire:click.stop="deleteNotification({{ $notification->id }})" class="hover:text-red-500 cursor-pointer" type="button" title="{{ __('Delete') }}">
-                                        <x-ri-delete-bin-line class="size-4" />
+                                    <button wire:click.stop="deleteNotification({{ $notification->id }})" class="p-1.5 text-base/50 hover:text-red-500 hover:bg-red-500/10 rounded-full transition cursor-pointer" type="button" title="{{ __('Delete') }}">
+                                        <x-ri-close-line class="size-5" />
                                     </button>
                                 </div>
                             </div>
