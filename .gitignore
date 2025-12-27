@@ -27,4 +27,3 @@ extensions/Servers/Proxmox
 nul
 Dockerfile.dev
 docker-compose.dev.yml
-package-lock.json
