@@ -69,7 +69,7 @@ class ConfigOptionResource extends Resource
                             Checkbox::make('hidden')
                                 ->label('Hidden'),
                             Checkbox::make('upgradable')
-                                ->visible(fn (Get $get): bool => in_array($get('type'), ['select', 'radio', 'slider']))
+                                ->visible(fn (Get $get): bool => in_array($get('type'), ['select', 'radio', 'slider'], true))
                                 ->label('Upgradable')
                                 ->helperText('If enabled, this configuration option can be upgraded in the future.'),
                             Placeholder::make('upgradable_dynamic_slider_notice')

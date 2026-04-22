@@ -218,7 +218,10 @@ class Service extends Model implements Auditable
             $price += $this->plan->dynamicSliderBasePrice();
         }
 
-        $this->configs->each(function ($config) use (&$price) {
+        // Preload property values once to avoid N+1 queries in the divergence check.
+        $propertyValues = $this->properties()->pluck('value', 'key');
+
+        $this->configs->each(function ($config) use (&$price, $propertyValues) {
             $configOption = $config->configOption;
 
             // Handle dynamic_slider configs (stored with slider_value, no configValue child)
@@ -228,7 +231,7 @@ class Service extends Model implements Auditable
                 if ($sliderValue !== null) {
                     // Read-time consistency check: warn if property diverges from stored slider_value
                     $propertyKey = $configOption->env_variable ?: $configOption->name;
-                    $propertyValue = $this->properties()->where('key', $propertyKey)->value('value');
+                    $propertyValue = $propertyValues->get($propertyKey);
                     if ($propertyValue !== null && abs((float) $propertyValue - (float) $sliderValue) > 1e-6) {
                         Log::warning('dynamic_slider value divergence detected', [
                             'service_id' => $this->id,

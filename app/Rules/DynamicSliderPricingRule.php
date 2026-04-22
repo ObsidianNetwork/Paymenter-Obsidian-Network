@@ -48,7 +48,7 @@ class DynamicSliderPricingRule implements ValidationRule
 
         // Check required keys per model
         foreach (self::REQUIRED_KEYS[$model] as $key) {
-            if (! isset($value[$key])) {
+            if (! array_key_exists($key, $value)) {
                 $fail("The pricing configuration is missing required key \"{$key}\" for model \"{$model}\".");
 
                 return;
@@ -90,7 +90,7 @@ class DynamicSliderPricingRule implements ValidationRule
             }
             $tierNum = (int) $index + 1;
 
-            if (! isset($tier['rate'])) {
+            if (! array_key_exists('rate', $tier)) {
                 $fail("Tier {$tierNum} is missing a required \"rate\" value.");
 
                 return;
