@@ -21,6 +21,14 @@ trait ValidatesDynamicSliderPricing
         $pricing = $data['metadata']['pricing'] ?? null;
 
         if ($pricing === null) {
+            Notification::make()
+                ->title('Invalid pricing configuration')
+                ->body('Dynamic slider options require a pricing configuration.')
+                ->danger()
+                ->send();
+
+            $this->halt();
+
             return;
         }
 

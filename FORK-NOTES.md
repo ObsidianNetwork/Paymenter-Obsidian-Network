@@ -101,7 +101,7 @@ returned the wrong amount.
 directive received — interpreted as implicit approval (dev environment, no
 production data to check).
 
-### Follow-ups (future plans)
+### Follow-ups
 
 - **dp-09:** Delete extension's `PricingCalculatorService` now that core handles pricing.
 - **dp-10:** Numeric-slider upgrade semantics (second cut of Patch 4).

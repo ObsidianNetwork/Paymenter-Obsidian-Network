@@ -9,6 +9,7 @@ use App\Models\ConfigOption;
 use App\Rules\DynamicSliderPricingRule;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\Checkbox;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
@@ -126,7 +127,7 @@ class ConfigOptionResource extends Resource
                             ->visible(fn (Get $get): bool => $get('type') === 'dynamic_slider')
                             ->schema([
                                 // Hidden field for server-side pricing validation
-                                \Filament\Forms\Components\Hidden::make('metadata.pricing')
+                                Hidden::make('metadata.pricing')
                                     ->rules([new DynamicSliderPricingRule()])
                                     ->dehydrated(true),
                                 Select::make('metadata.resource_type')

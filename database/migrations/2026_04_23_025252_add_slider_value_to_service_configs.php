@@ -26,6 +26,13 @@ return new class extends Migration
     {
         Schema::table('service_configs', function (Blueprint $table) {
             $table->dropColumn('slider_value');
+        });
+
+        // Remove dynamic_slider rows (config_value_id = NULL) before restoring NOT NULL constraint.
+        // These rows cannot be preserved without a valid config_value_id FK.
+        \Illuminate\Support\Facades\DB::table('service_configs')->whereNull('config_value_id')->delete();
+
+        Schema::table('service_configs', function (Blueprint $table) {
             $table->foreignId('config_value_id')->nullable(false)->change();
         });
     }

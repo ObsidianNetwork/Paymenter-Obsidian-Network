@@ -79,17 +79,19 @@ class MigrateSliderBasePrice extends Command
                     // Write plan-level base price
                     $plan->dynamic_slider_base_price = $sharedBase;
                     $plan->save();
-
-                    // Zero out per-slider base_price copies
-                    foreach ($sliders as $option) {
-                        $metadata = $option->metadata ?? [];
-                        $metadata['pricing']['base_price'] = 0;
-                        $option->metadata = $metadata;
-                        $option->save();
-                    }
                 }
 
                 $changed++;
+            }
+
+            // Zero out per-slider base_price copies once per product (not per plan)
+            if (! $isDryRun) {
+                foreach ($sliders as $option) {
+                    $metadata = $option->metadata ?? [];
+                    $metadata['pricing']['base_price'] = 0;
+                    $option->metadata = $metadata;
+                    $option->save();
+                }
             }
         }
 

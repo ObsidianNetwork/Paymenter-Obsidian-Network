@@ -229,7 +229,7 @@ class Service extends Model implements Auditable
                     // Read-time consistency check: warn if property diverges from stored slider_value
                     $propertyKey = $configOption->env_variable ?: $configOption->name;
                     $propertyValue = $this->properties()->where('key', $propertyKey)->value('value');
-                    if ($propertyValue !== null && (float) $propertyValue !== (float) $sliderValue) {
+                    if ($propertyValue !== null && abs((float) $propertyValue - (float) $sliderValue) > 1e-6) {
                         Log::warning('dynamic_slider value divergence detected', [
                             'service_id' => $this->id,
                             'config_option_id' => $configOption->id,
