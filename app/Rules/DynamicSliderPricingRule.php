@@ -29,8 +29,9 @@ class DynamicSliderPricingRule implements ValidationRule
 
         $model = $value['model'] ?? null;
 
-        // Reject unknown / missing model names
-        if (! array_key_exists($model, self::REQUIRED_KEYS)) {
+        // Reject unknown / missing / non-string model names. is_string() guards against array_key_exists()
+        // throwing TypeError when $model is e.g. an array (it accepts null/string/int only).
+        if (! is_string($model) || ! array_key_exists($model, self::REQUIRED_KEYS)) {
             $fail(
                 'Unknown dynamic_slider pricing model "' . var_export($model, true) . '". '
                 . 'Allowed values: ' . implode(', ', array_keys(self::REQUIRED_KEYS)) . '.'

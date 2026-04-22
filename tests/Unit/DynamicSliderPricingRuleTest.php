@@ -311,4 +311,18 @@ class DynamicSliderPricingRuleTest extends TestCase
         $this->assertStringContainsString('empty string', $errors[0]);
     }
 
+    public function test_non_string_model_fails_gracefully(): void
+    {
+        // array_key_exists() TypeErrors when handed a non-scalar key (e.g. array).
+        // The is_string() guard turns that crash into a clean validation error.
+        $errors = $this->runRule([
+            'model' => ['tiered'],
+            'tiers' => [
+                ['up_to' => 4, 'rate' => 1.0],
+            ],
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('Unknown', $errors[0]);
+    }
+
 }
