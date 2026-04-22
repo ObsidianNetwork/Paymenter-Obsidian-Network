@@ -16,6 +16,12 @@ class CreateConfigOption extends CreateRecord
     {
         $this->validateDynamicSliderPricing($data);
 
+        // Server-side enforcement: dynamic_slider options can never be upgradable
+        // (the UI also hides this toggle, but persisted form data could still carry it).
+        if (($data['type'] ?? null) === 'dynamic_slider') {
+            $data['upgradable'] = false;
+        }
+
         return $data;
     }
 }

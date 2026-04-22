@@ -38,6 +38,12 @@ class EditConfigOption extends EditRecord
     {
         $this->validateDynamicSliderPricing($data);
 
+        // Server-side enforcement: dynamic_slider options can never be upgradable
+        // (covers existing rows whose form data still carries upgradable=true).
+        if (($data['type'] ?? null) === 'dynamic_slider') {
+            $data['upgradable'] = false;
+        }
+
         return $data;
     }
 }

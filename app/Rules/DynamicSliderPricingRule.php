@@ -40,10 +40,17 @@ class DynamicSliderPricingRule implements ValidationRule
         }
 
         // Validate base_price is non-negative when present
-        if (isset($value['base_price']) && (float) $value['base_price'] < 0) {
-            $fail('The base price must be 0 or greater.');
+        if (array_key_exists('base_price', $value) && $value['base_price'] !== null && $value['base_price'] !== '') {
+            if (! is_numeric($value['base_price'])) {
+                $fail('The base price must be numeric.');
 
-            return;
+                return;
+            }
+            if ((float) $value['base_price'] < 0) {
+                $fail('The base price must be 0 or greater.');
+
+                return;
+            }
         }
 
         // Check required keys per model
@@ -65,7 +72,13 @@ class DynamicSliderPricingRule implements ValidationRule
 
     private function validateLinear(array $pricing, Closure $fail): void
     {
-        if ((float) ($pricing['rate_per_unit'] ?? 0) < 0) {
+        if (! is_numeric($pricing['rate_per_unit'])) {
+            $fail('The rate per unit must be numeric.');
+
+            return;
+        }
+
+        if ((float) $pricing['rate_per_unit'] < 0) {
             $fail('The rate per unit must be 0 or greater.');
         }
     }
@@ -81,6 +94,7 @@ class DynamicSliderPricingRule implements ValidationRule
         }
 
         $previousUpTo = -1;
+        $lastIndex    = array_key_last($tiers);
 
         foreach ($tiers as $index => $tier) {
             if (! is_array($tier)) {
@@ -96,36 +110,69 @@ class DynamicSliderPricingRule implements ValidationRule
                 return;
             }
 
+            if (! is_numeric($tier['rate'])) {
+                $fail("Tier {$tierNum} rate must be numeric.");
+
+                return;
+            }
+
             if ((float) $tier['rate'] < 0) {
                 $fail("Tier {$tierNum} rate must be 0 or greater.");
 
                 return;
             }
 
-            // up_to is optional (null/missing = unlimited), but when present must be strictly ascending
-            if (isset($tier['up_to']) && $tier['up_to'] !== null && $tier['up_to'] !== '') {
-                $upTo = (float) $tier['up_to'];
+            // up_to is optional (null/missing/'' = unlimited), but only valid as the LAST tier.
+            $hasUpTo = array_key_exists('up_to', $tier) && $tier['up_to'] !== null && $tier['up_to'] !== '';
 
-                if ($upTo <= $previousUpTo) {
-                    $fail("Tier {$tierNum} \"up_to\" value ({$upTo}) must be strictly greater than the previous tier's \"up_to\" value ({$previousUpTo}).");
+            if (! $hasUpTo) {
+                if ($index !== $lastIndex) {
+                    $fail("Tier {$tierNum} is unlimited (no \"up_to\"), so it must be the last tier.");
 
                     return;
                 }
-
-                $previousUpTo = $upTo;
+                continue;
             }
+
+            if (! is_numeric($tier['up_to'])) {
+                $fail("Tier {$tierNum} \"up_to\" must be numeric when provided.");
+
+                return;
+            }
+
+            $upTo = (float) $tier['up_to'];
+
+            if ($upTo <= $previousUpTo) {
+                $fail("Tier {$tierNum} \"up_to\" value ({$upTo}) must be strictly greater than the previous tier's \"up_to\" value ({$previousUpTo}).");
+
+                return;
+            }
+
+            $previousUpTo = $upTo;
         }
     }
 
     private function validateBaseAddon(array $pricing, Closure $fail): void
     {
-        if ((float) ($pricing['included_units'] ?? 0) < 0) {
+        if (! is_numeric($pricing['included_units'])) {
+            $fail('The included units must be numeric.');
+
+            return;
+        }
+
+        if ((float) $pricing['included_units'] < 0) {
             $fail('The included units must be 0 or greater.');
 
             return;
         }
 
-        if ((float) ($pricing['overage_rate'] ?? 0) < 0) {
+        if (! is_numeric($pricing['overage_rate'])) {
+            $fail('The overage rate must be numeric.');
+
+            return;
+        }
+
+        if ((float) $pricing['overage_rate'] < 0) {
             $fail('The overage rate must be 0 or greater.');
         }
     }

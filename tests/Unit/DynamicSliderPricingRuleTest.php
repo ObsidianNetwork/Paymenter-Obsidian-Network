@@ -184,4 +184,103 @@ class DynamicSliderPricingRuleTest extends TestCase
         ]);
         $this->assertNotEmpty($errors);
     }
+
+    // --- Numeric coercion guards (non-numeric values must be rejected) ---
+
+    public function test_non_numeric_base_price_fails(): void
+    {
+        $errors = $this->runRule([
+            'model'         => 'linear',
+            'base_price'    => 'abc',
+            'rate_per_unit' => 1.0,
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('numeric', $errors[0]);
+    }
+
+    public function test_non_numeric_rate_per_unit_fails(): void
+    {
+        $errors = $this->runRule([
+            'model'         => 'linear',
+            'rate_per_unit' => 'free',
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('numeric', $errors[0]);
+    }
+
+    public function test_non_numeric_tier_rate_fails(): void
+    {
+        $errors = $this->runRule([
+            'model' => 'tiered',
+            'tiers' => [
+                ['up_to' => 4, 'rate' => 'free'],
+            ],
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('numeric', $errors[0]);
+    }
+
+    public function test_non_numeric_tier_up_to_fails(): void
+    {
+        $errors = $this->runRule([
+            'model' => 'tiered',
+            'tiers' => [
+                ['up_to' => 'unlimited', 'rate' => 1.0],
+            ],
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('numeric', $errors[0]);
+    }
+
+    public function test_non_numeric_included_units_fails(): void
+    {
+        $errors = $this->runRule([
+            'model'          => 'base_addon',
+            'included_units' => 'four',
+            'overage_rate'   => 1.0,
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('numeric', $errors[0]);
+    }
+
+    public function test_non_numeric_overage_rate_fails(): void
+    {
+        $errors = $this->runRule([
+            'model'          => 'base_addon',
+            'included_units' => 4,
+            'overage_rate'   => 'free',
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('numeric', $errors[0]);
+    }
+
+    // --- Unlimited tier rules (only the last tier may omit up_to) ---
+
+    public function test_tiered_unlimited_middle_tier_fails(): void
+    {
+        $errors = $this->runRule([
+            'model' => 'tiered',
+            'tiers' => [
+                ['up_to' => 4,    'rate' => 3.0],
+                ['up_to' => null, 'rate' => 2.5],   // unlimited mid-list — should fail
+                ['up_to' => 16,   'rate' => 2.0],
+            ],
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('last tier', $errors[0]);
+    }
+
+    public function test_tiered_unlimited_last_tier_passes(): void
+    {
+        $errors = $this->runRule([
+            'model' => 'tiered',
+            'tiers' => [
+                ['up_to' => 4,    'rate' => 3.0],
+                ['up_to' => 16,   'rate' => 2.5],
+                ['up_to' => null, 'rate' => 2.0],
+            ],
+        ]);
+        $this->assertEmpty($errors);
+    }
+
 }
