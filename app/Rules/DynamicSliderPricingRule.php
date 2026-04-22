@@ -122,8 +122,17 @@ class DynamicSliderPricingRule implements ValidationRule
                 return;
             }
 
-            // up_to is optional (null/missing/'' = unlimited), but only valid as the LAST tier.
-            $hasUpTo = array_key_exists('up_to', $tier) && $tier['up_to'] !== null && $tier['up_to'] !== '';
+            // Empty-string up_to is rejected explicitly: the runtime (ConfigOption::calculateTieredDelta)
+            // only treats null/missing as unlimited, while (float) '' coerces to 0 — a divergence
+            // that would silently mis-price. Force the caller to use null or omit the key.
+            if (array_key_exists('up_to', $tier) && $tier['up_to'] === '') {
+                $fail("Tier {$tierNum} \"up_to\" cannot be an empty string; use null or omit the key for unlimited.");
+
+                return;
+            }
+
+            // up_to is optional (null/missing = unlimited), but only valid as the LAST tier.
+            $hasUpTo = array_key_exists('up_to', $tier) && $tier['up_to'] !== null;
 
             if (! $hasUpTo) {
                 if ($index !== $lastIndex) {

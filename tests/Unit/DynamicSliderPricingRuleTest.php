@@ -296,4 +296,19 @@ class DynamicSliderPricingRuleTest extends TestCase
         $this->assertStringContainsString('non-negative', $errors[0]);
     }
 
+    public function test_tiered_empty_string_up_to_fails(): void
+    {
+        // Empty string is not the same as null/missing — it would coerce to 0 in
+        // the runtime tier math. The validator must reject it explicitly.
+        $errors = $this->runRule([
+            'model' => 'tiered',
+            'tiers' => [
+                ['up_to' => '', 'rate' => 1.0],
+                ['up_to' => 16, 'rate' => 2.0],
+            ],
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('empty string', $errors[0]);
+    }
+
 }
