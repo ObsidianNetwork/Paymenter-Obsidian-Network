@@ -83,7 +83,12 @@ class DynamicSliderPricingRule implements ValidationRule
         $previousUpTo = -1;
 
         foreach ($tiers as $index => $tier) {
-            $tierNum = $index + 1;
+            if (! is_array($tier)) {
+                $fail('Each tier must be an array with "up_to" and "rate" keys.');
+
+                return;
+            }
+            $tierNum = (int) $index + 1;
 
             if (! isset($tier['rate'])) {
                 $fail("Tier {$tierNum} is missing a required \"rate\" value.");
