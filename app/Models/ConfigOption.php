@@ -59,9 +59,10 @@ class ConfigOption extends Model implements Auditable
         $model = $pricing['model'] ?? 'linear';
 
         $monthlyPrice = match ($model) {
+            'linear' => $this->calculateLinearPrice($value, $pricing),
             'tiered' => $this->calculateTieredPrice($value, $pricing),
             'base_addon' => $this->calculateBaseAddonPrice($value, $pricing),
-            default => $this->calculateLinearPrice($value, $pricing),
+            default => throw new \InvalidArgumentException("Unknown dynamic_slider pricing model: ".var_export($model, true)),
         };
 
         return $monthlyPrice * $this->getBillingMultiplier($billingPeriod, $billingUnit);
