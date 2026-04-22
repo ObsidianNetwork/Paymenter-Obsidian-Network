@@ -6,6 +6,7 @@ use App\Admin\Resources\ConfigOptionResource\Pages\CreateConfigOption;
 use App\Admin\Resources\ConfigOptionResource\Pages\EditConfigOption;
 use App\Admin\Resources\ConfigOptionResource\Pages\ListConfigOptions;
 use App\Models\ConfigOption;
+use App\Rules\DynamicSliderPricingRule;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\Repeater;
@@ -119,6 +120,10 @@ class ConfigOptionResource extends Resource
                         Tab::make('Dynamic Slider Settings')
                             ->visible(fn (Get $get): bool => $get('type') === 'dynamic_slider')
                             ->schema([
+                                // Hidden field for server-side pricing validation
+                                \Filament\Forms\Components\Hidden::make('metadata.pricing')
+                                    ->rules([new DynamicSliderPricingRule()])
+                                    ->dehydrated(true),
                                 Select::make('metadata.resource_type')
                                     ->label('Resource Type')
                                     ->options([
