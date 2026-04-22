@@ -3,12 +3,15 @@
 namespace App\Admin\Resources\ConfigOptionResource\Pages;
 
 use App\Admin\Resources\ConfigOptionResource;
+use App\Admin\Resources\ConfigOptionResource\Concerns\ValidatesDynamicSliderPricing;
 use App\Models\ConfigOption;
 use Filament\Actions\DeleteAction;
 use Filament\Resources\Pages\EditRecord;
 
 class EditConfigOption extends EditRecord
 {
+    use ValidatesDynamicSliderPricing;
+
     protected static string $resource = ConfigOptionResource::class;
 
     protected function getHeaderActions(): array
@@ -29,5 +32,12 @@ class EditConfigOption extends EditRecord
                     return redirect()->to(ConfigOptionResource::getUrl());
                 }),
         ];
+    }
+
+    protected function mutateFormDataBeforeSave(array $data): array
+    {
+        $this->validateDynamicSliderPricing($data);
+
+        return $data;
     }
 }
