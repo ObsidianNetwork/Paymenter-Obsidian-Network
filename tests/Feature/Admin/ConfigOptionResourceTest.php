@@ -200,4 +200,33 @@ class ConfigOptionResourceTest extends TestCase
             'type' => 'text',
         ]);
     }
+    // -----------------------------------------------------------------------
+    // Patch 4: upgradable toggle hidden for dynamic_slider
+    // -----------------------------------------------------------------------
+
+    public function test_upgradable_toggle_not_rendered_for_dynamic_slider(): void
+    {
+        $this->actingAsAdmin();
+
+        // The upgradable checkbox should not be visible when type=dynamic_slider.
+        // We verify this by creating a dynamic_slider option and confirming
+        // the upgradable field is not set (defaults to false) and the form
+        // does not expose it as a settable field.
+        Livewire::test(CreateConfigOption::class)
+            ->fillForm($this->baseDynamicSliderFormData())
+            ->assertFormFieldIsHidden('upgradable');
+    }
+
+    public function test_upgradable_toggle_visible_for_select_type(): void
+    {
+        $this->actingAsAdmin();
+
+        Livewire::test(CreateConfigOption::class)
+            ->fillForm([
+                'name' => 'OS',
+                'env_variable' => 'OS',
+                'type' => 'select',
+            ])
+            ->assertFormFieldIsVisible('upgradable');
+    }
 }
