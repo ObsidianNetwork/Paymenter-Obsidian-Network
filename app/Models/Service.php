@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use OwenIt\Auditing\Contracts\Auditable;
+use Illuminate\Support\Facades\Log;
 
 #[ObservedBy([ServiceObserver::class])]
 class Service extends Model implements Auditable
@@ -209,7 +210,44 @@ class Service extends Model implements Auditable
         // Calculate the price based on the plan and config options
         $price = $this->plan->price()->price;
 
+        // Add shared dynamic slider base price once per product (not per-slider).
+        $hasDynamicSlider = $this->configs->contains(
+            fn ($config) => $config->configOption?->type === 'dynamic_slider'
+        );
+        if ($hasDynamicSlider) {
+            $price += $this->plan->dynamicSliderBasePrice();
+        }
+
         $this->configs->each(function ($config) use (&$price) {
+            $configOption = $config->configOption;
+
+            // Handle dynamic_slider configs (stored with slider_value, no configValue child)
+            if ($configOption && $configOption->type === 'dynamic_slider') {
+                $sliderValue = $config->slider_value;
+
+                if ($sliderValue !== null) {
+                    // Read-time consistency check: warn if property diverges from stored slider_value
+                    $propertyKey = $configOption->env_variable ?: $configOption->name;
+                    $propertyValue = $this->properties()->where('key', $propertyKey)->value('value');
+                    if ($propertyValue !== null && (float) $propertyValue !== (float) $sliderValue) {
+                        Log::warning('dynamic_slider value divergence detected', [
+                            'service_id' => $this->id,
+                            'config_option_id' => $configOption->id,
+                            'property_value' => $propertyValue,
+                            'slider_value' => $sliderValue,
+                        ]);
+                    }
+
+                    $price += $configOption->calculateDynamicPriceDelta(
+                        (float) $sliderValue,
+                        $this->plan->billing_period,
+                        $this->plan->billing_unit
+                    );
+                }
+
+                return;
+            }
+
             $configValue = $config->configValue;
             if ($configValue) {
                 $price += $configValue->price(null, $this->plan->billing_period, $this->plan->billing_unit, $this->currency_code)->price;
