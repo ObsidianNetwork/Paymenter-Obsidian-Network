@@ -283,4 +283,17 @@ class DynamicSliderPricingRuleTest extends TestCase
         $this->assertEmpty($errors);
     }
 
+    public function test_tiered_negative_up_to_fails(): void
+    {
+        $errors = $this->runRule([
+            'model' => 'tiered',
+            'tiers' => [
+                ['up_to' => -5, 'rate' => 1.0],
+                ['up_to' => 16, 'rate' => 2.0],
+            ],
+        ]);
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString('non-negative', $errors[0]);
+    }
+
 }

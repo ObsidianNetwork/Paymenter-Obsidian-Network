@@ -142,6 +142,12 @@ class DynamicSliderPricingRule implements ValidationRule
 
             $upTo = (float) $tier['up_to'];
 
+            if ($upTo < 0) {
+                $fail("Tier {$tierNum} \"up_to\" value ({$upTo}) must be non-negative.");
+
+                return;
+            }
+
             if ($upTo <= $previousUpTo) {
                 $fail("Tier {$tierNum} \"up_to\" value ({$upTo}) must be strictly greater than the previous tier's \"up_to\" value ({$previousUpTo}).");
 
