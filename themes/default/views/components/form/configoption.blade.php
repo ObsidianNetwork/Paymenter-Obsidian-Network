@@ -118,15 +118,24 @@
                 billingUnit: '{{ $billingUnit }}',
                 billingSuffix: '{{ $billingSuffix }}',
                 currencySymbol: '{{ $currencySymbol }}',
+                pricingEndpoint: @js($config->getMetadata('pricing_endpoint')),
                 progressPercent: '0%',
+                pricingState: 'idle',
+                pricingError: '',
+                displayPrice: null,
 
                 init() {
                     if (!this.value || this.value < this.min) {
                         this.value = this.defaultValue;
                     }
+
+                    this.displayPrice = this.calculatePrice();
                     this.updateProgress();
-                    // Watch for value changes and update progress bar (entangled value auto-syncs to Livewire)
-                    $watch('value', Alpine.debounce(() => this.updateProgress(), 300));
+
+                    $watch('value', Alpine.debounce(() => {
+                        this.updateProgress();
+                        this.refreshPricingPreview();
+                    }, 300));
                 },
 
                 get numericValue() {
@@ -140,7 +149,7 @@
                 },
 
                 get formattedPrice() {
-                    return `${this.currencySymbol}${this.calculatePrice()} ${this.billingSuffix}`.trim();
+                    return `${this.currencySymbol}${this.displayPrice ?? this.calculatePrice()} ${this.billingSuffix}`.trim();
                 },
 
                 updateProgress() {
@@ -224,6 +233,50 @@
                     }
                 },
 
+                async refreshPricingPreview() {
+                    this.pricingState = 'loading';
+                    this.pricingError = '';
+
+                    try {
+                        this.displayPrice = await this.fetchPricingPreview();
+                        this.pricingState = 'idle';
+                    } catch (error) {
+                        this.pricingState = 'error';
+                        this.pricingError = error?.message || 'Pricing temporarily unavailable';
+                    }
+                },
+
+                async fetchPricingPreview() {
+                    if (!this.pricingEndpoint) {
+                        return Promise.resolve(this.calculatePrice());
+                    }
+
+                    const response = await fetch(`${this.pricingEndpoint}?value=${encodeURIComponent(this.numericValue)}`, {
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                    });
+
+                    const responseJson = await response.json().catch(() => ({}));
+
+                    if (!response.ok) {
+                        if (response.status >= 400 && response.status < 500) {
+                            throw new Error(responseJson.message || 'Pricing unavailable');
+                        }
+
+                        throw new Error('Pricing temporarily unavailable');
+                    }
+
+                    const previewPrice = responseJson.formatted_price ?? responseJson.price ?? responseJson.data?.formatted_price ?? responseJson.data?.price;
+
+                    if (previewPrice === undefined || previewPrice === null || previewPrice === '') {
+                        throw new Error('Pricing unavailable');
+                    }
+
+                    return String(previewPrice).replace(this.currencySymbol, '').trim();
+                },
+
                 handleInput() {
                     this.updateProgress();
                 }
@@ -275,9 +328,12 @@
                     </div>
                     @if($showPriceTag ?? true)
                         <span class="text-sm font-semibold text-primary">
-                            <span x-text="currencySymbol + calculatePrice()"></span>
+                            <span x-text="currencySymbol + (displayPrice ?? calculatePrice())"></span>
                             <span class="text-xs text-primary-500">{{ $billingSuffix }}</span>
                         </span>
+                        <span x-show="pricingState === 'loading'" class="sr-only" aria-live="polite">Calculating price…</span>
+                        <span x-show="pricingState === 'error'" class="text-red-500 text-sm" x-text="pricingError"></span>
+                        <span x-show="pricingState === 'error'" class="sr-only" aria-live="assertive" x-text="pricingError"></span>
                     @endif
                 </div>
             </div>
