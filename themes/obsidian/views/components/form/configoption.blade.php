@@ -123,9 +123,10 @@
                 pricingState: 'idle',
                 pricingError: '',
                 displayPrice: null,
+                _previewRequestId: 0,
 
                 init() {
-                    if (!this.value || this.value < this.min) {
+                    if (this.value == null || this.value < this.min) {
                         this.value = this.defaultValue;
                     }
 
@@ -234,14 +235,20 @@
                 },
 
                 async refreshPricingPreview() {
+                    this._previewRequestId++;
+                    const requestId = this._previewRequestId;
                     this.pricingState = 'loading';
                     this.pricingError = '';
 
                     try {
-                        this.displayPrice = await this.fetchPricingPreview();
+                        const price = await this.fetchPricingPreview();
+                        if (requestId !== this._previewRequestId) return;
+                        this.displayPrice = price;
                         this.pricingState = 'idle';
                     } catch (error) {
+                        if (requestId !== this._previewRequestId) return;
                         this.pricingState = 'error';
+                        this.displayPrice = null;
                         this.pricingError = error?.message || 'Pricing temporarily unavailable';
                     }
                 },
@@ -313,13 +320,13 @@
                         :aria-valuenow="value"
                         :aria-valuetext="formattedValue"
                         aria-labelledby="slider-label-{{ $config->id }}"
-                        aria-describedby="slider-price-{{ $config->id }}"
+                        aria-describedby="slider-price-{{ $config->id }} slider-hint-{{ $config->id }}"
                         name="{{ $name }}"
                         id="{{ $name }}"
                         aria-label="{{ $config->label ?? $config->name }}" />
                 </div>
-                <output id="slider-price-{{ $config->id }}" role="status" aria-live="polite" aria-atomic="true" class="sr-only" x-text="formattedPrice"></output>
-                <span class="sr-only">Use arrow keys to adjust, Page Up/Down for larger steps, Home and End for minimum and maximum.</span>
+                <output id="slider-price-{{ $config->id }}" role="status" aria-live="polite" aria-atomic="true" class="sr-only" x-text="formattedPrice" wire:ignore></output>
+                <span id="slider-hint-{{ $config->id }}" class="sr-only" wire:ignore>Use arrow keys to adjust, Page Up/Down for larger steps, Home and End for minimum and maximum.</span>
                 <!-- Value and Price Display -->
                 <div class="flex justify-between items-center mt-2 px-2.5">
                     <div class="flex items-center gap-2">
@@ -331,30 +338,31 @@
                             <span x-text="currencySymbol + (displayPrice ?? calculatePrice())"></span>
                             <span class="text-xs text-primary-500">{{ $billingSuffix }}</span>
                         </span>
-                        <span x-show="pricingState === 'loading'" class="sr-only" aria-live="polite">Calculating price…</span>
-                        <span x-show="pricingState === 'error'" class="text-red-500 text-sm" x-text="pricingError"></span>
-                        <span x-show="pricingState === 'error'" class="sr-only" aria-live="assertive" x-text="pricingError"></span>
+                        <span x-show="pricingState === 'loading'" class="sr-only" aria-live="polite" wire:ignore>Calculating price…</span>
+                        <span x-show="pricingState === 'error'" class="text-red-500 text-sm" x-text="pricingError" wire:ignore></span>
+                        <span x-show="pricingState === 'error'" class="sr-only" aria-live="assertive" x-text="pricingError" wire:ignore></span>
                     @endif
                 </div>
                 <style>
                     /* Expand touch target without changing visual size (WCAG 2.5.8) */
+                    /* transparent border extends hit area to ~44px; content box stays 20px */
                     input[type="range"]::-webkit-slider-thumb {
-                        position: relative;
-                    }
-
-                    input[type="range"]::-webkit-slider-thumb::before {
-                        content: '';
-                        position: absolute;
-                        top: 50%;
-                        left: 50%;
-                        transform: translate(-50%, -50%);
-                        min-width: 44px;
-                        min-height: 44px;
+                        -webkit-appearance: none;
+                        width: 20px;
+                        height: 20px;
+                        border: 12px solid transparent;
+                        background-clip: content-box;
+                        border-radius: 50%;
+                        cursor: pointer;
                     }
 
                     input[type="range"]::-moz-range-thumb {
                         width: 20px;
                         height: 20px;
+                        border: 12px solid transparent;
+                        background-clip: content-box;
+                        box-sizing: content-box;
+                        border-radius: 50%;
                         cursor: pointer;
                     }
 

@@ -16,6 +16,7 @@
 - Both are Alpine-driven and outside Livewire's morph scope
 
 ### Keyboard Contract
+
 | Key | Action |
 |-----|--------|
 | Arrow Up/Right | +1 step |
