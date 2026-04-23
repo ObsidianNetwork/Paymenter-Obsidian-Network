@@ -336,6 +336,34 @@
                         <span x-show="pricingState === 'error'" class="sr-only" aria-live="assertive" x-text="pricingError"></span>
                     @endif
                 </div>
+                <style>
+                    /* Expand touch target without changing visual size (WCAG 2.5.8) */
+                    input[type="range"]::-webkit-slider-thumb {
+                        position: relative;
+                    }
+
+                    input[type="range"]::-webkit-slider-thumb::before {
+                        content: '';
+                        position: absolute;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
+                        min-width: 44px;
+                        min-height: 44px;
+                    }
+
+                    input[type="range"]::-moz-range-thumb {
+                        width: 20px;
+                        height: 20px;
+                        cursor: pointer;
+                    }
+
+                    @media (max-width: 320px) {
+                        input[type="range"] {
+                            max-width: 100%;
+                        }
+                    }
+                </style>
             </div>
         @break
 
