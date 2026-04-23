@@ -126,12 +126,13 @@
                 _previewRequestId: 0,
 
                 init() {
-                    if (this.value == null || this.value < this.min) {
+                    if (this.value == null || this.value < this.min || this.value > this.max) {
                         this.value = this.defaultValue;
                     }
 
                     this.displayPrice = this.calculatePrice();
                     this.updateProgress();
+                    this.refreshPricingPreview();
 
                     $watch('value', Alpine.debounce(() => {
                         this.updateProgress();
@@ -235,6 +236,13 @@
                 },
 
                 async refreshPricingPreview() {
+                    if (!this.pricingEndpoint) {
+                        this.pricingError = '';
+                        this.pricingState = 'idle';
+                        this.displayPrice = this.calculatePrice();
+                        return;
+                    }
+
                     this._previewRequestId++;
                     const requestId = this._previewRequestId;
                     this.pricingState = 'loading';
