@@ -238,7 +238,7 @@
                         before:[mask-image:_linear-gradient(to_right,theme(colors.white),theme(colors.white)_var(--progress),transparent_var(--progress))]
                     " aria-hidden="true"></div>
                     <input class="
-                        relative appearance-none cursor-pointer w-full bg-transparent focus:outline-none transition-all duration-300 ease-out
+                        relative appearance-none cursor-pointer w-full bg-transparent focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary transition-all duration-300 ease-out
                         [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:w-5
                         [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow-none
                         [&::-webkit-slider-thumb]:focus:ring-0 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:w-5
@@ -250,6 +250,10 @@
                         :step="step"
                         x-model="value"
                         @input="handleInput()"
+                        x-on:keydown.page-up.prevent="value = Math.min(max, numericValue + step * 10)"
+                        x-on:keydown.page-down.prevent="value = Math.max(min, numericValue - step * 10)"
+                        x-on:keydown.home.prevent="value = min"
+                        x-on:keydown.end.prevent="value = max"
                         role="slider"
                         aria-valuemin="{{ $config->getMetadata('min', 0) }}"
                         aria-valuemax="{{ $config->getMetadata('max', 100) }}"
