@@ -258,12 +258,16 @@
                         return Promise.resolve(this.calculatePrice());
                     }
 
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
                     const response = await fetch(`${this.pricingEndpoint}?value=${encodeURIComponent(this.numericValue)}`, {
+                        signal: controller.signal,
                         headers: {
                             'Accept': 'application/json',
                             'X-Requested-With': 'XMLHttpRequest',
                         },
-                    });
+                    }).finally(() => clearTimeout(timeoutId));
 
                     const responseJson = await response.json().catch(() => ({}));
 
@@ -303,7 +307,7 @@
                         [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow-none
                         [&::-webkit-slider-thumb]:focus:ring-0 [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:w-5
                         [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-base [&::-moz-range-thumb]:border-none
-                        [&::-moz-range-thumb]:shadow-none [&::-moz-range-thumb]:focus:ring-0
+                        [&::-moz-range-thumb]:shadow-none [&::-moz-range-thumb]:focus:ring-0 dynamic-slider-input
                     " type="range"
                         :min="min"
                         :max="max"
@@ -315,15 +319,14 @@
                         x-on:keydown.home.prevent="value = min"
                         x-on:keydown.end.prevent="value = max"
                         role="slider"
-                        aria-valuemin="{{ $config->getMetadata('min', 0) }}"
-                        aria-valuemax="{{ $config->getMetadata('max', 100) }}"
+                        aria-valuemin="{{ $config->getMetadata('min', $min) }}"
+                        aria-valuemax="{{ $config->getMetadata('max', $max) }}"
                         :aria-valuenow="value"
                         :aria-valuetext="formattedValue"
                         aria-labelledby="slider-label-{{ $config->id }}"
                         aria-describedby="slider-price-{{ $config->id }} slider-hint-{{ $config->id }}"
                         name="{{ $name }}"
-                        id="{{ $name }}"
-                        aria-label="{{ $config->label ?? $config->name }}" />
+                        id="{{ $name }}" />
                 </div>
                 <output id="slider-price-{{ $config->id }}" role="status" aria-live="polite" aria-atomic="true" class="sr-only" x-text="formattedPrice" wire:ignore></output>
                 <span id="slider-hint-{{ $config->id }}" class="sr-only" wire:ignore>Use arrow keys to adjust, Page Up/Down for larger steps, Home and End for minimum and maximum.</span>
@@ -346,7 +349,8 @@
                 <style>
                     /* Expand touch target without changing visual size (WCAG 2.5.8) */
                     /* transparent border extends hit area to ~44px; content box stays 20px */
-                    input[type="range"]::-webkit-slider-thumb {
+                    /* Scoped to .dynamic-slider-input to avoid affecting other range inputs */
+                    input.dynamic-slider-input::-webkit-slider-thumb {
                         -webkit-appearance: none;
                         width: 20px;
                         height: 20px;
@@ -356,7 +360,7 @@
                         cursor: pointer;
                     }
 
-                    input[type="range"]::-moz-range-thumb {
+                    input.dynamic-slider-input::-moz-range-thumb {
                         width: 20px;
                         height: 20px;
                         border: 12px solid transparent;
@@ -367,7 +371,7 @@
                     }
 
                     @media (max-width: 320px) {
-                        input[type="range"] {
+                        input.dynamic-slider-input {
                             max-width: 100%;
                         }
                     }
