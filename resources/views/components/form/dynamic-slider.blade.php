@@ -6,7 +6,7 @@
     $default = $metadata['default'] ?? $min;
     $unit = $metadata['unit'] ?? 'MB';
     $displayUnit = $metadata['display_unit'] ?? 'GB';
-    $displayDivisor = $metadata['display_divisor'] ?? 1024;
+    $displayDivisor = max(1, (int) ($metadata['display_divisor'] ?? 1024));
     $resourceType = $metadata['resource_type'] ?? 'custom';
     $pricing = $metadata['pricing'] ?? [];
     $pricingModel = $pricing['model'] ?? 'linear';
