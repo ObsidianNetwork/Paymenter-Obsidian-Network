@@ -144,3 +144,5 @@ return [
         ],
     ],
 ];
+
+// A3-validate: one-theme-only change, expect CR theme-divergence warning
