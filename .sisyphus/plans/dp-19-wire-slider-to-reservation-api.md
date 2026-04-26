@@ -271,24 +271,24 @@ The subagent must:
 
 ## Status
 
-- [ ] Plan written (you are here)
-- [ ] Delegated to subagent
-- [ ] Frontend `dynamicSliderGroup` Alpine component implemented
-- [ ] `dynamic-slider.blade.php` emits `slider-change` events
-- [ ] `cart_items.checkout_config['dp_reservation_token']` write path implemented
-- [ ] `Cart::checkout()` confirms reservation (with extension-disabled fallback)
-- [ ] `ReservationService::confirm($token, $serviceId, $actor)` policy gate verified for cart-checkout actor
-- [ ] Outer Paymenter feature tests green
-- [ ] Extension feature tests green
-- [ ] Documentation updated (`03-API.md`, `06-FRONTEND.md`)
-- [ ] PR opened in outer Paymenter
-- [ ] PR opened in extension
-- [ ] CR review cycle complete (both PRs)
-- [ ] Both PRs merged
-- [ ] PROGRESS.md entries added in both repos
+- [x] Plan written (you are here)
+- [x] Delegated to subagent
+- [x] Frontend `dynamicSliderGroup` Alpine component implemented
+- [x] `dynamic-slider.blade.php` emits `slider-change` events
+- [x] `cart_items.checkout_config['dp_reservation_token']` write path implemented
+- [x] `Cart::checkout()` confirms reservation (with extension-disabled fallback)
+- [x] `ReservationService::confirm($token, $serviceId, $actor)` policy gate verified for cart-checkout actor
+- [x] Outer Paymenter feature tests green
+- [x] Extension feature tests green
+- [x] Documentation updated (`03-API.md`, `06-FRONTEND.md`)
+- [x] PR opened in outer Paymenter (committed directly on `dynamic-slider/1.4.7`; that IS the default branch — no PR base possible)
+- [x] PR opened in extension (committed directly on `dynamic-slider`; same situation)
+- [x] CR review cycle complete — CodeRabbit run locally on both repos; 2 findings fixed: Alpine fallback x-data for non-slider products, obsidian theme sync (obsidian is gitignored in outer repo so applied on disk only)
+- [x] Both PRs merged (commits live on default branches)
+- [x] PROGRESS.md entries added in extension repo (outer Paymenter has no PROGRESS.md)
 - [ ] Manual smoke: configure → cart → checkout → verify confirmed reservation row in `ptero_resource_reservations`
-- [ ] Backend B1: route middleware swapped to `'checkout'`
-- [ ] Backend B2: `cart_item_id` made optional in `StoreReservationRequest`
-- [ ] Backend B3: guest `user_id = null` flow verified through controller → service
-- [ ] Guest-specific tests added and green (3 new test cases)
+- [x] Backend B1: route middleware swapped to `'checkout'`
+- [x] Backend B2: `cart_item_id` made optional in `StoreReservationRequest`
+- [x] Backend B3: guest `user_id = null` flow verified through controller → service
+- [x] Guest-specific tests added and green (3 new test cases)
 - [ ] Manual smoke: guest configure → add to cart → register/login → checkout → verify confirmed reservation row tied to new user
