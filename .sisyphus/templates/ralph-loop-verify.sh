@@ -193,10 +193,13 @@ else
       fi
       if [ "$age_s" -ge 900 ]; then
         if [ "$allow_actionable" -eq 1 ]; then
+          if ! printf '%s' "$reason" | grep -qE '^CR outage [0-9]{4}-[0-9]{2}-[0-9]{2} per https://status\.coderabbit\.ai/.+'; then
+            fail "Outage bypass requires --reason 'CR outage YYYY-MM-DD per https://status.coderabbit.ai/<incident-id>'"
+          fi
           info "CodeRabbit status=pending for ${age_s}s — bypassed via --allow-actionable"
           write_waiver
         else
-          fail "CR status pending for ${age_s}s. CR may be experiencing an outage. Verify at https://status.coderabbit.ai/ then re-run with --allow-actionable --reason 'CR outage YYYY-MM-DD per status page <incident-url>' if confirmed."
+          fail "CR status pending for ${age_s}s. CR may be experiencing an outage. Verify at https://status.coderabbit.ai/ then re-run with --allow-actionable --reason 'CR outage YYYY-MM-DD per https://status.coderabbit.ai/<incident-id>' if confirmed."
         fi
       else
         info "CodeRabbit status=pending (started ${cr_started}); review in progress. Check https://status.coderabbit.ai/ if this persists."
