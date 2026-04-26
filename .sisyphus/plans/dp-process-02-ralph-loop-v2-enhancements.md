@@ -210,8 +210,8 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
 
 ### Phase A.1 — ObsidianNetwork repo
 
-- [ ] Branch `coderabbit-config-v3` off `ObsidianNetwork/Paymenter-Obsidian-Network:master`.
-- [ ] Replace `.coderabbit.yaml` with §Canonical-config-A below. Key changes vs v2:
+- [x] Branch `coderabbit-config-v3` off `ObsidianNetwork/Paymenter-Obsidian-Network:master`.
+- [x] Replace `.coderabbit.yaml` with §Canonical-config-A below. Key changes vs v2:
   - Add `inheritance: false` at root.
   - Add `tone_instructions` (250 chars, scope-respecting reviewer personality).
   - Change `reviews.profile: "assertive"` → `"chill"`.
@@ -219,17 +219,18 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
   - Add `reviews.path_instructions` (8 entries — themes, extensions, migrations, skeleton, plus 4 for `.sisyphus/**`).
   - Add `reviews.path_filters` (4 entries to skip non-reviewable paths).
   - Add explanatory YAML comment near `knowledge_base.learnings.scope: auto`.
-- [ ] Open PR (`chore(ci): tune .coderabbit.yaml — tone, paths (incl. .sisyphus/), chill profile, no-inheritance, auto_pause=10`). Confirm CR auto-reviews itself, `CodeRabbit` status = pass.
-- [ ] **Validation step (motivated by zeroclaw#1752)**: post `@coderabbitai configuration` as a comment on this PR. Verify CR's reply lists the values we shipped (no parse errors, no silent fall-back to defaults). If CR says it's using defaults: fix YAML, re-PR.
-- [ ] Merge per gate.
+- [x] Open PR (`chore(ci): tune .coderabbit.yaml — tone, paths (incl. .sisyphus/), chill profile, no-inheritance, auto_pause=10`). Confirm CR auto-reviews itself, `CodeRabbit` status = pass.
+- [x] **Validation step (motivated by zeroclaw#1752)**: post `@coderabbitai configuration` as a comment on this PR. Verify CR's reply lists the values we shipped (no parse errors, no silent fall-back to defaults). If CR says it's using defaults: fix YAML, re-PR.
+- [x] Merge per gate. (PR #9 → ea5ebe28)
 
 ### Phase A.2 — Extension repo
 
-- [ ] Repeat for `Jordanmuss99/dynamic-pterodactyl` using §Canonical-config-B (paths drop the `extensions/Others/DynamicPterodactyl/` prefix and add `dp-.*` to base_branches).
+- [x] Repeat for `Jordanmuss99/dynamic-pterodactyl` using §Canonical-config-B (paths drop the `extensions/Others/DynamicPterodactyl/` prefix and add `dp-.*` to base_branches). (PR #14 → c9270bad; tone_instructions trimmed to 235 chars per schema limit)
 
 ### Phase A.3 — Validation
 
 - [ ] Open one throwaway PR against `dynamic-slider/1.4.7` on ObsidianNetwork that touches only one of the two themes. Confirm CR mentions the theme-divergence path instruction. Close PR without merging.
+  - FINDING (PR #10): CR read 'Organization UI' config — base branch `dynamic-slider/1.4.7` had no `.coderabbit.yaml`. Propagated config via PR #11 (37374abf → squashed). PR #12 open, pending CR review (rate limit; @coderabbitai review requested).
 - [ ] Open one throwaway PR that touches a `.sisyphus/plans/*.md` file. Confirm CR's review references the plan-instructions path rule (treats it as plan content, not code). Close PR.
 
 **Exit criteria**: both repos shipped; both validation PRs confirm path_instructions fired; `@coderabbitai configuration` validates parse on both.
@@ -482,9 +483,9 @@ Identical to config A except:
 
 - [x] Phase A0: bootstrap `.sisyphus/` to ObsidianNetwork master (PR + audit + .gitignore)
 - [x] Phase C: status-page escalation in verify.sh + outage bypass rule in contract (PR #8 merged 28101ff1)
-- [ ] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR)
-- [ ] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR)
-- [ ] Phase A.3: theme-divergence + plan-path validation PRs (throwaway, no merge)
+- [x] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR #9 merged ea5ebe28)
+- [x] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR #14 merged c9270bad; tone_instructions 235 chars)
+- [ ] Phase A.3: theme-divergence + plan-path validation PRs (throwaway, no merge) — in progress; PR #12 pending CR review; config propagation PR #11 merged
 - [ ] Phase D: `cr` CLI installed + CR Skills (`code-review`, `autofix`) discoverable + contract updated (PR)
 - [ ] Phase B: `/init-deep` run + enforceable rules in CLAUDE.md / AGENTS.md (PRs per repo)
 
