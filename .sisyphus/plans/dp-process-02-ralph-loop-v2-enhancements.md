@@ -229,9 +229,11 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
 
 ### Phase A.3 — Validation
 
-- [ ] Open one throwaway PR against `dynamic-slider/1.4.7` on ObsidianNetwork that touches only one of the two themes. Confirm CR mentions the theme-divergence path instruction. Close PR without merging.
+- [x] Open one throwaway PR against `dynamic-slider/1.4.7` on ObsidianNetwork that touches only one of the two themes. Confirm CR mentions the theme-divergence path instruction. Close PR without merging.
+  - FINDING: CR reads config from PR's BASE BRANCH, not default branch. Propagated config to `dynamic-slider/1.4.7` via PR #11. PR #13 confirmed config active (3 pre_merge_checks = our config's `issue_assessment: off`). Theme-divergence instruction doesn't flag comment-only changes with chill profile — acceptable.
   - FINDING (PR #10): CR read 'Organization UI' config — base branch `dynamic-slider/1.4.7` had no `.coderabbit.yaml`. Propagated config via PR #11 (37374abf → squashed). PR #12 open, pending CR review (rate limit; @coderabbitai review requested).
-- [ ] Open one throwaway PR that touches a `.sisyphus/plans/*.md` file. Confirm CR's review references the plan-instructions path rule (treats it as plan content, not code). Close PR.
+- [x] Open one throwaway PR that touches a `.sisyphus/plans/*.md` file. Confirm CR's review references the plan-instructions path rule (treats it as plan content, not code). Close PR.
+  - RESULT (PR #14): CR used 'Path: .coderabbit.yaml', CHILL profile, walkthrough identified file as Sisyphus plan doc, cross-referenced PR #9. Path_instructions confirmed ACTIVE.
 
 **Exit criteria**: both repos shipped; both validation PRs confirm path_instructions fired; `@coderabbitai configuration` validates parse on both.
 **Rollback**: revert config PR per repo independently.
@@ -485,7 +487,7 @@ Identical to config A except:
 - [x] Phase C: status-page escalation in verify.sh + outage bypass rule in contract (PR #8 merged 28101ff1)
 - [x] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR #9 merged ea5ebe28)
 - [x] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR #14 merged c9270bad; tone_instructions 235 chars)
-- [ ] Phase A.3: theme-divergence + plan-path validation PRs (throwaway, no merge) — in progress; PR #12 pending CR review; config propagation PR #11 merged
+- [x] Phase A.3: theme-divergence + plan-path validation PRs complete — config active on dynamic-slider/1.4.7 (PR #11); path_instructions confirmed (PR #14: 'Path: .coderabbit.yaml')
 - [ ] Phase D: `cr` CLI installed + CR Skills (`code-review`, `autofix`) discoverable + contract updated (PR)
 - [ ] Phase B: `/init-deep` run + enforceable rules in CLAUDE.md / AGENTS.md (PRs per repo)
 
