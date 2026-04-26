@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# Explicit no-inheritance (default is OFF; explicit here prevents future surprise org-UI bleed).
+inheritance: false
+
+language: en-US
+
+# 250-char reviewer-personality field. Cuts rejection-reasoning rounds.
+tone_instructions: "Respect PR scope boundaries. Out-of-scope findings should be flagged as deferred (suggest the matching dp-NN plan in .sisyphus/plans/), not demanded. The author may reject findings with a 3-part rationale (claim → why-wrong → intended-design)."
+
+reviews:
+  profile: chill            # was: assertive. Community + Martian benchmark favor chill for default.
+  commit_status: true
+  fail_commit_status: true
+  request_changes_workflow: true
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 10   # was: 0 (over-correction). 10 = 2x CR default; @coderabbitai review escape if hit.
+    drafts: false
+    base_branches:
+      - "dynamic-slider.*"
+    ignore_title_keywords:
+      - "WIP"
+      - "[skip review]"
+    ignore_usernames: []
+
+  path_filters:
+    - "!**/storage/logs/**"
+    - "!bootstrap/cache/**"
+    - "!.sisyphus/run-continuation/**"
+
+  path_instructions:
+    # --- Code paths ---
+    - path: "themes/{default,obsidian}/**"
+      instructions: |
+        Both themes MUST stay in sync. If only one theme is modified, flag the divergence.
+        Shared UI should live in resources/views/components/ and be @included from each theme.
+    - path: "extensions/Others/DynamicPterodactyl/**"
+      instructions: |
+        This is a nested git repo with its own .coderabbit.yaml.
+        Do not reimplement server provisioning (delegate to extensions/Servers/Pterodactyl/).
+        Do not cache Pterodactyl API responses (settled decision per extension's DECISIONS.md).
+        Pricing logic lives in Paymenter core, not in this extension's admin.
+    - path: "extensions/Others/DynamicPterodactyl/skeleton/**"
+      instructions: |
+        Stale 2025-11-28 pre-implementation scaffold. Any change here is almost always a mistake;
+        demand justification in the commit message before approving.
+    - path: "**/database/migrations/**"
+      instructions: |
+        Destructive operations (drop/truncate) in up() must have a corresponding restoration
+        in down(). Flag any migration that violates this.
+
+    # --- .sisyphus/ tree (committed in dp-process-02 Phase A0) ---
+    - path: ".sisyphus/plans/**"
+      instructions: |
+        These are dp-NN plan documents. When this PR's branch matches a plan name
+        (e.g., dp-core-02-blade-architecture), read the matching plan. The plan's
+        Scope, Out-of-scope, and Status sections define what is acceptable for this PR.
+        Findings outside that scope should be flagged as deferred to the appropriate
+        dp-NN, not demanded as fixes.
+    - path: ".sisyphus/templates/**"
+      instructions: |
+        These are the /ralph-loop process contracts (ralph-loop-contract.md and
+        ralph-loop-verify.sh). Treat changes here as governance changes — apply
+        assertive review to detect unintended weakening of merge-gate rules.
+        Cross-reference .sisyphus/notepads/dp-process-audit/incident-2026-04-24.md
+        before approving any rule removal.
+    - path: ".sisyphus/notepads/**"
+      instructions: |
+        Decision notepads and incident logs. Read for historical context when
+        relevant to changes elsewhere in the PR. Do not treat as code; do not
+        suggest refactors. Out-of-scope for review except for typo / clarity nits.
+    - path: ".sisyphus/completed/**"
+      instructions: |
+        Archived boulder JSON state from completed plans. Read-only history;
+        out-of-scope for review.
+
+  pre_merge_checks:
+    title:
+      mode: "warning"
+      requirements: |
+        Title should follow Conventional Commits: type(scope)?: subject
+        where type in (feat|fix|chore|docs|refactor|test|build|ci|perf).
+        Include dp-NN identifier when applicable.
+    description:
+      mode: "warning"
+    issue_assessment:
+      mode: "off"
+
+knowledge_base:
+  # learnings.scope = auto correctly isolates public-repo learnings (this is a public fork).
+  # Do NOT change to "global" without coordinating with the extension repo's config.
+  learnings:
+    scope: auto
