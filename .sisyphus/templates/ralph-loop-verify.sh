@@ -177,6 +177,34 @@ else
   case "$cr_status" in
     pass|success|SUCCESS|PASS)
       info "CodeRabbit status=$cr_status" ;;
+    pending|PENDING)
+      # Compute how long CR has been pending to distinguish review-in-progress from outage.
+      cr_started=$(gh pr checks "$pr" $repo_arg --json name,startedAt 2>/dev/null \
+        | jq -r '.[] | select(.name=="CodeRabbit") | .startedAt' 2>/dev/null || echo "")
+      # Fall back to PR creation time if startedAt is null/epoch (jq -r prints literal "null" for JSON null; gh returns 0001-01-01 when not yet started)
+      if [ -z "$cr_started" ] || [ "$cr_started" = "null" ] || [ "$cr_started" = "0001-01-01T00:00:00Z" ]; then
+        cr_started=$(gh pr view "$pr" $repo_arg --json createdAt --jq '.createdAt' 2>/dev/null || echo "")
+      fi
+      age_s=0
+      if [ -n "$cr_started" ]; then
+        started_epoch=$(date -u -d "$cr_started" +%s 2>/dev/null || echo 0)
+        now_epoch=$(date -u +%s)
+        age_s=$(( now_epoch - started_epoch ))
+      fi
+      if [ "$age_s" -ge 900 ]; then
+        if [ "$allow_actionable" -eq 1 ]; then
+          if ! printf '%s' "$reason" | grep -qE '^CR outage [0-9]{4}-[0-9]{2}-[0-9]{2} per https://status\.coderabbit\.ai/.+'; then
+            fail "Outage bypass requires --reason 'CR outage YYYY-MM-DD per https://status.coderabbit.ai/<incident-id>'"
+          fi
+          info "CodeRabbit status=pending for ${age_s}s — bypassed via --allow-actionable"
+          write_waiver
+        else
+          fail "CR status pending for ${age_s}s. CR may be experiencing an outage. Verify at https://status.coderabbit.ai/ then re-run with --allow-actionable --reason 'CR outage YYYY-MM-DD per https://status.coderabbit.ai/<incident-id>' if confirmed."
+        fi
+      else
+        info "CodeRabbit status=pending (started ${cr_started}); review in progress. Check https://status.coderabbit.ai/ if this persists."
+        fail "CodeRabbit status=pending. Wait for CR to complete its review."
+      fi ;;
     *)
       if [ "$allow_actionable" -eq 1 ]; then
         info "CodeRabbit status=$cr_status — bypassed via --allow-actionable"

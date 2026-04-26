@@ -91,12 +91,13 @@ All six rules are checked by `ralph-loop-verify.sh` before every merge. "Mechani
 
 2. **All commit author emails = `164892154+Jordanmuss99@users.noreply.github.com`.** Script checks every commit on the PR via GitHub REST API.
 
-3. **CodeRabbit status check `CodeRabbit` = `pass`.** CR publishes this status check (pending while reviewing, pass when done). This replaces all prior timestamp-comparison logic and silence-is-clean logic. If the check is missing, CR has not reviewed yet. Wait.
+3. **CodeRabbit status check `CodeRabbit` = `pass`.** CR publishes this status check (pending while reviewing, pass when done). This replaces all prior timestamp-comparison logic and silence-is-clean logic. If the check is missing, CR has not reviewed yet. Wait. If the check stays `pending` for ≥ 15 min, the script escalates with the status-page URL and the outage bypass option (see **Outage bypass** below).
 
 4. **`mergeStateStatus == CLEAN`.** Covers: mergeable + all required CI checks SUCCESS + no blocking reviews.
 
 5. **Zero unresolved review threads.** Every CR thread must be closed via reply + resolve. Silent resolution (clicking "Resolve" with no reply) is a contract violation.
 
+**Outage bypass**: `--allow-actionable --reason 'CR outage <date> per https://status.coderabbit.ai/<incident-id>'` is permitted ONLY when CR's commit-status has been `pending` for ≥ 15 min AND status.coderabbit.ai shows an active incident. The driver MUST attach the incident URL to the audit log entry (written automatically to `.sisyphus/notepads/ralph-loop-waivers.jsonl`). See zeroclaw-labs/zeroclaw#1792 (2026-02) for the failure mode this rule addresses. The script automatically escalates with the status-page URL and bypass instructions when the 15-min threshold is exceeded.
 ---
 
 ## Using `@coderabbitai` commands
