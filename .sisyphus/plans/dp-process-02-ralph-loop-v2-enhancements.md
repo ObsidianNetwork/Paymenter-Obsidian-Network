@@ -186,18 +186,18 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
 
 ### Steps
 
-- [ ] Update `.sisyphus/templates/ralph-loop-verify.sh`:
+- [x] Update `.sisyphus/templates/ralph-loop-verify.sh`:
   - When `CodeRabbit` commit-status check is `pending`, capture `startedAt` from `gh pr checks <N> --json name,startedAt`.
   - Print explicit message: `"INFO: CodeRabbit status=pending (started <ISO>); waiting. Check https://status.coderabbit.ai/ if this persists."`
   - When status has been `pending` for ≥ 15 min: escalate with `"FAIL: CR status pending for ${age_s}s. CR may be experiencing an outage. Verify at https://status.coderabbit.ai/ then re-run with --allow-actionable --reason 'CR outage YYYY-MM-DD per status page <incident-url>' if confirmed."`
-- [ ] Update `.sisyphus/templates/ralph-loop-contract.md` §Hard rules:
+- [x] Update `.sisyphus/templates/ralph-loop-contract.md` §Hard rules:
   - Add: "**Outage bypass**: `--allow-actionable --reason 'CR outage <date> per https://status.coderabbit.ai/<incident-id>'` is permitted ONLY when CR's commit-status has been `pending` for ≥ 15 min AND status.coderabbit.ai shows an active incident. The driver MUST attach the incident URL to the audit log entry. See zeroclaw-labs/zeroclaw#1792 (2026-02) for the failure mode this rule addresses."
   - Update §Mechanical-gate prose to reference the new behavior.
-- [ ] Update `.sisyphus/notepads/dp-process-audit/incident-2026-04-24.md` with a follow-up entry:
+- [x] Update `.sisyphus/notepads/dp-process-audit/incident-2026-04-24.md` with a follow-up entry:
   - Note that v2 contract observation surfaced the outage failure mode (per zeroclaw#1792).
   - Cross-reference the new outage-bypass rule.
-- [ ] Self-test: temporarily edit verify.sh to treat `pass` as `pending`, run against the most recent open PR, confirm escalation message renders correctly. Revert.
-- [ ] Commit + PR per the v2 contract. Title: `chore(process): verify.sh status-page escalation + outage bypass rule`.
+- [x] Self-test: temporarily edit verify.sh to treat `pass` as `pending`, run against the most recent open PR, confirm escalation message renders correctly. Revert.
+- [x] Commit + PR per the v2 contract. Title: `chore(process): verify.sh status-page escalation + outage bypass rule`.
 
 **Exit criteria**: script differentiates outage from real failure; contract documents the bypass; audit log captures usage when bypass invoked.
 **Rollback**: revert script + doc edit.
@@ -481,7 +481,7 @@ Identical to config A except:
 ## Status
 
 - [x] Phase A0: bootstrap `.sisyphus/` to ObsidianNetwork master (PR + audit + .gitignore)
-- [ ] Phase C: status-page escalation in verify.sh + outage bypass rule in contract (PR)
+- [x] Phase C: status-page escalation in verify.sh + outage bypass rule in contract (PR #8 merged 28101ff1)
 - [ ] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR)
 - [ ] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR)
 - [ ] Phase A.3: theme-divergence + plan-path validation PRs (throwaway, no merge)
