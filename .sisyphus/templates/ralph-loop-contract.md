@@ -165,7 +165,7 @@ Document the rejection in the next commit message or a plan-level note.
 
 This protocol replaces all prior timer-based / timestamp-comparison logic.
 
-**Recommended pre-push step (see §Tooling):** run `cr review` locally before each `git push`. A clean result catches blockers before consuming a PR-review slot.
+**Recommended pre-push step (see §Tooling):** run `cr review` locally before each `git push`. A clean result catches blockers before consuming a CLI-review slot.
 
 ```
 push commit
@@ -309,7 +309,7 @@ cr whoami   # must print: Jordanmuss99
 ```bash
 cr review   # reviews committed diff; exits non-zero on blocking findings
 ```
-Run before every `git push` during dp-NN work. Does not substitute for the full PR gate (ralph-loop-verify.sh), but catches regressions before consuming a PR-review slot.
+Run before every `git push` during dp-NN work. Does not substitute for the full PR gate (ralph-loop-verify.sh), but catches regressions before consuming a CLI-review slot.
 
 ### CR Skills — agent-invocable review + autofix
 
