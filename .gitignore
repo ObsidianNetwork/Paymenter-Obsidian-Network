@@ -25,7 +25,6 @@ extensions/Servers/Proxmox
 /Claude
 
 # Local/Obsidian fork additions
-AGENTS.md
 paymenter.tar.gz
 
 # Custom extensions (Obsidian fork-specific, not in upstream)
