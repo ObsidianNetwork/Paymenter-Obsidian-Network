@@ -217,7 +217,7 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
   - Change `reviews.profile: "assertive"` → `"chill"`.
   - Change `reviews.auto_review.auto_pause_after_reviewed_commits: 0` → `10`.
   - Add `reviews.path_instructions` (8 entries — themes, extensions, migrations, skeleton, plus 4 for `.sisyphus/**`).
-  - Add `reviews.path_filters` (4 entries to skip non-reviewable paths).
+  - Add `reviews.path_filters` (3 entries to skip non-reviewable paths).
   - Add explanatory YAML comment near `knowledge_base.learnings.scope: auto`.
 - [x] Open PR (`chore(ci): tune .coderabbit.yaml — tone, paths (incl. .sisyphus/), chill profile, no-inheritance, auto_pause=10`). Confirm CR auto-reviews itself, `CodeRabbit` status = pass.
 - [x] **Validation step (motivated by zeroclaw#1752)**: post `@coderabbitai configuration` as a comment on this PR. Verify CR's reply lists the values we shipped (no parse errors, no silent fall-back to defaults). If CR says it's using defaults: fix YAML, re-PR.
