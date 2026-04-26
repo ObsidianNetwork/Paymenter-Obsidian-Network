@@ -24,7 +24,7 @@ app/Livewire/
 | Task | Location |
 |---|---|
 | Add public page | new Livewire class here → register route in `routes/web.php` |
-| Auth flow change | `Auth/` (mind `MustVerfiyEmail` middleware on protected routes) |
+| Auth flow change | `Auth/` (mind `MustVerifyEmail` middleware on protected routes) |
 | Cart/checkout behavior | `Cart.php`, `Products/Checkout.php`, plus `App\Classes\Cart` |
 | Authenticated account area | `Client/*` under `middleware(['web','auth'])` |
 
