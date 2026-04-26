@@ -489,7 +489,7 @@ Identical to config A except:
 - [x] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR #14 merged c9270bad; tone_instructions 235 chars)
 - [x] Phase A.3: theme-divergence + plan-path validation PRs complete — config active on dynamic-slider/1.4.7 (PR #11); path_instructions confirmed (PR #14: 'Path: .coderabbit.yaml')
 - [x] Phase D: contract updated + cr CLI v0.4.3 + CR Skills (PR #15 merged 22494d58)
-- [ ] Phase B: `/init-deep` run + enforceable rules in CLAUDE.md / AGENTS.md (PRs per repo)
+- [x] Phase B: enforceable rules in CLAUDE.md / AGENTS.md (outer PR #16 merged 256cb186; extension PR #15 merged 22c5f533)
 
 **Deferred (with trip-wires)**:
 - [ ] Phase E (deferred): "Plan Reference" custom check — ship if driver forgets plan refs on >2 consecutive dp-NN PRs
