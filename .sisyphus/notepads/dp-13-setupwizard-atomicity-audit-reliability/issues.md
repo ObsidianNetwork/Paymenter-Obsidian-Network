@@ -1,0 +1,2 @@
+- 2026-04-23: `AuditLogService` cannot persist system-context extension audits because `ptero_audit_logs.user_id` has a foreign key to `users.id` and `AuditLogService::log()` writes `user_id=0` when unauthenticated. The new warning log keeps setup runs non-fatal, but true system-authored audit rows still need a follow-up design.
+- 2026-04-23: Repeated ad-hoc PHP scripts against `paymenter_test` polluted factory-generated uniques and caused a transient `categories_slug_unique` failure. Rebuilding the test DB fixed the suite.

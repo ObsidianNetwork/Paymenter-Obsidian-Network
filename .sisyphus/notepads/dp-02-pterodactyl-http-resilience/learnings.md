@@ -1,0 +1,2 @@
+- DynamicPterodactyl HTTP tests need `Config::set('settings.debug', false)` to avoid the app-level RequestListener writing debug HTTP logs during `Http::fake()` responses.
+- In this environment, `retry(2, ...)` on Laravel HTTP client produced 2 total fake attempts for connection failures, so retry assertions should verify actual behavior instead of assuming 3 attempts.
