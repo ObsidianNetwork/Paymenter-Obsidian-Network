@@ -19,7 +19,7 @@
 
 **Rate limits (Pro+ plan, per developer, refilling bucket):**
 - PR reviews: 10/hour (1 review every 6 min)
-- CLI reviews: 10/hour (shared bucket with PR reviews; see §Tooling)
+- CLI reviews: 10/hour (separate bucket from PR reviews; see §Tooling)
 - Chat: 100/hour
 - Exceeding the bucket pauses new reviews until it refills.
 
@@ -286,10 +286,17 @@ The `cr` CLI runs a local CodeRabbit review on committed changes without opening
 npm install -g @coderabbit/cli
 ```
 
-**Auth (one-time — requires API key from https://app.coderabbit.ai/settings/api-keys):**
+**Auth (one-time):**
+
+Browser flow (interactive):
 ```bash
-export CODERABBIT_API_KEY=<your-key>
 coderabbit auth login
+```
+
+Headless flow (requires API key from https://app.coderabbit.ai/settings/api-keys):
+```bash
+export CODERABBIT_API_KEY="cr-xxx"
+coderabbit auth login --api-key "$CODERABBIT_API_KEY"
 ```
 Manual step — the user must obtain the key from the CR dashboard; cannot be automated.
 
@@ -309,8 +316,8 @@ Run before every `git push` during dp-NN work. Does not substitute for the full 
 Skill files in `~/.agents/skills/` that let this agent invoke CR tooling programmatically without a browser.
 
 **Installed at:**
-- `~/.agents/skills/code-review.md`
-- `~/.agents/skills/autofix.md`
+- `~/.agents/skills/code-review/SKILL.md`
+- `~/.agents/skills/autofix/SKILL.md`
 
 **Verify:**
 ```bash
