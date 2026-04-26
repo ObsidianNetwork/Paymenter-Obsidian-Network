@@ -144,3 +144,4 @@ return [
         ],
     ],
 ];
+// validate: path_instructions theme-sync check 2026-04-26
