@@ -169,11 +169,11 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
   Ignored: boulder.json (per-session state), run-continuation/ (omo internal)
   ```
 - [x] Push, open PR titled `chore(process): bootstrap .sisyphus/ versioning to parent repo`.
-- [ ] Wait for CR auto-review (this PR will be CR's first look at our process tree). Expect findings on:
+- [x] Wait for CR auto-review (this PR will be CR's first look at our process tree). Expect findings on:
   - `ralph-loop-verify.sh`: shellcheck issues, potential unquoted vars, etc.
   - Plan files: typos, broken cross-refs.
   - Apply critical-evaluation rule to all findings.
-- [ ] Merge per `ralph-loop-verify.sh` gate.
+- [x] Merge per `ralph-loop-verify.sh` gate.
 
 **Exit criteria**: `.sisyphus/{plans,templates,completed,notepads}` tracked in `ObsidianNetwork:master`; transient state correctly gitignored; PR merged.
 **Rollback**: revert the bootstrap PR. Local `.sisyphus/` continues to work but reverts to untracked.
@@ -480,7 +480,7 @@ Identical to config A except:
 
 ## Status
 
-- [ ] Phase A0: bootstrap `.sisyphus/` to ObsidianNetwork master (PR + audit + .gitignore)
+- [x] Phase A0: bootstrap `.sisyphus/` to ObsidianNetwork master (PR + audit + .gitignore)
 - [ ] Phase C: status-page escalation in verify.sh + outage bypass rule in contract (PR)
 - [ ] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR)
 - [ ] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR)
