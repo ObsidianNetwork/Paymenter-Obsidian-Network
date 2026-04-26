@@ -488,7 +488,7 @@ Identical to config A except:
 - [x] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR #9 merged ea5ebe28)
 - [x] Phase A.2: dynamic-pterodactyl `.coderabbit.yaml` tuned + validated (PR #14 merged c9270bad; tone_instructions 235 chars)
 - [x] Phase A.3: theme-divergence + plan-path validation PRs complete — config active on dynamic-slider/1.4.7 (PR #11); path_instructions confirmed (PR #14: 'Path: .coderabbit.yaml')
-- [ ] Phase D: `cr` CLI installed + CR Skills (`code-review`, `autofix`) discoverable + contract updated (PR)
+- [ ] Phase D: contract updated (PR pending); cr CLI v0.4.3 at /root/.local/bin/cr; CR Skills at ~/.agents/skills/{code-review,autofix}.md
 - [ ] Phase B: `/init-deep` run + enforceable rules in CLAUDE.md / AGENTS.md (PRs per repo)
 
 **Deferred (with trip-wires)**:
