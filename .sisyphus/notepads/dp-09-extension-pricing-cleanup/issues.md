@@ -1,0 +1,1 @@
+- Full extension phpunit run is still not green on this branch due pre-existing reservation-table/mailer-related failures outside dp-09 scope (missing `ptero_resource_reservations` in several tests, ReservationApi 422s, and PSR-4 test warnings during root autoload dump).

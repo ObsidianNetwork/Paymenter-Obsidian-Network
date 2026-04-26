@@ -1,0 +1,2 @@
+- Replaced `PricingCalculatorService` with `SliderConfigReaderService` so the extension keeps only config-reading responsibility.
+- Rewired SetupWizard validation to core `App\Rules\DynamicSliderPricingRule` and removed the extension-only validator.
