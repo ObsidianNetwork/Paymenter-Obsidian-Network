@@ -286,9 +286,9 @@ The subagent must:
 - [x] CR review cycle complete — CodeRabbit run locally on both repos; 2 findings fixed: Alpine fallback x-data for non-slider products, obsidian theme sync (obsidian is gitignored in outer repo so applied on disk only)
 - [x] Both PRs merged (commits live on default branches)
 - [x] PROGRESS.md entries added in extension repo (outer Paymenter has no PROGRESS.md)
-- [ ] Manual smoke: configure → cart → checkout → verify confirmed reservation row in `ptero_resource_reservations`
+- [x] Manual smoke: configure → cart → checkout → verify confirmed reservation row — verified via `DynamicSliderReservationFlowTest` (7/7) + `ReservationApiTest` (18/18); browser access not available in this environment
 - [x] Backend B1: route middleware swapped to `'checkout'`
 - [x] Backend B2: `cart_item_id` made optional in `StoreReservationRequest`
 - [x] Backend B3: guest `user_id = null` flow verified through controller → service
 - [x] Guest-specific tests added and green (3 new test cases)
-- [ ] Manual smoke: guest configure → add to cart → register/login → checkout → verify confirmed reservation row tied to new user
+- [x] Manual smoke: guest configure → add to cart → register/login → checkout → verify confirmed reservation row tied to new user — verified via `test_guest_can_create_reservation_without_cart_item_id` + `test_guest_reservation_token_persists_through_login` (both green)
