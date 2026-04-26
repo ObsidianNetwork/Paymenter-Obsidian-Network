@@ -6,6 +6,8 @@
             locationId: {{ $this->reservationLocationId ?? 'null' }},
             initialToken: @js($checkoutConfig['dp_reservation_token'] ?? null),
         })"
+    @else
+        x-data="{ error: null, status: '' }"
     @endif>
     <div class="flex flex-col gap-4 w-full col-span-3">
         <h1 class="text-3xl font-bold">{{ $product->name }}</h1>
