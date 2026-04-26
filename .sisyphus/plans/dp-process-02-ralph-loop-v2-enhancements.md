@@ -255,17 +255,9 @@ NOT changed: loop protocol's mandatory steps — CLI is recommended, not require
 - [x] Verify omo/opencode version ≥ v1.1.40 (issue #12741 fix). Run `opencode --version`.
 - [x] Install CR Skills globally: `npx skills add coderabbitai/skills -g`. Lands `code-review/SKILL.md` + `autofix/SKILL.md` in `~/.agents/skills/` (omo's global skill discovery path).
 - [x] Verify skill discovery: `find ~/.agents/skills -name 'SKILL.md' 2>/dev/null` should list `code-review/SKILL.md` and `autofix/SKILL.md`.
-- [ ] Functional test `code-review` skill — in a fresh opencode session inside `/var/www/paymenter`, type `"Review my code"`. Confirm the agent invokes `skill({ name: "code-review" })` and runs `cr --plain` against current changes.
-- [ ] Functional test `autofix` skill — on a throwaway PR with a deliberately-introduced typo and an unresolved CR review thread, prompt `"Autofix CodeRabbit comments"`. Confirm the skill fetches threads via `gh api graphql`, applies the fix, creates one consolidated commit, and surfaces the option to push.
-- [ ] (Optional polish, defer if budget tight) Per-agent skill filtering — restrict `autofix` to `Sisyphus` so quick `Hephaestus` tasks can't accidentally invoke thread-fetch workflows. Add to omo's `~/.config/opencode/opencode.json`:
-  ```json
-  {
-    "agent": {
-      "Hephaestus": { "permission": { "skill": { "autofix": "deny" } } },
-      "Sisyphus":  { "permission": { "skill": { "autofix": "allow", "code-review": "allow" } } }
-    }
-  }
-  ```
+- [ ] **DEFERRED — needs interactive opencode session** Functional test `code-review` skill — in a fresh opencode session inside `/var/www/paymenter`, type `"Review my code"`. Confirm the agent invokes `skill({ name: "code-review" })` and runs `cr --plain` against current changes.
+- [ ] **DEFERRED — needs interactive opencode session + throwaway PR** Functional test `autofix` skill — on a throwaway PR with a deliberately-introduced typo and an unresolved CR review thread, prompt `"Autofix CodeRabbit comments"`. Confirm the skill fetches threads via `gh api graphql`, applies the fix, creates one consolidated commit, and surfaces the option to push.
+- [ ] **BLOCKED — omo schema does not support per-agent skill filtering** (verified against `~/.cache/opencode/packages/oh-my-openagent.../node_modules/oh-my-openagent/dist/oh-my-opencode.schema.json` and upstream `docs/reference/configuration.md`, 2026-04-26). Per the schema, `agents.{name}.permission` is `additionalProperties: false` and accepts only `edit`, `bash`, `webfetch`, `doom_loop`, `external_directory` — there is no `skill` permission key. Skill filtering is **global only** via top-level `disabled_skills`, `skills.enable`, `skills.disable`. The closest per-agent workaround is setting `agents.{name}.tools` to an allowlist excluding the `skill` tool, which would block ALL skills for that agent (too coarse for the original intent). See `learnings.md` for full notes. (Original plan text: optional polish, defer if budget tight — per-agent skill filtering to restrict `autofix` to `Sisyphus`.)
 - [x] Update `.sisyphus/templates/ralph-loop-contract.md`:
   - Add §Tooling section listing:
     - CLI install + auth: `curl -fsSL https://cli.coderabbit.ai/install.sh | sh` and `coderabbit auth login`.
@@ -490,6 +482,11 @@ Identical to config A except:
 - [x] Phase A.3: theme-divergence + plan-path validation PRs complete — config active on dynamic-slider/1.4.7 (PR #11); path_instructions confirmed (PR #14: 'Path: .coderabbit.yaml')
 - [x] Phase D: contract updated + cr CLI v0.4.3 + CR Skills (PR #15 merged 22494d58)
 - [x] Phase B: enforceable rules in CLAUDE.md / AGENTS.md (outer PR #16 merged 256cb186; extension PR #15 merged 22c5f533)
+
+**Phase D inline subtasks — deferred / blocked (do not gate phase completion)**:
+- [ ] D.258 (deferred): functional test of `code-review` skill — needs interactive opencode session.
+- [ ] D.259 (deferred): functional test of `autofix` skill — needs interactive opencode session + throwaway PR with unresolved CR thread.
+- [ ] D.260 (blocked): per-agent skill filtering as written is incompatible with omo's `permission` schema (no `skill` key, `additionalProperties: false`). See `learnings.md` 2026-04-26 entries. Resolution requires either upstream omo schema change or coarser global `disabled_skills` workaround.
 
 **Deferred (with trip-wires)**:
 - [ ] Phase E (deferred): "Plan Reference" custom check — ship if driver forgets plan refs on >2 consecutive dp-NN PRs
