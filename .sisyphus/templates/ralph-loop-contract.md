@@ -328,6 +328,28 @@ ls ~/.agents/skills/
 - `code-review`: invoke for CR-style review of a diff without a PR. Apply the same critical-evaluation standard as §Evaluating findings above.
 - `autofix`: invoke to apply CR-suggested fixes. NEVER auto-commit the output — evaluate every change before `git add`. Do NOT use `@coderabbitai autofix` on a PR (see §Using @coderabbitai commands).
 
+## Writing enforceable rules (the FAIL when pattern)
+
+CR auto-detects `**/CLAUDE.md`, `**/AGENTS.md`, `**/.cursorrules`, and several other instruction files. Rules written as `- FAIL when:` are treated as pass/fail criteria rather than prose guidance.
+
+**Pattern:**
+```text
+## Enforceable rules (CodeRabbit reads these)
+
+- FAIL when: <condition>. Rationale: <why>.
+- FAIL when: ...
+```
+
+**How to convert prose into a FAIL when rule:**
+1. Identify the prohibited action (what must never happen).
+2. State it as an observable condition: "a commit touches X", "a file is created at Y", "a migration drops Z without W".
+3. Add a one-sentence rationale explaining the invariant.
+4. Leave informational context as prose in the surrounding sections.
+
+**Scope**: root files (`/CLAUDE.md`, `/AGENTS.md`) apply everywhere; nested files apply to their subtree only. Encode rules in the deepest file where they belong.
+
+---
+
 ---
 
 ## Related files
