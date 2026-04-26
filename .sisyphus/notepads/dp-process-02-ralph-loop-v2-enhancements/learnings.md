@@ -8,3 +8,21 @@
 2026-04-26: `coderabbit review --plain --base <branch> --type committed` takes 4-6 minutes end-to-end on a working tree of this size (sandbox setup + multi-file review). The default 60-90s bash timeout will cut it off at "Preparing sandbox" or "Reviewing". For sanity checks: run inside `tmux` and capture-pane after ≥ 5 minutes, or use a longer Bash `timeout` parameter (≥ 360000 ms).
 
 2026-04-26: `cr` is the alias for the `coderabbit` CLI but the alias does NOT proxy `--plain` flag at the top level. Use `coderabbit review --plain ...` (subcommand-first), not `cr --plain ...`. Help output: `coderabbit review --help`.
+
+2026-04-26 (D.260 deep dive): omo source confirms the per-agent skill-permission gap is real, AND that there are three semantically-distinct skill controls already in the schema:
+
+1. **Global disable** — top-level `disabled_skills: [...]` (`src/config/schema/oh-my-opencode-config.ts`). Set is built once in `src/plugin/skill-context.ts` and applied to all agents identically.
+2. **Per-agent force-inject** — `agents.{name}.skills: [...]` (`src/config/schema/agent-overrides.ts`, line 14: `/** Skill names to inject into agent prompt */`). Implementation in `src/agents/agent-builder.ts:36-42`: when set, `resolveMultipleSkills(...)` resolves SKILL.md content for each name and **prepends** it to that agent's prompt. This is ADDITIVE, not an allowlist — other skills remain discoverable.
+3. **Per-agent skill-tool nuclear disable** — `agents.{name}.tools: { skill: false }` (via the existing `tools: z.record(z.string(), z.boolean())` field). Disables ALL skills for that agent.
+
+What is MISSING and what we wanted: per-agent per-skill deny (e.g., `agents.hephaestus.permission.skill.autofix: deny` while `code-review` stays allowed). `AgentPermissionSchema` (`src/config/schema/internal/permission.ts`) is `additionalProperties: false` and has no `skill` key.
+
+Smallest viable upstream patch (4 files):
+- `src/config/schema/internal/permission.ts` — add `skill: z.union([PermissionValueSchema, z.record(z.string(), PermissionValueSchema)]).optional()` to `AgentPermissionSchema`, mirroring the `bash` pattern.
+- `src/tools/skill/...` (or wherever the skill tool is dispatched) — check `agentPermission.skill` before invoking; respect both shorthand (`"deny"` for all) and per-name map (`{ autofix: "deny" }`).
+- `src/plugin/skill-context.ts` or `agent-config-handler.ts` — optionally filter `availableSkills` per agent so denied skills don't appear in the agent's discovery list.
+- Regenerate `assets/oh-my-opencode.schema.json` (likely via `bun run gen-schema` or similar; confirm in `package.json` scripts).
+
+Decision for our use case: do NOT apply any workaround config. The half-measures (global disable too broad, force-inject doesn't restrict Hephaestus, nuclear `tools.skill:false` blocks all skills) all miss the actual intent. The cost-justified path is to either (a) file an upstream feature request at code-yeongyu/oh-my-openagent citing this use case + the patch sketch above, or (b) accept the current state since Hephaestus invoking autofix is a low-frequency, low-blast-radius concern (it would just open a per-fix approval prompt the user can cancel).
+
+2026-04-26 (D.258/D.259 verification): The `skill(name=...)` tool is the programmatic test for skill discoverability. Both `code-review` and `autofix` load cleanly from `/root/.agents/skills/{name}/SKILL.md`, returning the complete SKILL.md content with natural-language triggers and workflow intact. This verifies the skill files are correctly placed, well-formed, and recognized by omo's skill discovery (per `src/plugin/skill-context.ts`). What's NOT testable from inside an agent invocation: the opencode input-handler hook that surfaces skills in response to natural-language phrases in USER input — because the agent IS the consumer of that hook, there's no upstream user prompt to test against. End-to-end functional tests (skill triggered by user typing "Review my code") therefore require a fresh user-facing opencode session by definition.
