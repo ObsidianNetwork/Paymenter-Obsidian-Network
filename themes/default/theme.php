@@ -143,4 +143,5 @@ return [
             'default' => 'hsl(240, 13%, 11%)',
         ],
     ],
+// validate: path_instructions theme-sync check (v2) 2026-04-26
 ];
