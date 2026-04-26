@@ -248,13 +248,13 @@ NOT changed: loop protocol's mandatory steps — CLI is recommended, not require
 
 ### Steps
 
-- [ ] On dev host: `curl -fsSL https://cli.coderabbit.ai/install.sh | sh`. Verify `coderabbit --version` and `cr --version` (alias).
-- [ ] Authenticate: `coderabbit auth login` (browser flow). For headless: generate Agentic API key from `app.coderabbit.ai/settings/api-keys`, export `CODERABBIT_API_KEY="cr-xxx"` in environment, then run `coderabbit auth login --api-key "$CODERABBIT_API_KEY"` once (credentials stored; subsequent commands don't need the flag). Never pass the literal key as an inline CLI argument — it ends up in shell history and `ps` output.
-- [ ] Verify auth: `coderabbit auth status`.
-- [ ] Sanity check: `cd /var/www/paymenter && cr --plain --base dynamic-slider/1.4.7 --type committed`. Should succeed (zero findings expected on clean tree).
-- [ ] Verify omo/opencode version ≥ v1.1.40 (issue #12741 fix). Run `opencode --version`.
-- [ ] Install CR Skills globally: `npx skills add coderabbitai/skills -g`. Lands `code-review/SKILL.md` + `autofix/SKILL.md` in `~/.agents/skills/` (omo's global skill discovery path).
-- [ ] Verify skill discovery: `find ~/.agents/skills -name 'SKILL.md' 2>/dev/null` should list `code-review/SKILL.md` and `autofix/SKILL.md`.
+- [x] On dev host: `curl -fsSL https://cli.coderabbit.ai/install.sh | sh`. Verify `coderabbit --version` and `cr --version` (alias).
+- [x] Authenticate: `coderabbit auth login` (browser flow). For headless: generate Agentic API key from `app.coderabbit.ai/settings/api-keys`, export `CODERABBIT_API_KEY="cr-xxx"` in environment, then run `coderabbit auth login --api-key "$CODERABBIT_API_KEY"` once (credentials stored; subsequent commands don't need the flag). Never pass the literal key as an inline CLI argument — it ends up in shell history and `ps` output.
+- [x] Verify auth: `coderabbit auth status`.
+- [x] Sanity check: `cd /var/www/paymenter && coderabbit review --plain --base dynamic-slider/1.4.7 --type committed`. Should succeed (zero findings expected on clean tree).
+- [x] Verify omo/opencode version ≥ v1.1.40 (issue #12741 fix). Run `opencode --version`.
+- [x] Install CR Skills globally: `npx skills add coderabbitai/skills -g`. Lands `code-review/SKILL.md` + `autofix/SKILL.md` in `~/.agents/skills/` (omo's global skill discovery path).
+- [x] Verify skill discovery: `find ~/.agents/skills -name 'SKILL.md' 2>/dev/null` should list `code-review/SKILL.md` and `autofix/SKILL.md`.
 - [ ] Functional test `code-review` skill — in a fresh opencode session inside `/var/www/paymenter`, type `"Review my code"`. Confirm the agent invokes `skill({ name: "code-review" })` and runs `cr --plain` against current changes.
 - [ ] Functional test `autofix` skill — on a throwaway PR with a deliberately-introduced typo and an unresolved CR review thread, prompt `"Autofix CodeRabbit comments"`. Confirm the skill fetches threads via `gh api graphql`, applies the fix, creates one consolidated commit, and surfaces the option to push.
 - [ ] (Optional polish, defer if budget tight) Per-agent skill filtering — restrict `autofix` to `Sisyphus` so quick `Hephaestus` tasks can't accidentally invoke thread-fetch workflows. Add to omo's `~/.config/opencode/opencode.json`:
@@ -266,7 +266,7 @@ NOT changed: loop protocol's mandatory steps — CLI is recommended, not require
     }
   }
   ```
-- [ ] Update `.sisyphus/templates/ralph-loop-contract.md`:
+- [x] Update `.sisyphus/templates/ralph-loop-contract.md`:
   - Add §Tooling section listing:
     - CLI install + auth: `curl -fsSL https://cli.coderabbit.ai/install.sh | sh` and `coderabbit auth login`.
     - Skills install: `npx skills add coderabbitai/skills -g` (requires opencode ≥ v1.1.40).
@@ -279,7 +279,7 @@ NOT changed: loop protocol's mandatory steps — CLI is recommended, not require
   - Command (natural language via opencode): `"Review my code"` — invokes the `code-review` skill, equivalent to running the CLI.
   - Add to §Post-CR-review thread handling: when CR posts findings on an open PR, the natural-language alternative to manually applying each fix is `"Autofix CodeRabbit comments"` (invokes the `autofix` skill — fetches unresolved threads via `gh api graphql`, applies fix prompts in batch or interactive mode, creates one consolidated commit). The critical-evaluation rule still applies; review batch mode's output before pushing.
   - Note that pre-push CLI review uses the SEPARATE 10-reviews/hr Pro+ CLI bucket, not the 10-reviews/hr PR-review bucket. Both refill at one unit per 6 minutes on Pro+.
-- [ ] Commit + PR. Title: `chore(process): install cr CLI + document recommended pre-push usage in contract`.
+- [x] Commit + PR. Title: `chore(process): install cr CLI + document recommended pre-push usage in contract`.
 
 **Exit criteria**: `cr --plain` runs successfully on Paymenter fork; CR Skills (`code-review`, `autofix`) discoverable by omo and triggered by natural language; contract documents recommended use cases for both CLI and skills; loop protocol unchanged for mandatory steps.
 **Rollback**: `rm $(which coderabbit)` and revert contract edit.
@@ -296,17 +296,17 @@ omo also reads `AGENTS.md` (project + global) and falls back to `CLAUDE.md` (Cla
 
 ### Steps
 
-- [ ] **Bootstrap with `/init-deep`** (omo command): generates hierarchical `AGENTS.md` files throughout the project. Any files we already have at root or nested level remain as the canonical version; `/init-deep` extends, doesn't overwrite.
-- [ ] Inventory:
+- [x] **Bootstrap with `/init-deep`** (omo command): generates hierarchical `AGENTS.md` files throughout the project. Any files we already have at root or nested level remain as the canonical version; `/init-deep` extends, doesn't overwrite.
+- [x] Inventory:
   ```bash
   find /var/www/paymenter -maxdepth 4 \( -name 'CLAUDE.md' -o -name 'AGENTS.md' -o -name 'AGENT.md' \) 2>/dev/null
   ```
   And same on the extension repo.
-- [ ] For each file, classify each existing rule:
+- [x] For each file, classify each existing rule:
   - **Enforceable**: rewrite as `- FAIL when: <condition>. Rationale: <why>.`
   - **Informational**: leave as prose.
   - **Stale / contradictory**: fix or remove (e.g., `CLAUDE.md` references `app/Extensions/...` when actual is `extensions/Others/...`).
-- [ ] In each file, add a top-level section:
+- [x] In each file, add a top-level section:
   ```markdown
   ## Enforceable rules (CodeRabbit reads these)
 
@@ -314,13 +314,13 @@ omo also reads `AGENTS.md` (project + global) and falls back to `CLAUDE.md` (Cla
   - FAIL when: ...
   ```
   This is the section CR's auto-detection will key on. The rest of the file remains free-form.
-- [ ] Specific known candidates to encode (audit will surface more):
+- [x] Specific known candidates to encode (audit will surface more):
   - **Root `/var/www/paymenter/CLAUDE.md`** (create if absent): "FAIL when commits to nested extension repo are made from outer Paymenter repo's working tree."
   - **`extensions/AGENTS.md`**: "FAIL when a new `composer.json` is added under `extensions/<Type>/<Name>/` (single composer at root manages everything)."
   - **`extensions/Others/DynamicPterodactyl/CLAUDE.md`**: "FAIL when Pterodactyl API responses are cached. FAIL when pricing logic is added to this extension's admin (pricing moved to Paymenter core per DECISIONS.md)."
   - **`extensions/Others/DynamicPterodactyl/AGENTS.md`**: "FAIL when files under `skeleton/` are modified without commit-message justification. FAIL when server provisioning is reimplemented here (delegate to `extensions/Servers/Pterodactyl/`)."
-- [ ] Commit each repo's CLAUDE/AGENTS edits as a small focused PR per repo. Confirm CR auto-reviews referenced rules fire alongside path_instructions.
-- [ ] Document the "rewrite prose into pass/fail" pattern in `.sisyphus/templates/ralph-loop-contract.md` so future plans know to use this format.
+- [x] Commit each repo's CLAUDE/AGENTS edits as a small focused PR per repo. Confirm CR auto-reviews referenced rules fire alongside path_instructions.
+- [x] Document the "rewrite prose into pass/fail" pattern in `.sisyphus/templates/ralph-loop-contract.md` so future plans know to use this format.
 
 **Exit criteria**: each guideline file has at least one `- FAIL when:` rule. Next dp-NN PR's CR review surfaces a violation if intentionally introduced.
 **Rollback**: revert the docs PRs. CR falls back to prose rules; omo unaffected.
