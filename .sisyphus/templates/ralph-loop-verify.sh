@@ -181,8 +181,8 @@ else
       # Compute how long CR has been pending to distinguish review-in-progress from outage.
       cr_started=$(gh pr checks "$pr" $repo_arg --json name,startedAt 2>/dev/null \
         | jq -r '.[] | select(.name=="CodeRabbit") | .startedAt' 2>/dev/null || echo "")
-      # Fall back to PR creation time if startedAt is null or epoch (gh returns 0001-01-01 when not yet started)
-      if [ -z "$cr_started" ] || [ "$cr_started" = "0001-01-01T00:00:00Z" ]; then
+      # Fall back to PR creation time if startedAt is null/epoch (jq -r prints literal "null" for JSON null; gh returns 0001-01-01 when not yet started)
+      if [ -z "$cr_started" ] || [ "$cr_started" = "null" ] || [ "$cr_started" = "0001-01-01T00:00:00Z" ]; then
         cr_started=$(gh pr view "$pr" $repo_arg --json createdAt --jq '.createdAt' 2>/dev/null || echo "")
       fi
       age_s=0
