@@ -161,6 +161,37 @@ class Checkout extends Component
         return once(fn () => ExtensionHelper::getCheckoutConfig($this->product, $this->checkoutConfig));
     }
 
+    public function hasDynamicSliderOptions(): bool
+    {
+        return $this->product->configOptions->contains(fn ($option) => $option->type === 'dynamic_slider');
+    }
+
+    public function getReservationLocationIdProperty(): ?int
+    {
+        $checkoutLocation = $this->checkoutConfig['location'] ?? null;
+        if (is_numeric($checkoutLocation)) {
+            return (int) $checkoutLocation;
+        }
+
+        $locationSetting = $this->product->settings()
+            ->where('key', 'location_ids')
+            ->value('value');
+
+        if ($locationSetting === null || $locationSetting === '') {
+            return null;
+        }
+
+        $locationIds = is_array($locationSetting) ? $locationSetting : json_decode($locationSetting, true);
+        if (! is_array($locationIds)) {
+            return null;
+        }
+
+        $firstLocationId = collect($locationIds)
+            ->first(fn ($locationId) => is_numeric($locationId));
+
+        return $firstLocationId !== null ? (int) $firstLocationId : null;
+    }
+
     public function rules()
     {
         $rules = [

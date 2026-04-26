@@ -1,4 +1,5 @@
 import { Livewire, Alpine } from '../../../vendor/livewire/livewire/dist/livewire.esm';
+import dynamicSliderGroup from '../../../resources/js/dynamic-slider-group';
 
 document.addEventListener('livewire:init', () => {
     Livewire.hook('request', ({ fail }) => {
@@ -95,6 +96,8 @@ Alpine.store('confirmation', {
         this.callback = null
     }
 })
+
+Alpine.data('dynamicSliderGroup', dynamicSliderGroup)
 
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker

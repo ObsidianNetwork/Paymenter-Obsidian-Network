@@ -1,4 +1,12 @@
-<div class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6">
+<div class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
+    @if ($this->hasDynamicSliderOptions())
+        x-data="dynamicSliderGroup({
+            productId: {{ $product->id }},
+            planId: $wire.entangle('plan_id').live,
+            locationId: {{ $this->reservationLocationId ?? 'null' }},
+            initialToken: @js($checkoutConfig['dp_reservation_token'] ?? null),
+        })"
+    @endif>
     <div class="flex flex-col gap-4 w-full col-span-3">
         <h1 class="text-3xl font-bold">{{ $product->name }}</h1>
         <div class="flex flex-row w-full gap-4">
@@ -100,13 +108,15 @@
         @endif
         @if (($product->stock > 0 || !$product->stock) && $product->price()->available)
             <div>
-                <x-button.primary wire:click="checkout" wire:loading.attr="disabled">
+                <x-button.primary wire:click="checkout" wire:loading.attr="disabled" x-bind:disabled="!!error">
                     <x-loading target="checkout" />
                     <div wire:loading.remove wire:target="checkout">
                         {{ __('product.checkout') }}
                     </div>
                 </x-button.primary>
             </div>
+            <p x-show="error" class="text-sm text-red-500" x-text="error"></p>
+            <p x-show="status" class="text-sm text-primary-500" x-text="status"></p>
         @endif
     </div>
 </div>

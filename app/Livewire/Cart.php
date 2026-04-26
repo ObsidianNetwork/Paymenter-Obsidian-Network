@@ -189,6 +189,20 @@ class Cart extends Component
                     ]);
                 }
 
+                $reservationToken = $item->checkout_config['dp_reservation_token'] ?? null;
+                $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+                if ($reservationToken && class_exists($reservationServiceClass)) {
+                    $reservationService = app($reservationServiceClass);
+                    $confirmed = $reservationService->confirm($reservationToken, $service->id, Auth::user());
+
+                    if (! $confirmed) {
+                        $service->delete();
+                        $this->addError("checkout.{$item->id}", 'Capacity hold expired during checkout. Please refresh and reconfigure.');
+
+                        throw new DisplayException('Capacity hold expired during checkout. Please refresh and reconfigure.');
+                    }
+                }
+
                 foreach ($item->config_options as $configOption) {
                     $configOption = (object) $configOption;
                     // Text, number and dynamic_slider store values as properties (not child option references)

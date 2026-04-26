@@ -43,6 +43,7 @@
     progressPercent: '0%',
     pricingState: 'idle',
     pricingError: '',
+    reservationError: '',
     displayPrice: null,
     _previewRequestId: 0,
 
@@ -54,6 +55,7 @@
         this.displayPrice = this.calculatePrice();
         this.updateProgress();
         this.refreshPricingPreview();
+        this.$nextTick(() => this.$dispatch('slider-change', { resourceType: this.resourceType, value: this.numericValue, initialize: true }));
 
         $watch('value', Alpine.debounce(() => {
             this.updateProgress();
@@ -220,7 +222,9 @@
     handleInput() {
         this.updateProgress();
     }
-}" class="flex flex-col gap-1 relative">
+}" x-on:dp-reservation-error.window="reservationError = $event.detail?.error || ''"
+    x-on:dp-reservation-clear.window="reservationError = ''"
+    class="flex flex-col gap-1 relative">
     <label id="slider-label-{{ $config->id }}" for="{{ $name }}" class="mb-1 text-sm text-primary-100">
         {{ $config->label ?? $config->name }}
     </label>
@@ -242,7 +246,7 @@
             :max="max"
             :step="step"
             x-model="value"
-            @input="handleInput()"
+            @input="handleInput(); $dispatch('slider-change', { resourceType, value: numericValue })"
             x-on:keydown.page-up.prevent="value = Math.min(max, numericValue + step * 10)"
             x-on:keydown.page-down.prevent="value = Math.max(min, numericValue - step * 10)"
             x-on:keydown.home.prevent="value = min"
@@ -275,6 +279,8 @@
             <span x-show="pricingState === 'error'" class="sr-only" aria-live="assertive" x-text="pricingError" wire:ignore></span>
         @endif
     </div>
+    <span x-show="reservationError" class="text-red-500 text-sm" x-text="reservationError" wire:ignore></span>
+    <span x-show="reservationError" class="sr-only" aria-live="assertive" x-text="reservationError" wire:ignore></span>
     <style>
         /* Expand touch target without changing visual size (WCAG 2.5.8) */
         /* transparent border extends hit area to ~44px; content box stays 20px */
