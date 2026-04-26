@@ -1,0 +1,12 @@
+{
+  "active_plan": "/var/www/paymenter/.sisyphus/plans/dp-10-slider-ux-a11y.md",
+  "started_at": "2026-04-23T03:35:14.632Z",
+  "session_ids": [
+    "ses_24a7ade8affeFcbNYEOugrZn08"
+  ],
+  "session_origins": {
+    "ses_24a7ade8affeFcbNYEOugrZn08": "direct"
+  },
+  "plan_name": "dp-10-slider-ux-a11y",
+  "agent": "atlas"
+}

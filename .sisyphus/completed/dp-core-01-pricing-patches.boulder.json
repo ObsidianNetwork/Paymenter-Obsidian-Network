@@ -1,0 +1,17 @@
+{
+  "active_plan": "/var/www/paymenter/.sisyphus/plans/dp-core-01-pricing-patches.md",
+  "started_at": "2026-04-22T15:10:41.595Z",
+  "session_ids": [
+    "ses_24a7ade8affeFcbNYEOugrZn08",
+    "ses_24a3fcea3ffe30Zi5s2svLRUNn",
+    "ses_249edd1beffe4zjH0NdxIVhz3M"
+  ],
+  "session_origins": {
+    "ses_24a7ade8affeFcbNYEOugrZn08": "direct",
+    "ses_24a3fcea3ffe30Zi5s2svLRUNn": "appended",
+    "ses_249edd1beffe4zjH0NdxIVhz3M": "appended"
+  },
+  "plan_name": "dp-core-01-pricing-patches",
+  "agent": "atlas",
+  "task_sessions": {}
+}

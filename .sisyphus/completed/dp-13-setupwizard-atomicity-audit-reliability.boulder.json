@@ -1,0 +1,15 @@
+{
+  "active_plan": "/var/www/paymenter/.sisyphus/plans/dp-13-setupwizard-atomicity-audit-reliability.md",
+  "started_at": "2026-04-23T10:24:47.575Z",
+  "session_ids": [
+    "ses_24a7ade8affeFcbNYEOugrZn08",
+    "ses_2461ca2d3ffeAbj4OUOGlU594S"
+  ],
+  "session_origins": {
+    "ses_24a7ade8affeFcbNYEOugrZn08": "direct",
+    "ses_2461ca2d3ffeAbj4OUOGlU594S": "appended"
+  },
+  "plan_name": "dp-13-setupwizard-atomicity-audit-reliability",
+  "agent": "atlas",
+  "task_sessions": {}
+}

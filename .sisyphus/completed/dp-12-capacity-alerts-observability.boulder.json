@@ -1,0 +1,12 @@
+{
+  "active_plan": "/var/www/paymenter/.sisyphus/plans/dp-12-capacity-alerts-observability.md",
+  "started_at": "2026-04-24T03:53:37.528Z",
+  "session_ids": [
+    "ses_24a7ade8affeFcbNYEOugrZn08"
+  ],
+  "session_origins": {
+    "ses_24a7ade8affeFcbNYEOugrZn08": "direct"
+  },
+  "plan_name": "dp-12-capacity-alerts-observability",
+  "agent": "atlas"
+}
