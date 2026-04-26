@@ -1,4 +1,4 @@
-# /ralph-loop Contract v2 — Canonical Template (CodeRabbit Pro)
+# /ralph-loop Contract v2 — Canonical Template (CodeRabbit Pro+)
 
 **Purpose**: mandatory CodeRabbit review workflow for every dp-NN (and any) PR against `dynamic-slider`. This file is the single source of truth. dp-NN plans MUST reference it by path instead of re-stating the contract.
 
@@ -17,9 +17,10 @@
 | Conversational chat / thread replies | YES | NO |
 | Formal APPROVED / CHANGES_REQUESTED reviews | YES | NO |
 
-**Rate limits (Pro plan, per developer, refilling bucket):**
-- PR reviews: 5/hour (1 review every 12 min)
-- Chat: 50/hour
+**Rate limits (Pro+ plan, per developer, refilling bucket):**
+- PR reviews: 10/hour (1 review every 6 min)
+- CLI reviews: 10/hour (separate bucket from PR reviews; see §Tooling)
+- Chat: 100/hour
 - Exceeding the bucket pauses new reviews until it refills.
 
 PRs MUST be opened under `Jordanmuss99` to get Pro review. See "PR author identity" below.
@@ -122,7 +123,7 @@ Do NOT post any `@coderabbitai` mention within 120 seconds of a prior one on the
 gh pr view <N> --json comments \
   --jq '[.comments[] | select(.author.login=="Jordanmuss99" and (.body | startswith("@coderabbitai")))] | max_by(.createdAt) | .createdAt'
 ```
-If the result is less than 120 seconds ago, wait. Multiple rapid mentions re-arm CR's internal state machine, burn rate-limit budget (5 reviews/hr), and cause the agent to mistake silence for approval.
+If the result is less than 120 seconds ago, wait. Multiple rapid mentions re-arm CR's internal state machine, burn rate-limit budget (10 reviews/hr shared with CLI reviews), and cause the agent to mistake silence for approval.
 
 ### Post-mention ack check
 
@@ -163,6 +164,8 @@ Document the rejection in the next commit message or a plan-level note.
 ## Loop protocol (status-check-driven)
 
 This protocol replaces all prior timer-based / timestamp-comparison logic.
+
+**Recommended pre-push step (see §Tooling):** run `cr review` locally before each `git push`. A clean result catches blockers before consuming a CLI-review slot.
 
 ```
 push commit
@@ -269,6 +272,61 @@ Treat as CONTRACT VIOLATION (do not mark work complete) when ANY of:
 - `author ≠ Jordanmuss99`
 - `mergedAt` absent (not merged)
 - `cr_reviews < 1` AND the `CodeRabbit` status check was absent at merge time (no review occurred)
+
+---
+
+## Tooling (cr CLI + CR Skills)
+
+### cr CLI — pre-push local review
+
+The `cr` CLI runs a local CodeRabbit review on committed changes without opening a PR. Consumes the same shared 10/hr bucket as PR reviews.
+
+**Install (one-time):**
+```bash
+npm install -g @coderabbit/cli
+```
+
+**Auth (one-time):**
+
+Browser flow (interactive):
+```bash
+coderabbit auth login
+```
+
+Headless flow (requires API key from https://app.coderabbit.ai/settings/api-keys):
+```bash
+export CODERABBIT_API_KEY="cr-xxx"
+coderabbit auth login --api-key "$CODERABBIT_API_KEY"
+```
+Manual step — the user must obtain the key from the CR dashboard; cannot be automated.
+
+**Verify auth:**
+```bash
+cr whoami   # must print: Jordanmuss99
+```
+
+**Pre-push usage:**
+```bash
+cr review   # reviews committed diff; exits non-zero on blocking findings
+```
+Run before every `git push` during dp-NN work. Does not substitute for the full PR gate (ralph-loop-verify.sh), but catches regressions before consuming a CLI-review slot.
+
+### CR Skills — agent-invocable review + autofix
+
+Skill files in `~/.agents/skills/` that let this agent invoke CR tooling programmatically without a browser.
+
+**Installed at:**
+- `~/.agents/skills/code-review/SKILL.md`
+- `~/.agents/skills/autofix/SKILL.md`
+
+**Verify:**
+```bash
+ls ~/.agents/skills/
+```
+
+**Usage policy:**
+- `code-review`: invoke for CR-style review of a diff without a PR. Apply the same critical-evaluation standard as §Evaluating findings above.
+- `autofix`: invoke to apply CR-suggested fixes. NEVER auto-commit the output — evaluate every change before `git add`. Do NOT use `@coderabbitai autofix` on a PR (see §Using @coderabbitai commands).
 
 ---
 
