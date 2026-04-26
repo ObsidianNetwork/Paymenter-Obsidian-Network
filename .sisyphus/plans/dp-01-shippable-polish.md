@@ -155,3 +155,22 @@ The agent should:
 - Shortfall notifications → `dp-04-shortfall-notifications.md`
 - Admin API routes → `dp-05-admin-api-routes.md`
 - Pricing config validation → `dp-06-pricing-config-validation.md`
+
+
+---
+
+## Closeout (2026-04-26)
+
+**Status: SHIPPED in two stages.**
+
+**Stage 1 (2026-04-21)**: Changes 1-2 shipped via the original dp-01 commit:
+- Change 1 (ExtensionMeta attribute on `DynamicPterodactyl` class): live at `DynamicPterodactyl.php:25`.
+- Change 2 (route throttle, 30 req/min on availability + pricing endpoints): live at `routes/api.php` (`'throttle:30,1'` middleware).
+
+**Stage 2 (2026-04-26)**: Change 3 (docs refresh + skeleton delete) shipped via the closeout plan `.sisyphus/plans/dp-01-doc-refresh-skeleton-delete.md`. The original Change 3 specification was rescoped because dp-07 (PR #6 in extension repo) had already done much of the doc cleanup, and dp-09 / dp-11 / dp-13 introduced new drift (e.g. `PricingCalculatorService` renamed to `SliderConfigReaderService`, migration count grew 5→7). The closeout plan captures the actually-needed mutations:
+- Extension repo PR #16 — `chore(docs): refresh README + AGENTS for post-dp-13 reality; delete empty skeleton/`
+- Squash SHA: `e2034a485cb76cf1607d8ab776f9c0406297e4df`
+- CodeRabbit verdict: APPROVED (zero findings)
+- Author: `Jordanmuss99 <164892154+Jordanmuss99@users.noreply.github.com>`
+
+All three Changes complete. dp-01 is fully retired.
