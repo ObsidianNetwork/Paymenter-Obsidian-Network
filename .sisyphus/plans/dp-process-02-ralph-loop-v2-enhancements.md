@@ -246,7 +246,7 @@ NOT changed: loop protocol's mandatory steps — CLI is recommended, not require
 ### Steps
 
 - [ ] On dev host: `curl -fsSL https://cli.coderabbit.ai/install.sh | sh`. Verify `coderabbit --version` and `cr --version` (alias).
-- [ ] Authenticate: `coderabbit auth login` (browser flow). For headless: generate Agentic API key from `app.coderabbit.ai/settings/api-keys` and run `coderabbit auth login --api-key "cr-xxx"`.
+- [ ] Authenticate: `coderabbit auth login` (browser flow). For headless: generate Agentic API key from `app.coderabbit.ai/settings/api-keys`, export `CODERABBIT_API_KEY="cr-xxx"` in environment, then run `coderabbit auth login --api-key "$CODERABBIT_API_KEY"` once (credentials stored; subsequent commands don't need the flag). Never pass the literal key as an inline CLI argument — it ends up in shell history and `ps` output.
 - [ ] Verify auth: `coderabbit auth status`.
 - [ ] Sanity check: `cd /var/www/paymenter && cr --plain --base dynamic-slider/1.4.7 --type committed`. Should succeed (zero findings expected on clean tree).
 - [ ] Verify omo/opencode version ≥ v1.1.40 (issue #12741 fix). Run `opencode --version`.
