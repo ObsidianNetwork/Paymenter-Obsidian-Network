@@ -101,8 +101,13 @@ write_waiver() {
   mkdir -p "$waiver_dir"
   local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   local actor; actor=$(gh api /user --jq .login 2>/dev/null || echo unknown)
-  printf '{"pr":%s,"repo":"%s","ts":"%s","reason":"%s","actor":"%s"}\n' \
-    "$pr" "$repo_display" "$ts" "$reason" "$actor" \
+  jq -n \
+    --argjson pr "$pr" \
+    --arg repo "$repo_display" \
+    --arg ts "$ts" \
+    --arg reason "$reason" \
+    --arg actor "$actor" \
+    '{"pr":$pr,"repo":$repo,"ts":$ts,"reason":$reason,"actor":$actor}' \
     >> "$waiver_dir/ralph-loop-waivers.jsonl"
   info "waiver logged to .sisyphus/notepads/ralph-loop-waivers.jsonl"
 }

@@ -140,24 +140,24 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
 
 ### Steps
 
-- [ ] Verify `gh auth switch -u Jordanmuss99` is active (`gh api /user --jq .login` → `Jordanmuss99`).
-- [ ] Audit `.sisyphus/` for sensitive content:
+- [x] Verify `gh auth switch -u Jordanmuss99` is active (`gh api /user --jq .login` → `Jordanmuss99`).
+- [x] Audit `.sisyphus/` for sensitive content:
   ```bash
   grep -RIn -E '(api[_-]?key|token|secret|password|private[_-]?key|bearer\s)' \
     /var/www/paymenter/.sisyphus/ 2>/dev/null
   ```
   Redact any hits before committing. Decision rationale and incident logs are expected to be safe.
-- [ ] Decide on stray file `.sisyphus/dynamic-pterodactyl-reservation-lifecycle-fixes.md` (currently at `.sisyphus/` root, not in `plans/`):
+- [x] Decide on stray file `.sisyphus/dynamic-pterodactyl-reservation-lifecycle-fixes.md` (currently at `.sisyphus/` root, not in `plans/`):
   - Recommended: `git mv` into `.sisyphus/plans/` for consistency.
-- [ ] Update `/var/www/paymenter/.gitignore` to exclude transient state but include process artifacts:
+- [x] Update `/var/www/paymenter/.gitignore` to exclude transient state but include process artifacts:
   ```gitignore
   # Sisyphus / omo — process artifacts are versioned, runtime state is not
   .sisyphus/boulder.json
   .sisyphus/run-continuation/
   ```
-- [ ] Branch off ObsidianNetwork master: `bootstrap-sisyphus-versioning`.
-- [ ] `git add .sisyphus/{plans,templates,completed,notepads}` and `git add .gitignore`.
-- [ ] Commit message:
+- [x] Branch off ObsidianNetwork master: `bootstrap-sisyphus-versioning`.
+- [x] `git add .sisyphus/{plans,templates,completed,notepads}` and `git add .gitignore`.
+- [x] Commit message:
   ```
   chore(process): commit .sisyphus/{plans,templates,completed,notepads}
 
@@ -168,7 +168,7 @@ Five independently shippable phases. Order: **A0 → C → A → D → B**. Tota
   Tracked: plans/, templates/, completed/, notepads/
   Ignored: boulder.json (per-session state), run-continuation/ (omo internal)
   ```
-- [ ] Push, open PR titled `chore(process): bootstrap .sisyphus/ versioning to parent repo`.
+- [x] Push, open PR titled `chore(process): bootstrap .sisyphus/ versioning to parent repo`.
 - [ ] Wait for CR auto-review (this PR will be CR's first look at our process tree). Expect findings on:
   - `ralph-loop-verify.sh`: shellcheck issues, potential unquoted vars, etc.
   - Plan files: typos, broken cross-refs.
@@ -398,7 +398,6 @@ reviews:
     ignore_usernames: []
 
   path_filters:
-    - "!extensions/Others/DynamicPterodactyl/skeleton/**"
     - "!**/storage/logs/**"
     - "!bootstrap/cache/**"
     - "!.sisyphus/run-continuation/**"

@@ -2,10 +2,10 @@
 
 ## 2026-04-23 — HARD BLOCK: workspace balance exhausted
 
-Background subagent `bg_724edbec` (session `ses_249edd1beffe4zjH0NdxIVhz3M`) failed twice:
+Background subagent `[task-id]` (session `[session-id]`) failed twice:
 
 1. First run: aborted at 31s with `read` as last tool call. No real work done. Cause unclear, possibly early-run quota trip.
-2. Second run (resume of same session): **Insufficient balance. Manage your billing here: https://opencode.ai/workspace/wrk_01KNKBV92HW4FYPHQJDT41KNF9/billing**
+2. Second run (resume of same session): **Insufficient balance. Manage your billing here: [workspace billing URL]**
 
 This is an external workspace-billing issue, not a code, plan, or workflow issue. Orchestrator cannot work around it. No further subagent launches until the workspace is topped up.
 
@@ -28,7 +28,7 @@ This is an external workspace-billing issue, not a code, plan, or workflow issue
 ### Resume procedure when unblocked
 
 1. User tops up workspace balance.
-2. Orchestrator relaunches against session `ses_249edd1beffe4zjH0NdxIVhz3M` (full prior context preserved by opencode session store) with the original dp-core-01 prompt.
+2. Orchestrator relaunches against session `[session-id]` (full prior context preserved by opencode session store) with the original dp-core-01 prompt.
 3. Subagent begins at Step 0 (assess) per the plan.
 
 ### Remaining work after unblock
