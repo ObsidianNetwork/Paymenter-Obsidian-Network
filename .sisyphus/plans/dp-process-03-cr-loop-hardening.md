@@ -447,8 +447,8 @@ The subagent must:
 8. Do NOT use `--allow-direct-default` on the dp-process-03 PR itself. The dp-process-03 PR demonstrates the new workflow.
 
 **Cross-repo discipline:**
-9. Changes commit from `/var/www/paymenter/` only (`.sisyphus/templates/` lives there).
-10. The extension repo doesn't need changes — it sources its `.sisyphus/` references from outer.
+9. P1+P2+P3 changes commit from `/var/www/paymenter/` only (`.sisyphus/templates/` lives there). Do NOT touch any path under `extensions/Others/DynamicPterodactyl/` from the outer working tree — that path is a nested git repo and outer-tree commits there will fail the CLAUDE.md FAIL rule.
+10. P4 REQUIRES extension-repo changes (contradicts the original draft of this list, which predated P4): seed `.sisyphus/templates/ralph-loop-contract.md`, `ralph-loop-verify.sh`, and `SYNC.md` from the outer canonical, then open a dedicated extension-repo PR. All P4 commits MUST run from inside the nested repo (`cd extensions/Others/DynamicPterodactyl && git commit && gh pr create --base dynamic-slider`), per the recipe in §Phase P4 → CLAUDE.md interaction. Outer-tree commits to extension paths violate the FAIL rule and will be blocked by pre-commit / CR review.
 
 ---
 
