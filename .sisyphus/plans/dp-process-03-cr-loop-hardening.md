@@ -166,8 +166,8 @@ This adds ~3 commands to the driver workflow but closes the bypass.
             nodes{
               id
               isResolved
-              comments(first:50){
-                nodes{ author{ login } }
+              comments(first:100){
+                nodes{ author{ login } body }
               }
             }
           }
@@ -176,8 +176,15 @@ This adds ~3 commands to the driver workflow but closes the bypass.
     }' -F o="$owner" -F r="$rname" -F p="$pr" | \
     jq -r '
       .data.repository.pullRequest.reviewThreads.nodes[] |
-      select(any(.comments.nodes[]; .author.login == "coderabbitai")) |
+      # match threads with any CR-authored comment (both `coderabbitai` and `coderabbitai[bot]` login variants)
+      select(any(.comments.nodes[]; (.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]"))) |
+      # exclude threads that already have a Jordanmuss99 reply
       select(all(.comments.nodes[]; .author.login != "Jordanmuss99")) |
+      # exclude nitpick-tagged threads per the carve-out at lines 154-155 (silent-accept OK for nits)
+      # detection: body of the FIRST CR-authored comment in the thread contains the case-insensitive token "nitpick"
+      # (using `[.comments.nodes[] | select(CR-login)][0]` rather than `.comments.nodes[0]` so we inspect the first CR comment
+      #  even when a non-CR comment precedes it; pre-flight sampling under our .coderabbit.yaml profile confirms the marker)
+      select((([.comments.nodes[] | select(.author.login=="coderabbitai" or .author.login=="coderabbitai[bot]")][0].body) // "") | test("(?i)nitpick") | not) |
       .id
     '
   ```
@@ -187,7 +194,8 @@ This adds ~3 commands to the driver workflow but closes the bypass.
 ### Notes
 
 - The check is "thread has any Jordanmuss99 comment", not "thread's last comment is from Jordanmuss99". Keeps it tolerant of CR's auto-acks on `@coderabbitai` mentions following our reply.
-- `coderabbitai[bot]` and `coderabbitai` may both appear as authors; the GraphQL query should treat both as CR. Verify the actual `author.login` value during implementation.
+- The jq filter above treats both `coderabbitai` and `coderabbitai[bot]` as CR via `(.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]")`. During pre-flight sampling, confirm which variant CR uses on this repo (both are observed in different deployments) so the filter is provably correct.
+- The nit-exclusion predicate `select((([.comments.nodes[] | select(.author.login=="coderabbitai" or .author.login=="coderabbitai[bot]")][0].body) // "") | test("(?i)nitpick") | not)` checks the body of the FIRST CR-authored comment in the thread (not `.comments.nodes[0]`, which could be a manual reviewer comment that CR replied to) for the case-insensitive token "nitpick". CR's CHILL profile (per our `.coderabbit.yaml`) typically posts nitpicks INSIDE the review-summary body's collapsible section rather than as separate review threads — meaning Rule 7 wouldn't flag them at all under current config. The thread-level nit-exclusion only kicks in if CR's behavior changes (e.g., profile flip to ASSERTIVE) and nits start arriving as threads. Pre-flight sampling against PR #15/#18/#19/#20 will confirm CR's actual nit-threading behavior under our profile and adjust the regex/predicate location if needed.
 
 ---
 
@@ -220,21 +228,26 @@ This adds ~3 commands to the driver workflow but closes the bypass.
     query($o:String!,$r:String!,$p:Int!){
       repository(owner:$o,name:$r){
         pullRequest(number:$p){
+          commits(last:1){ nodes{ commit{ committedDate } } }
           comments(first:100){ nodes{ author{login} body createdAt } }
           reviews(first:100){ nodes{ author{login} submittedAt } }
         }
       }
     }' -F o="$owner" -F r="$rname" -F p="$pr" | \
     jq -r '
-      [
-        (.data.repository.pullRequest.comments.nodes[]
-          | select(.author.login=="coderabbitai")
-          | select(.body | startswith("Actions performed:") | not)
-          | .createdAt),
-        (.data.repository.pullRequest.reviews.nodes[]
-          | select(.author.login=="coderabbitai")
-          | .submittedAt)
-      ] | max // empty')
+      (.data.repository.pullRequest.commits.nodes[0].commit.committedDate) as $last_commit
+      | [
+          (.data.repository.pullRequest.comments.nodes[]
+            | select(.author.login=="coderabbitai" or .author.login=="coderabbitai[bot]")
+            | select(.body | startswith("Actions performed:") | not)
+            | select(.body | contains("@coderabbitai pause") | not)
+            | select(.createdAt >= $last_commit)
+            | .createdAt),
+          (.data.repository.pullRequest.reviews.nodes[]
+            | select(.author.login=="coderabbitai" or .author.login=="coderabbitai[bot]")
+            | select(.submittedAt >= $last_commit)
+            | .submittedAt)
+        ] | max // empty')
 
   if [ -n "$last_cr" ]; then
     age=$(( $(date +%s) - $(date -d "$last_cr" +%s) ))
@@ -251,7 +264,7 @@ This adds ~3 commands to the driver workflow but closes the bypass.
 
 ### Edge cases
 
-- Repo-incident PRs that explicitly used `@coderabbitai pause` should not stick on quiet-period — those PRs intentionally suppress CR. The check should handle this: if `@coderabbitai pause` is the most recent CR-relevant signal, treat the quiet period as satisfied.
+- Repo-incident PRs that explicitly used `@coderabbitai pause` should not stick on quiet-period — those PRs intentionally suppress CR. The jq filter above excludes any comment containing `@coderabbitai pause` from the activity-timestamp computation; once `pause` is set, CR posts no further activity and the quiet period naturally elapses on the prior commit's timeline. `--dry-run` MUST additionally print whether the most recent excluded comment was a `pause` directive (vs an `Actions performed:` ack) so debugging is deterministic when the filter behavior is in question.
 - The exclusion filter for auto-acks must match CR's actual ack-message format. During implementation, sample 5 recent CR ack comments and confirm the `startswith("Actions performed:")` filter catches them all.
 
 ---
@@ -270,7 +283,13 @@ The extension repo currently has no `.sisyphus/` directory. Phase P4 creates:
 
 ### Drift detection
 
-Add to verify.sh a `--check-sync` mode that compares the local copy against the outer canonical via `diff` (or sha256sum if outer path is reachable). If checksums differ, fail with a clear message pointing the driver at the canonical source. Driver behavior on drift: open a sync PR copying the outer-canonical version into the extension; do NOT modify the extension copy independently.
+Add to verify.sh a `--check-sync` mode with a **3-tier fallback** for locating the canonical source:
+
+1. **Primary — live diff against canonical path.** Read env var `PAYMENTER_CANONICAL_PATH` (default `/var/www/paymenter/.sisyphus/templates/`). If readable, `diff` each extension-side file against its canonical counterpart. Exit non-zero on any difference.
+2. **Fallback A — stored sha256 hashes.** If `$PAYMENTER_CANONICAL_PATH` is unset, missing, or unreadable (CI sandbox, agent environment without an outer-repo mount), read sha256 hashes from `.sisyphus/templates/SYNC.md` under a `## Hashes` block (one `<filename>: <sha256>` line per file). Compute live sha256 of each extension-side file and compare. SYNC.md hashes are updated by the SAME dp-process-NN plan that changes the canonical contract — atomic update is enforced by §Post-merge violation handling.
+3. **Fallback B — hard-fail.** If neither the primary path nor SYNC.md hashes are available, exit non-zero with: `FAIL: --check-sync requires PAYMENTER_CANONICAL_PATH (path to outer-repo .sisyphus/templates/) or sha256 hashes in .sisyphus/templates/SYNC.md. Cannot verify drift. Sync manually from outer Paymenter, or skip --check-sync.`
+
+Driver behavior on detected drift (Tier 1 or Tier 2 mismatch): open a sync PR copying the outer-canonical version into the extension; do NOT modify the extension copy independently. CI configuration: either checkout outer Paymenter into a known path and set `PAYMENTER_CANONICAL_PATH`, or rely on Fallback A by ensuring SYNC.md is updated atomically with each canonical-contract change.
 
 ### Why copy and not symlink
 
