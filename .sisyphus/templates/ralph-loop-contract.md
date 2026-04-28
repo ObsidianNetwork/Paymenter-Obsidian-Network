@@ -107,6 +107,7 @@ All nine rules are checked by `ralph-loop-verify.sh` before every merge. "Mechan
 > **Why this rule exists (do not rush)**: CR's APPROVED status is not final. CR may post additional findings within 5-10 minutes after approval, especially when our final commit triggers an incremental review. Merging inside this window has caused us to ship code that CR would have flagged. The rule says "do not rush" — even when the dashboard shows GREEN status and zero unresolved threads, wait the full quiet period before merging. The driver SHOULD use the verify.sh `--wait` flag to make the wait automatic rather than re-running manually.
 
 **Outage bypass**: `--allow-actionable --reason 'CR outage <date> per https://status.coderabbit.ai/<incident-id>'` is permitted ONLY when CR's commit-status has been `pending` for ≥ 15 min AND status.coderabbit.ai shows an active incident. The driver MUST attach the incident URL to the audit log entry (written automatically to `.sisyphus/notepads/ralph-loop-waivers.jsonl`). See zeroclaw-labs/zeroclaw#1792 (2026-02) for the failure mode this rule addresses. The script automatically escalates with the status-page URL and bypass instructions when the 15-min threshold is exceeded.
+
 ---
 
 ## Using `@coderabbitai` commands
@@ -154,7 +155,7 @@ CodeRabbit is a tool — it can be wrong. Every finding MUST be evaluated before
 
 1. Push a follow-up commit that addresses the finding.
 2. Reply on the CR thread with the template:
-   ```
+   ```text
    Applied in <short-sha>: <one-line summary of the change>.
    ```
    Example: `Applied in 9897b06: extracted Alpine fallback x-data so error/status are defined for non-slider products.`
@@ -187,7 +188,7 @@ This protocol replaces all prior timer-based / timestamp-comparison logic.
 
 **Required pre-PR step (see §Tooling):** run `cr review --plain --type committed --base <integration-branch>` locally before `gh pr create`. A clean result catches blockers before consuming PR-review cycles.
 
-```
+```text
 implement on feature branch (off integration branch; if the integration branch is the repo default, branch off that default and PR back to it)
   └─ run `cr review --plain --type committed --base <integration-branch>`
      │  (REQUIRED — see §Tooling. Must exit 0 OR all findings addressed/rejected with rationale.)
@@ -214,7 +215,7 @@ implement on feature branch (off integration branch; if the integration branch i
 ```
 
 Step 1. Finish current plan code changes or fixes for new findings.
-Step 2. Run `cr review --plain --type committed` (CodeRabbit CLI) locally on the working branch.
+Step 2. Run `cr review --plain --type committed --base <integration-branch>` (CodeRabbit CLI) locally on the working branch.
 Step 3. CR CLI verification clean?
 Step 4. If NO: go back to Step 1 and fix. Else if YES: proceed to Step 5.
 Step 5. Create PR (`gh pr create --base <integration-branch>`).
@@ -226,9 +227,9 @@ Step 8. If YES: merge PR to integration branch.
 
 With `.coderabbit.yaml` in place, auto-review fires on every push. You do NOT need to post `@coderabbitai review` after a push. Reserve it for:
 - Reasoning-only thread resolution (no new commit, want CR to re-scan)
-- CR status stuck `pending` > 15 minutes (potential CR hang)
+- Status-check-absent cases where CR still has not acknowledged/reviewed after the documented wait window
 
-If you do post it: observe the auto-ack, then wait. Do not post a second mention unless CR posts a non-ack substantive comment that needs a response.
+If CR stays `pending` for >15 minutes, follow the outage/escalation path instead of posting another `review` mention. If you do post `@coderabbitai review` in an allowed scenario, observe the auto-ack, then wait. Do not post a second mention unless CR posts a non-ack substantive comment that needs a response.
 
 ### After APPROVED, do not rush
 

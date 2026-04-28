@@ -127,6 +127,44 @@ rule_fail() {
   echo "FAIL: Rule $1 — $2" >&2
 }
 
+iso_to_epoch() {
+  python3 - "$1" <<'PY'
+from datetime import datetime
+import sys
+
+value = sys.argv[1]
+
+try:
+    print(int(datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()))
+except Exception:
+    sys.exit(1)
+PY
+}
+
+statuspage_has_active_incident() {
+  python3 - <<'PY'
+import json
+import sys
+import urllib.request
+
+url = 'https://status.coderabbit.ai/api/v2/incidents/unresolved.json'
+
+try:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        payload = json.load(response)
+except Exception:
+    sys.exit(2)
+
+incidents = payload.get('incidents') or []
+
+if incidents:
+    print(incidents[0].get('shortlink') or incidents[0].get('id') or 'active-incident')
+    sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 write_waiver() {
   local kind="$1"
   local detail="$2"
@@ -200,12 +238,7 @@ fi
 # Rule 3: CodeRabbit status check
 cr_line=$(gh pr checks "$pr" $repo_arg 2>/dev/null | grep -E '^CodeRabbit\b' || true)
 if [ -z "$cr_line" ]; then
-  if [ "$allow_actionable" -eq 1 ]; then
-    write_waiver "allow-actionable" "CodeRabbit status check missing"
-    rule_pass 3 "CodeRabbit status check missing but bypassed via --allow-actionable"
-  else
-    rule_fail 3 "CodeRabbit status check 'CodeRabbit' not found on PR #$pr. CR may not have reviewed yet. Wait for 'CodeRabbit  pass  ...' in 'gh pr checks $pr $repo_arg', or check that .coderabbit.yaml is on the default branch."
-  fi
+  rule_fail 3 "CodeRabbit status check 'CodeRabbit' not found on PR #$pr. CR may not have reviewed yet. Wait for 'CodeRabbit  pass  ...' in 'gh pr checks $pr $repo_arg', or check that .coderabbit.yaml is on the default branch. Missing checks cannot be bypassed with --allow-actionable."
 else
   cr_status=$(printf '%s' "$cr_line" | awk '{print $2}')
   case "$cr_status" in
@@ -217,30 +250,46 @@ else
         cr_started=$(gh pr view "$pr" $repo_arg --json createdAt --jq '.createdAt' 2>/dev/null || echo "")
       fi
       age_s=0
+      parse_failed=0
+      started_epoch=""
       if [ -n "$cr_started" ]; then
-        started_epoch=$(date -u -d "$cr_started" +%s 2>/dev/null || echo 0)
+        if ! started_epoch=$(iso_to_epoch "$cr_started"); then
+          rule_fail 3 "CodeRabbit status startedAt '$cr_started' could not be parsed into an epoch"
+          parse_failed=1
+        fi
+      fi
+      if [ "$parse_failed" -eq 0 ] && [ -n "${started_epoch:-}" ]; then
         now_epoch=$(date -u +%s)
         age_s=$((now_epoch - started_epoch))
       fi
-      if [ "$age_s" -ge 900 ] && [ "$allow_actionable" -eq 1 ]; then
+      if [ "$parse_failed" -eq 0 ] && [ "$age_s" -ge 900 ] && [ "$allow_actionable" -eq 1 ]; then
         if ! printf '%s' "$reason" | grep -qE '^CR outage [0-9]{4}-[0-9]{2}-[0-9]{2} per https://status\.coderabbit\.ai/.+'; then
           rule_fail 3 "Outage bypass requires --reason 'CR outage YYYY-MM-DD per https://status.coderabbit.ai/<incident-id>'"
         else
-          write_waiver "allow-actionable" "CodeRabbit status pending for ${age_s}s"
-          rule_pass 3 "CodeRabbit status=pending for ${age_s}s but bypassed via --allow-actionable"
+          incident_ref=""
+          sp_status=1
+          if incident_ref=$(statuspage_has_active_incident); then
+            sp_status=0
+          else
+            sp_status=$?
+          fi
+
+          if [ "$sp_status" -eq 0 ]; then
+            write_waiver "allow-actionable" "CodeRabbit status pending for ${age_s}s with active incident ${incident_ref}"
+            rule_pass 3 "CodeRabbit status=pending for ${age_s}s and status.coderabbit.ai reports an active incident (${incident_ref}); bypassed via --allow-actionable"
+          elif [ "$sp_status" -eq 2 ]; then
+            rule_fail 3 "Status-page validation failed while evaluating outage bypass. Confirm https://status.coderabbit.ai/ is reachable and re-run without bypass until an active incident is visible."
+          else
+            rule_fail 3 "Outage bypass requested, but status.coderabbit.ai shows no active incident. Do not use --allow-actionable without a live incident."
+          fi
         fi
-      elif [ "$age_s" -ge 900 ]; then
+      elif [ "$parse_failed" -eq 0 ] && [ "$age_s" -ge 900 ]; then
         rule_fail 3 "CR status pending for ${age_s}s. CR may be experiencing an outage. Verify at https://status.coderabbit.ai/ then re-run with --allow-actionable --reason 'CR outage YYYY-MM-DD per https://status.coderabbit.ai/<incident-id>' if confirmed."
-      else
+      elif [ "$parse_failed" -eq 0 ]; then
         rule_fail 3 "CodeRabbit status=pending (started ${cr_started}). Wait for CR to complete its review."
       fi ;;
     *)
-      if [ "$allow_actionable" -eq 1 ]; then
-        write_waiver "allow-actionable" "CodeRabbit status=$cr_status"
-        rule_pass 3 "CodeRabbit status=$cr_status but bypassed via --allow-actionable"
-      else
-        rule_fail 3 "CodeRabbit status=$cr_status (expected pass/success). Wait for CR to complete its review and address any findings."
-      fi ;;
+      rule_fail 3 "CodeRabbit status=$cr_status (expected pass/success). Wait for CR to complete its review and address any findings. Non-pending failures cannot be bypassed with --allow-actionable." ;;
   esac
 fi
 
@@ -520,7 +569,13 @@ else
       break
     fi
 
-    age=$(( $(date +%s) - $(date -d "$last_cr_activity" +%s) ))
+    if ! last_cr_activity_epoch=$(iso_to_epoch "$last_cr_activity"); then
+      rule_fail 8 "Last CR activity timestamp '$last_cr_activity' could not be parsed into an epoch"
+      quiet_rule_satisfied=1
+      break
+    fi
+
+    age=$(( $(date -u +%s) - last_cr_activity_epoch ))
     if [ "$age" -ge "$quiet_period_seconds" ]; then
       rule_pass 8 "Last CR activity at $last_cr_activity is ${age}s old (threshold ${quiet_period_seconds}s)"
       quiet_rule_satisfied=1
