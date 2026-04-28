@@ -252,11 +252,229 @@ else
   rule_fail 4 "mergeStateStatus=$merge_state (expected CLEAN) — CI checks pending/failing or branch out of date"
 fi
 
+# Gather paginated PR review/activity data once for Rules 5/7/8.
+get_pull_request_activity_json() {
+  python3 - "$owner" "$repo_name" "$pr" <<'PY'
+import json
+import subprocess
+import sys
+
+owner, repo, pr = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+def gql(query, **variables):
+    cmd = ['gh', 'api', 'graphql', '-f', f'query={query}']
+    for key, value in variables.items():
+        if value is not None:
+            cmd.extend(['-F', f'{key}={value}'])
+    return json.loads(subprocess.check_output(cmd, text=True))
+
+last_commit_query = '''
+query($o:String!,$r:String!,$p:Int!){
+  repository(owner:$o,name:$r){
+    pullRequest(number:$p){
+      commits(last:1){ nodes{ commit{ committedDate } } }
+    }
+  }
+}'''
+
+threads_query = '''
+query($o:String!,$r:String!,$p:Int!,$after:String){
+  repository(owner:$o,name:$r){
+    pullRequest(number:$p){
+      reviewThreads(first:100, after:$after){
+        pageInfo{ hasNextPage endCursor }
+        nodes{ id isResolved }
+      }
+    }
+  }
+}'''
+
+thread_comments_query = '''
+query($id:ID!,$after:String){
+  node(id:$id){
+    ... on PullRequestReviewThread{
+      comments(first:100, after:$after){
+        pageInfo{ hasNextPage endCursor }
+        nodes{ author{ login } body createdAt }
+      }
+    }
+  }
+}'''
+
+comments_query = '''
+query($o:String!,$r:String!,$p:Int!,$after:String){
+  repository(owner:$o,name:$r){
+    pullRequest(number:$p){
+      comments(first:100, after:$after){
+        pageInfo{ hasNextPage endCursor }
+        nodes{ author{ login } body createdAt }
+      }
+    }
+  }
+}'''
+
+reviews_query = '''
+query($o:String!,$r:String!,$p:Int!,$after:String){
+  repository(owner:$o,name:$r){
+    pullRequest(number:$p){
+      reviews(first:100, after:$after){
+        pageInfo{ hasNextPage endCursor }
+        nodes{ author{ login } submittedAt }
+      }
+    }
+  }
+}'''
+
+def paginate_threads():
+    after = None
+    threads = []
+    while True:
+        data = gql(threads_query, o=owner, r=repo, p=pr, after=after)
+        conn = data['data']['repository']['pullRequest']['reviewThreads']
+        for node in conn['nodes']:
+            node['comments'] = paginate_thread_comments(node['id'])
+            threads.append(node)
+        if not conn['pageInfo']['hasNextPage']:
+            return threads
+        after = conn['pageInfo']['endCursor']
+
+def paginate_thread_comments(thread_id):
+    after = None
+    comments = []
+    while True:
+        data = gql(thread_comments_query, id=thread_id, after=after)
+        conn = data['data']['node']['comments']
+        comments.extend(conn['nodes'])
+        if not conn['pageInfo']['hasNextPage']:
+            return comments
+        after = conn['pageInfo']['endCursor']
+
+def paginate_pull_request_comments():
+    after = None
+    comments = []
+    while True:
+        data = gql(comments_query, o=owner, r=repo, p=pr, after=after)
+        conn = data['data']['repository']['pullRequest']['comments']
+        comments.extend(conn['nodes'])
+        if not conn['pageInfo']['hasNextPage']:
+            return comments
+        after = conn['pageInfo']['endCursor']
+
+def paginate_reviews():
+    after = None
+    reviews = []
+    while True:
+        data = gql(reviews_query, o=owner, r=repo, p=pr, after=after)
+        conn = data['data']['repository']['pullRequest']['reviews']
+        reviews.extend(conn['nodes'])
+        if not conn['pageInfo']['hasNextPage']:
+            return reviews
+        after = conn['pageInfo']['endCursor']
+
+last_commit_data = gql(last_commit_query, o=owner, r=repo, p=pr)
+commit_nodes = last_commit_data['data']['repository']['pullRequest']['commits']['nodes']
+last_commit = commit_nodes[0]['commit'].get('committedDate') if commit_nodes else ''
+
+print(json.dumps({
+    'last_commit': last_commit,
+    'review_threads': paginate_threads(),
+    'comments': paginate_pull_request_comments(),
+    'reviews': paginate_reviews(),
+}))
+PY
+}
+
+count_unresolved_threads() {
+  python3 -c 'import json, sys; data = json.load(sys.stdin); print(sum(1 for thread in data["review_threads"] if not thread.get("isResolved")))'
+}
+
+compute_missing_replies() {
+  python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+missing = []
+for thread in data["review_threads"]:
+    comments = thread.get("comments", [])
+    has_cr = any(((comment.get("author") or {}).get("login")) in {"coderabbitai", "coderabbitai[bot]"} for comment in comments)
+    if not has_cr:
+        continue
+    has_jordan = any(((comment.get("author") or {}).get("login")) == "Jordanmuss99" for comment in comments)
+    if has_jordan:
+        continue
+    first_cr_body = next(((comment.get("body") or "") for comment in comments if ((comment.get("author") or {}).get("login")) in {"coderabbitai", "coderabbitai[bot]"}), "")
+    if "nitpick" in first_cr_body.lower():
+        continue
+    missing.append(thread.get("id", ""))
+
+print("\n".join(filter(None, missing)))
+'
+}
+
+parse_quiet_period_payload() {
+  python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+last_commit = payload.get("last_commit") or ""
+cr_logins = {"coderabbitai", "coderabbitai[bot]"}
+
+activity = []
+excluded = []
+
+def handle_comment(comment):
+    body = comment.get("body") or ""
+    created_at = comment.get("createdAt") or ""
+    login = ((comment.get("author") or {}).get("login")) or ""
+    if "@coderabbitai pause" in body:
+        excluded.append(("pause", created_at))
+    if "Actions performed" in body:
+        excluded.append(("actions-performed", created_at))
+    if login in cr_logins and "Actions performed" not in body and last_commit and created_at >= last_commit:
+        activity.append(created_at)
+
+for comment in payload.get("comments", []):
+    handle_comment(comment)
+
+for thread in payload.get("review_threads", []):
+    for comment in thread.get("comments", []):
+        handle_comment(comment)
+
+for review in payload.get("reviews", []):
+    login = ((review.get("author") or {}).get("login")) or ""
+    submitted_at = review.get("submittedAt") or ""
+    if login in cr_logins and last_commit and submitted_at >= last_commit:
+        activity.append(submitted_at)
+
+last_activity = max(activity) if activity else ""
+latest_excluded = ""
+if excluded:
+    kind, created_at = max(excluded, key=lambda item: item[1])
+    latest_excluded = f"{kind}@{created_at}"
+
+print(last_commit)
+print(last_activity)
+print(latest_excluded)
+'
+}
+
+refresh_pull_request_activity() {
+  pr_activity_json=$(get_pull_request_activity_json)
+}
+
+refresh_quiet_period_state() {
+  mapfile -t quiet_state < <(printf '%s' "$pr_activity_json" | parse_quiet_period_payload)
+  last_commit="${quiet_state[0]:-}"
+  last_cr_activity="${quiet_state[1]:-}"
+  latest_excluded_comment="${quiet_state[2]:-}"
+}
+
+refresh_pull_request_activity
+
 # Rule 5: zero unresolved threads
-unresolved=$(gh api graphql \
-  -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved}}}}}' \
-  -F o="$owner" -F r="$repo_name" -F p="$pr" \
-  --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length')
+unresolved=$(printf '%s' "$pr_activity_json" | count_unresolved_threads)
 if [ "$unresolved" -gt 0 ]; then
   rule_fail 5 "$unresolved unresolved review thread(s) on PR #$pr — reply with reasoning or a fix commit, then resolve each thread"
 else
@@ -278,82 +496,12 @@ else
 fi
 
 # Rule 7: every non-nit CR thread must have a Jordan reply
-missing_replies=$(gh api graphql \
-  -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{author{login} body}}}}}}}' \
-  -F o="$owner" -F r="$repo_name" -F p="$pr" \
-  --jq '
-    .data.repository.pullRequest.reviewThreads.nodes[]
-    | select(any(.comments.nodes[]?; (.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]")))
-    | select(all(.comments.nodes[]?; .author.login != "Jordanmuss99"))
-    | select((([.comments.nodes[] | select(.author.login=="coderabbitai" or .author.login=="coderabbitai[bot]")][0].body) // "") | test("(?i)nitpick") | not)
-    | .id')
+missing_replies=$(printf '%s' "$pr_activity_json" | compute_missing_replies)
 if [ -n "$missing_replies" ]; then
   rule_fail 7 "CR thread(s) missing a Jordanmuss99 reply before resolution: $(printf '%s' "$missing_replies" | paste -sd ', ' -)"
 else
   rule_pass 7 "Every non-nit CR-authored thread has a Jordanmuss99 reply"
 fi
-
-get_quiet_period_payload() {
-  gh api graphql \
-    -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){commits(last:1){nodes{commit{committedDate}}} comments(first:100){nodes{author{login} body createdAt}} reviews(first:100){nodes{author{login} submittedAt}} reviewThreads(first:100){nodes{comments(first:100){nodes{author{login} body createdAt}}}}}}}' \
-    -F o="$owner" -F r="$repo_name" -F p="$pr"
-}
-
-parse_quiet_period_payload() {
-  python3 -c '
-import json
-import sys
-
-payload = json.load(sys.stdin)["data"]["repository"]["pullRequest"]
-last_commit = payload["commits"]["nodes"][0]["commit"].get("committedDate") if payload["commits"]["nodes"] else ""
-cr_logins = {"coderabbitai", "coderabbitai[bot]"}
-
-activity = []
-excluded = []
-
-def handle_comment(comment):
-    body = comment.get("body") or ""
-    created_at = comment.get("createdAt") or ""
-    login = ((comment.get("author") or {}).get("login")) or ""
-    if "@coderabbitai pause" in body:
-        excluded.append(("pause", created_at))
-    if "Actions performed" in body:
-        excluded.append(("actions-performed", created_at))
-    if login in cr_logins and "Actions performed" not in body and last_commit and created_at >= last_commit:
-        activity.append(created_at)
-
-for comment in payload.get("comments", {}).get("nodes", []):
-    handle_comment(comment)
-
-for thread in payload.get("reviewThreads", {}).get("nodes", []):
-    for comment in thread.get("comments", {}).get("nodes", []):
-        handle_comment(comment)
-
-for review in payload.get("reviews", {}).get("nodes", []):
-    login = ((review.get("author") or {}).get("login")) or ""
-    submitted_at = review.get("submittedAt") or ""
-    if login in cr_logins and last_commit and submitted_at >= last_commit:
-        activity.append(submitted_at)
-
-last_activity = max(activity) if activity else ""
-latest_excluded = ""
-if excluded:
-    kind, created_at = max(excluded, key=lambda item: item[1])
-    latest_excluded = f"{kind}@{created_at}"
-
-print(last_commit)
-print(last_activity)
-print(latest_excluded)
-'
-}
-
-refresh_quiet_period_state() {
-  quiet_payload=$(get_quiet_period_payload)
-  mapfile -t quiet_state < <(printf '%s' "$quiet_payload" | parse_quiet_period_payload)
-  last_commit="${quiet_state[0]:-}"
-  last_cr_activity="${quiet_state[1]:-}"
-  latest_excluded_comment="${quiet_state[2]:-}"
-}
 
 refresh_quiet_period_state
 
@@ -383,6 +531,7 @@ else
     if [ "$wait_for_quiet_period" -eq 1 ] && [ "$dry_run" -eq 0 ]; then
       info "Rule 8 waiting: last CR activity at $last_cr_activity is ${age}s old; sleeping ${remaining}s"
       sleep "$remaining"
+      refresh_pull_request_activity
       refresh_quiet_period_state
     else
       rule_fail 8 "CR activity at $last_cr_activity is ${age}s old; quiet period requires ${quiet_period_seconds}s. Wait ${remaining}s and re-run."

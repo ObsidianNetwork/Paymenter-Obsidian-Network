@@ -96,7 +96,7 @@ All nine rules are checked by `ralph-loop-verify.sh` before every merge. "Mechan
 
 4. **`mergeStateStatus == CLEAN`.** Covers: mergeable + all required CI checks SUCCESS + no blocking reviews.
 
-5. **Zero unresolved review threads.** Every CR thread must be closed via reply + resolve. Silent resolution (clicking "Resolve" with no reply) is a contract violation.
+5. **Zero unresolved review threads.** Every review thread must be resolved before merge. Reply requirements live in Rule 7, not here.
 
 6. **Every dp-NN PR targets an integration branch off the default; direct push to a default branch for dp-NN work is a contract violation.** "Default branch" = whatever `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name` returns at the time of work. If the integration branch on a fork IS the default (e.g., `dynamic-slider/1.4.7` on `ObsidianNetwork/Paymenter-Obsidian-Network`), create a feature branch off it (e.g., `dp-NN-<slug>`) and PR back to it.
 
@@ -175,7 +175,7 @@ Document the rejection in the next commit message or a plan-level note.
 
 ### Nitpick carve-out
 
-**Nitpick (`nitpick`-tagged) findings are partially exempt from the accept-side comment requirement.** If you AGREE with a nitpick: push the fix and resolve the thread; an accept-side comment is OPTIONAL (silent accept is acceptable for nits only). If you DISAGREE with a nitpick: post the standard 3-part reject reply BEFORE resolving — disagreement comments help CR's learnings model reduce future low-value nits, which is the highest-leverage feedback we can give it. Rule 7 still applies in full force to all NON-nit findings on both accept and reject paths.
+**Nitpick (`nitpick`-tagged) findings are partially exempt from the accept-side comment requirement.** If you AGREE with a nitpick: push the fix and resolve the thread; an accept-side comment is OPTIONAL (silent accept is acceptable for nits only). If you DISAGREE with a nitpick: post the standard 3-part reject reply BEFORE resolving — disagreement comments help CR's learnings model reduce future low-value nits, which is the highest-leverage feedback we can give it. Rule 7's mechanical gate excludes nit-tagged threads because accept-vs-reject intent cannot be inferred reliably from thread state alone; the human/driver rule still requires a reply on nit disagreements. Rule 7 still applies in full force to all NON-nit findings on both accept and reject paths.
 
 **Never close a non-nit CR thread without a reply. Never ignore a finding silently.**
 
@@ -298,10 +298,13 @@ If the integration branch on a repo is also the repo default, `--expected-base` 
 If the script is unavailable, run the inline equivalent (including the Rule 6/7/8 checks):
 ```bash
 pr=<PR_NUMBER>; repo=<owner/name>
+expected='<expected-base-regex>'
 default=$(gh repo view "$repo" --json defaultBranchRef --jq .defaultBranchRef.name)
 base=$(gh pr view $pr --repo $repo --json baseRefName --jq '.baseRefName')
 gh pr view $pr --repo $repo --json author --jq '.author.login'  # must be Jordanmuss99
-test "$base" != "$default"                                 # unless explicit default-branch waiver applies
+if [ "$base" = "$default" ] && ! printf '%s' "$default" | grep -qE "$expected"; then
+  echo "FAIL: base branch '$base' is the repo default and does not match the expected integration-branch regex"
+fi
 gh pr checks $pr --repo $repo | grep -E '^CodeRabbit\b'          # must show pass
 gh pr view $pr --repo $repo --json mergeStateStatus --jq '.mergeStateStatus'  # must be CLEAN
 owner=${repo%%/*}; rname=${repo##*/}

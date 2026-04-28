@@ -474,7 +474,7 @@ The subagent must:
 - [x] Self-test: PR #15 — confirm Rule 7 PASS (retroactive)
 - [x] Self-test: PR #20 — `--dry-run` summary captured
 - [x] dp-process-02 Status section cross-references this plan
-- [ ] PR opened against integration branch in outer Paymenter
+- [x] PR opened against integration branch in outer Paymenter
 - [ ] CR review cycle complete on dp-process-03 PR (dogfood new rules)
 - [ ] PR merged per new gate
 - [ ] First dp-20 PR after merge confirms the new workflow works end-to-end
