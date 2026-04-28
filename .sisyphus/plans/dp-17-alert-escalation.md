@@ -135,13 +135,13 @@ OR one commit if the UI piece is genuinely tiny. Pick what looks cleanest after 
 
 ## Status
 
-- [ ] Plan written (you are here)
-- [ ] Delegated to subagent
-- [ ] Migration + model
-- [ ] AlertService refactor + event
-- [ ] Admin UI widget
-- [ ] All new tests green; existing test suite still green
-- [ ] PR opened
-- [ ] CR review cycle complete
-- [ ] PR merged
-- [ ] PROGRESS.md updated; CHANGELOG.md `[Unreleased]` entry
+- [x] Plan written (you are here)
+- [x] Delegated to subagent (`bg_66b2dfee` / `ses_235b73019ffeyFiQeWkAw1FZh8`, Sisyphus-Junior, category=deep)
+- [x] Migration + model
+- [x] AlertService refactor + event
+- [x] Admin UI widget
+- [x] All new tests green; existing test suite still green
+- [x] PR opened
+- [x] CR review cycle complete (fixes in 8cd56f2)
+- [x] PR merged (b7cdd54, squash into dynamic-slider)
+- [x] PROGRESS.md updated; CHANGELOG.md `[Unreleased]` entry
