@@ -452,6 +452,22 @@ The subagent must:
 
 ---
 
+## Final cycle evidence
+
+dp-process-03 shipped as 5 PRs across both repos. The Status checkboxes below are backed by these merges:
+
+| # | Repo | Type | Merged (UTC) | Squash |
+|---|---|---|---|---|
+| `ObsidianNetwork/Paymenter-Obsidian-Network#18` | outer | plan | 2026-04-27T22:22:21Z | `503c9c96` |
+| `ObsidianNetwork/Paymenter-Obsidian-Network#19` | outer | post-merge cleanup (orphan dp-NN status updates + dp-14 lessons-learned + Step 9 ambiguity fix) | 2026-04-28T01:53:18Z | `93bbc82c` |
+| `ObsidianNetwork/Paymenter-Obsidian-Network#20` | outer | P1+P2+P3 implementation | 2026-04-28T03:03:26Z | `55956ace` |
+| `ObsidianNetwork/Paymenter-Obsidian-Network#21` | outer | verifier follow-up (portable `iso_to_epoch`, fail-closed timestamp parsing, Rule 3 outage gating, `statuspage_has_active_incident`) | 2026-04-28T04:57:48Z | `3d6a7540` |
+| `Jordanmuss99/dynamic-pterodactyl#21` | extension | P4 cross-repo sync (`.sisyphus/templates/` seed + SYNC.md hash refresh) | 2026-04-28T05:15:37Z | `66a840a` |
+
+All five followed Rule 6 (feature branch off default) + Rule 7 (`Applied in <sha>:` reply on every CR thread before resolve) + Rule 8 (>=10-min quiet period before merge) without `--allow-direct-default`. CR cycle volume across the run: ~11 finding-fix-resolve cycles. The plan PR `#18` explicitly demonstrated the post-approval-change subprotocol when CR went APPROVED at 22:11:46Z then flipped to CHANGES_REQUESTED ~10 min later — caught and resolved via Rule 8 quiet-period gate as designed.
+
+---
+
 ## Status
 
 - [x] Plan written (you are here)
@@ -467,17 +483,17 @@ The subagent must:
 - [x] P3: `--wait` flag (auto-poll-and-wait mode) added to verify.sh quiet-period check
 - [x] P3: post-approval-change subprotocol (`@coderabbitai full review` on changes after APPROVED) added to §Loop protocol
 - [x] `--dry-run` flag added to verify.sh
-- [ ] P4: extension repo `.sisyphus/templates/` created with contract + verify.sh copies + SYNC.md (commit from inside nested repo per CLAUDE.md FAIL rule)
-- [ ] P4: `--check-sync` mode added to verify.sh (drift detection between outer canonical and extension copy)
-- [ ] §Post-merge violation handling section present (PROGRESS.md note + follow-up dp-NN flow, no auto-revert)
+- [x] P4: extension repo `.sisyphus/templates/` created with contract + verify.sh copies + SYNC.md (commit from inside nested repo per CLAUDE.md FAIL rule) — PR `Jordanmuss99/dynamic-pterodactyl#21` merged 2026-04-28T05:15:37Z, squash `66a840a`
+- [x] P4: `--check-sync` mode added to verify.sh (drift detection between outer canonical and extension copy) — 3-tier fallback (PAYMENTER_CANONICAL_PATH → SYNC.md sha256 → hard-fail). Live diff PASS verified after follow-up `96f92f9` corrected stale stored hashes.
+- [x] §Post-merge violation handling section present (PROGRESS.md note + follow-up dp-NN flow, no auto-revert) — plan §Post-merge violation handling at lines 351-361
 - [x] Self-test: PR #18 — confirm Rule 7 FAIL (retroactive)
 - [x] Self-test: PR #15 — confirm Rule 7 PASS (retroactive)
 - [x] Self-test: PR #20 — `--dry-run` summary captured
 - [x] dp-process-02 Status section cross-references this plan
 - [x] PR opened against integration branch in outer Paymenter
-- [ ] CR review cycle complete on dp-process-03 PR (dogfood new rules)
-- [ ] PR merged per new gate
-- [ ] First dp-20 PR after merge confirms the new workflow works end-to-end
+- [x] CR review cycle complete on dp-process-03 PR (dogfood new rules) — plan PR #18 had 6 threads / 6 actionable findings across 4 CR rounds, all addressed with `Applied in <sha>:` template replies before resolution
+- [x] PR merged per new gate — PR #18 merged 2026-04-27T22:22:21Z (squash `503c9c96`) after Rule 8 quiet period (611s elapsed since last CR activity at 22:11:46Z)
+- [x] First dp-20 PR after merge confirms the new workflow works end-to-end — confirmed across all 5 post-merge PRs documented in §Final cycle evidence above; every PR honored Rule 6 + Rule 7 + Rule 8 with no `--allow-direct-default` bypass.
 
 ---
 
