@@ -110,13 +110,13 @@ Single commit. Title: `docs: sync 03-API + 05-ADMIN-UI + 09-IMPLEMENTATION with 
 
 ## Status
 
-- [ ] Plan written (you are here)
-- [ ] Delegated to subagent
-- [ ] 03-API.md rewritten
-- [ ] 05-ADMIN-UI.md rewritten
-- [ ] 09-IMPLEMENTATION.md rewritten
-- [ ] Acceptance grep checks pass
-- [ ] Commit + push + PR
-- [ ] CR review cycle complete (CR is good at catching doc drift)
-- [ ] PR merged
-- [ ] PROGRESS.md updated
+- [x] Plan written (you are here)
+- [x] Delegated to subagent
+- [x] 03-API.md rewritten
+- [x] 05-ADMIN-UI.md rewritten
+- [x] 09-IMPLEMENTATION.md rewritten
+- [x] Acceptance grep checks pass
+- [x] Commit + push + PR (docs/sync-architecture → PR #19, 82e9115)
+- [x] CR review cycle complete (4 rounds; 2 CHANGES_REQUESTED fixed, 2 COMMENTED-only)
+- [x] PR merged (f5f88c7, squash into dynamic-slider)
+- [x] PROGRESS.md updated (4a5641d)
