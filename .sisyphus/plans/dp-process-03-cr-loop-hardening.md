@@ -455,26 +455,26 @@ The subagent must:
 ## Status
 
 - [x] Plan written (you are here)
-- [ ] Pre-flight reads complete (subagent)
-- [ ] CR `author.login` sampling complete; query strings confirmed
-- [ ] CR ack-message filter confirmed against ≥3 recent samples
-- [ ] P1: Rule 6 in contract + default-branch check in verify.sh + `--allow-direct-default` flag
-- [ ] P1: verbatim 8-step driver checklist embedded in §Loop protocol
-- [ ] P2: Rule 7 in contract + thread-reply GraphQL check in verify.sh
-- [ ] P2: nit-handling carve-out (silent-accept OK for nits / disagree MUST comment) added to §Evaluating findings
-- [ ] P3: Rule 8 in contract + quiet-period check in verify.sh + `--quiet-period-seconds` flag
-- [ ] P3: "do not rush" rationale paragraph appended to Rule 8 prose
-- [ ] P3: `--wait` flag (auto-poll-and-wait mode) added to verify.sh quiet-period check
-- [ ] P3: post-approval-change subprotocol (`@coderabbitai full review` on changes after APPROVED) added to §Loop protocol
-- [ ] `--dry-run` flag added to verify.sh
+- [x] Pre-flight reads complete (subagent)
+- [x] CR `author.login` sampling complete; query strings confirmed
+- [x] CR ack-message filter confirmed against ≥3 recent samples
+- [x] P1: Rule 6 in contract + default-branch check in verify.sh + `--allow-direct-default` flag
+- [x] P1: verbatim 8-step driver checklist embedded in §Loop protocol
+- [x] P2: Rule 7 in contract + thread-reply GraphQL check in verify.sh
+- [x] P2: nit-handling carve-out (silent-accept OK for nits / disagree MUST comment) added to §Evaluating findings
+- [x] P3: Rule 8 in contract + quiet-period check in verify.sh + `--quiet-period-seconds` flag
+- [x] P3: "do not rush" rationale paragraph appended to Rule 8 prose
+- [x] P3: `--wait` flag (auto-poll-and-wait mode) added to verify.sh quiet-period check
+- [x] P3: post-approval-change subprotocol (`@coderabbitai full review` on changes after APPROVED) added to §Loop protocol
+- [x] `--dry-run` flag added to verify.sh
 - [ ] P4: extension repo `.sisyphus/templates/` created with contract + verify.sh copies + SYNC.md (commit from inside nested repo per CLAUDE.md FAIL rule)
 - [ ] P4: `--check-sync` mode added to verify.sh (drift detection between outer canonical and extension copy)
 - [ ] §Post-merge violation handling section present (PROGRESS.md note + follow-up dp-NN flow, no auto-revert)
-- [ ] Self-test: PR #18 — confirm Rule 7 FAIL (retroactive)
-- [ ] Self-test: PR #15 — confirm Rule 7 PASS (retroactive)
-- [ ] Self-test: PR #20 — `--dry-run` summary captured
-- [ ] dp-process-02 Status section cross-references this plan
-- [ ] PR opened against integration branch in outer Paymenter
+- [x] Self-test: PR #18 — confirm Rule 7 FAIL (retroactive)
+- [x] Self-test: PR #15 — confirm Rule 7 PASS (retroactive)
+- [x] Self-test: PR #20 — `--dry-run` summary captured
+- [x] dp-process-02 Status section cross-references this plan
+- [x] PR opened against integration branch in outer Paymenter
 - [ ] CR review cycle complete on dp-process-03 PR (dogfood new rules)
 - [ ] PR merged per new gate
 - [ ] First dp-20 PR after merge confirms the new workflow works end-to-end

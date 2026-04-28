@@ -84,7 +84,7 @@ gh api repos/<owner>/<repo>/contents/.coderabbit.yaml --jq .name
 
 ## Hard rules (non-negotiable, mechanically verified)
 
-All six rules are checked by `ralph-loop-verify.sh` before every merge. "Mechanically verified" means the script exits non-zero if the rule fails — prose reasoning alone does not substitute.
+All nine rules are checked by `ralph-loop-verify.sh` before every merge. "Mechanically verified" means the script exits non-zero if the rule fails — prose reasoning alone does not substitute.
 
 0. **PR author = `Jordanmuss99`.** Immutable on GitHub. Wrong author → close, switch account, reopen.
 
@@ -96,7 +96,15 @@ All six rules are checked by `ralph-loop-verify.sh` before every merge. "Mechani
 
 4. **`mergeStateStatus == CLEAN`.** Covers: mergeable + all required CI checks SUCCESS + no blocking reviews.
 
-5. **Zero unresolved review threads.** Every CR thread must be closed via reply + resolve. Silent resolution (clicking "Resolve" with no reply) is a contract violation.
+5. **Zero unresolved review threads.** Every review thread must be resolved before merge. Reply requirements live in Rule 7, not here.
+
+6. **Every dp-NN PR targets an integration branch off the default; direct push to a default branch for dp-NN work is a contract violation.** "Default branch" = whatever `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name` returns at the time of work. If the integration branch on a fork IS the default (e.g., `dynamic-slider/1.4.7` on `ObsidianNetwork/Paymenter-Obsidian-Network`), create a feature branch off it (e.g., `dp-NN-<slug>`) and PR back to it.
+
+7. **Every CR-authored review thread has ≥1 Jordanmuss99 reply before resolution.** Silent resolution (clicking "Resolve" without posting a reply comment) is a violation. Applies symmetrically: accept-side replies summarize what was applied; reject-side replies provide the 3-part rationale.
+
+8. **≥10-minute quiet period after most recent CR activity before merge.** "CR activity" = any review submitted or thread / PR comment authored by `coderabbitai` since the last commit on the PR. `Actions performed` auto-ack comments are excluded from activity. (Earlier drafts also listed `CodeRabbit` GitHub-status flips, but they are redundant with comment/review timestamps: the PENDING→SUCCESS flip happens concurrently with CR's final review post per commit, and PENDING itself is gated upstream by the existing pre-quiet-period precondition that requires `CodeRabbit` status to be SUCCESS before the gate is even evaluated.) The verify script computes `now - last_cr_activity_timestamp` and fails if < 600s.
+
+> **Why this rule exists (do not rush)**: CR's APPROVED status is not final. CR may post additional findings within 5-10 minutes after approval, especially when our final commit triggers an incremental review. Merging inside this window has caused us to ship code that CR would have flagged. The rule says "do not rush" — even when the dashboard shows GREEN status and zero unresolved threads, wait the full quiet period before merging. The driver SHOULD use the verify.sh `--wait` flag to make the wait automatic rather than re-running manually.
 
 **Outage bypass**: `--allow-actionable --reason 'CR outage <date> per https://status.coderabbit.ai/<incident-id>'` is permitted ONLY when CR's commit-status has been `pending` for ≥ 15 min AND status.coderabbit.ai shows an active incident. The driver MUST attach the incident URL to the audit log entry (written automatically to `.sisyphus/notepads/ralph-loop-waivers.jsonl`). See zeroclaw-labs/zeroclaw#1792 (2026-02) for the failure mode this rule addresses. The script automatically escalates with the status-page URL and bypass instructions when the 15-min threshold is exceeded.
 ---
@@ -127,7 +135,7 @@ If the result is less than 120 seconds ago, wait. Multiple rapid mentions re-arm
 
 ### Post-mention ack check
 
-After posting `@coderabbitai review`, wait up to 60 seconds. CR should reply with "Actions performed: Review triggered." If no ack appears within 60 seconds, do NOT post again — CR may be processing. Check the status check for `pending`. Only if the status check is absent AND no ack after 5 minutes should you consider posting a second mention.
+After posting `@coderabbitai review`, wait up to 60 seconds. CR should reply with an auto-ack comment whose body contains `Actions performed` (currently rendered inside an HTML `<summary>` block, e.g. `<summary>✅ Actions performed</summary>`). If no ack appears within 60 seconds, do NOT post again — CR may be processing. Check the status check for `pending`. Only if the status check is absent AND no ack after 5 minutes should you consider posting a second mention.
 
 ---
 
@@ -142,9 +150,17 @@ CodeRabbit is a tool — it can be wrong. Every finding MUST be evaluated before
 3. **Is it in scope for this PR?** Out-of-scope work goes to a dp-NN plan, not this PR.
 4. **Is it a real bug or a false positive?** Trace the code yourself before applying.
 
-### If you agree → fix it
+### If you agree → fix it AND comment on the thread
 
-Push a follow-up commit. Auto-review fires (CR config has `auto_incremental_review: true`). Wait for the `CodeRabbit` status check to return to `pass`.
+1. Push a follow-up commit that addresses the finding.
+2. Reply on the CR thread with the template:
+   ```
+   Applied in <short-sha>: <one-line summary of the change>.
+   ```
+   Example: `Applied in 9897b06: extracted Alpine fallback x-data so error/status are defined for non-slider products.`
+3. Resolve the thread.
+
+Auto-review fires on the new commit; wait for the `CodeRabbit` status check to return to `pass`.
 
 ### If you disagree or it is out of scope → reject with reasoning
 
@@ -153,11 +169,15 @@ Reply on the thread with all three:
 2. Why it is wrong / out-of-scope / already addressed (concrete reason, not "I disagree").
 3. What the intended design is, or where it is deferred (pointer to code / dp-NN plan).
 
-Then resolve the thread. Both plain GitHub comments and `@coderabbitai <rationale>` replies are acceptable. Use `@coderabbitai` when the point is genuinely arguable and you want CR to respond before closing.
+Then resolve the thread. The reject-side reply MUST be posted as a thread reply (not as a top-level PR comment) so it links to the finding it addresses. Both plain GitHub comments and `@coderabbitai <rationale>` replies are acceptable. Use `@coderabbitai` when the point is genuinely arguable and you want CR to respond before closing.
 
 Document the rejection in the next commit message or a plan-level note.
 
-**Never close a thread without a reply. Never ignore a finding silently.**
+### Nitpick carve-out
+
+**Nitpick (`nitpick`-tagged) findings are partially exempt from the accept-side comment requirement.** If you AGREE with a nitpick: push the fix and resolve the thread; an accept-side comment is OPTIONAL (silent accept is acceptable for nits only). If you DISAGREE with a nitpick: post the standard 3-part reject reply BEFORE resolving — disagreement comments help CR's learnings model reduce future low-value nits, which is the highest-leverage feedback we can give it. Rule 7's mechanical gate excludes nit-tagged threads because accept-vs-reject intent cannot be inferred reliably from thread state alone; the human/driver rule still requires a reply on nit disagreements. Rule 7 still applies in full force to all NON-nit findings on both accept and reject paths.
+
+**Never close a non-nit CR thread without a reply. Never ignore a finding silently.**
 
 ---
 
@@ -165,28 +185,42 @@ Document the rejection in the next commit message or a plan-level note.
 
 This protocol replaces all prior timer-based / timestamp-comparison logic.
 
-**Recommended pre-push step (see §Tooling):** run `cr review` locally before each `git push`. A clean result catches blockers before consuming a CLI-review slot.
+**Required pre-PR step (see §Tooling):** run `cr review --plain --type committed --base <integration-branch>` locally before `gh pr create`. A clean result catches blockers before consuming PR-review cycles.
 
 ```
-push commit
-  └─ wait up to 60s for 'CodeRabbit' status = pending
-     (if no status after 60s and no .coderabbit.yaml on default branch → escalate)
+implement on feature branch (off integration branch; if the integration branch is the repo default, branch off that default and PR back to it)
+  └─ run `cr review --plain --type committed --base <integration-branch>`
+     │  (REQUIRED — see §Tooling. Must exit 0 OR all findings addressed/rejected with rationale.)
      │
-     └─ poll every 30s until status = pass or fail
-        │
-        ├─ fail → CR cannot review (wrong PR author, repo not connected, etc.) → ESCALATE
-        │
-        └─ pass → read CR review comments
-           │
-           ├─ findings present (unresolved threads > 0)?
-           │   ├─ agreed finding → push fix commit → back to top
-           │   └─ disagree / out-of-scope → reply with 3-part rationale → resolve thread
-           │       └─ all threads resolved? → run ralph-loop-verify.sh
-           │
-           └─ no findings (threads = 0) → run ralph-loop-verify.sh
-              │
-              └─ PASS → gh pr merge --squash --delete-branch
+     ├─ findings present? → fix locally → re-run cr review → repeat
+     └─ clean → `gh pr create --base <integration-branch>`
+          └─ wait up to 60s for 'CodeRabbit' status = pending
+             (if no status after 60s and no .coderabbit.yaml on default branch → escalate)
+             │
+             └─ poll every 30s until status = pass or fail
+                │
+                ├─ fail → CR cannot review (wrong PR author, repo disconnected, etc.) → ESCALATE
+                │
+                └─ pass → read CR review comments
+                   │
+                   ├─ findings present (unresolved threads > 0)?
+                   │   ├─ agreed finding → push fix commit, reply `Applied in <sha>: ...`, resolve thread → back to status poll
+                   │   └─ disagree / out-of-scope → reply with 3-part rationale on the thread → resolve thread
+                   │
+                   └─ all threads resolved + `CodeRabbit` status = pass
+                      └─ poll latest CR activity timestamp; if `now - last_cr_activity < 600s`, wait (or use `--wait`) until threshold is satisfied
+                         └─ run ralph-loop-verify.sh
+                            └─ PASS → gh pr merge --squash --delete-branch
 ```
+
+Step 1. Finish current plan code changes or fixes for new findings.
+Step 2. Run `cr review --plain --type committed` (CodeRabbit CLI) locally on the working branch.
+Step 3. CR CLI verification clean?
+Step 4. If NO: go back to Step 1 and fix. Else if YES: proceed to Step 5.
+Step 5. Create PR (`gh pr create --base <integration-branch>`).
+Step 6. Run the CR PR-review loop (auto-review -> reply on threads -> resolve -> re-trigger as needed).
+Step 7. CR PR loop reaches APPROVED with all threads resolved AND no further issues come back after approval (Rule 8 quiet period satisfied)?
+Step 8. If YES: merge PR to integration branch.
 
 ### `@coderabbitai review` is now the exception
 
@@ -195,6 +229,23 @@ With `.coderabbit.yaml` in place, auto-review fires on every push. You do NOT ne
 - CR status stuck `pending` > 15 minutes (potential CR hang)
 
 If you do post it: observe the auto-ack, then wait. Do not post a second mention unless CR posts a non-ack substantive comment that needs a response.
+
+### After APPROVED, do not rush
+
+Once CR reaches APPROVED and every thread is resolved, do not merge immediately. Wait for Rule 8's quiet period to elapse first. Preferred driver command:
+
+```bash
+bash .sisyphus/templates/ralph-loop-verify.sh <PR_NUMBER> --repo <owner/name> --expected-base '<regex>' --wait
+```
+
+### Post-approval-change subprotocol
+
+**If CR posts findings AFTER its APPROVED status and we make code changes in response (pre-merge):**
+1. Push the fix commit.
+2. Comment `@coderabbitai full review` on the PR to formally re-trigger review (do not rely on auto-review of the new commit alone — auto-review may skip the new commit if CR's last formal status was APPROVED, leaving a stale-approval state).
+3. Wait for new APPROVED status + Rule 8 quiet period before merge.
+
+This subprotocol is the forward-fix mechanism for late findings BEFORE merge; pairs with Rule 8 to close the post-approval gap. If late findings appear AFTER merge has already happened, fall through to post-merge violation handling.
 
 ### After merge
 
@@ -209,6 +260,17 @@ gh pr view <N> --json mergeCommit --jq '.mergeCommit.oid' | cut -c1-8
 # Append PROGRESS.md row (extension repo) or FORK-NOTES.md entry (parent repo).
 # Archive boulder: mv .sisyphus/boulder.json .sisyphus/completed/<plan-name>.boulder.json
 ```
+
+### Post-merge violation handling
+
+If a contract violation is detected AFTER merge (for example: a silent Rule 7 violation is discovered in audit, a Rule 8 quiet-period bypass slips through, or CR posts late findings after merge that should have been caught earlier):
+
+1. Add a `Violation: <rule-N>` note to `.sisyphus/PROGRESS.md` under the affected dp-NN cycle with a one-line description of what slipped.
+2. Open a focused `dp-NN-<slug>-followup` plan in `.sisyphus/plans/` if actual code or contract work is needed.
+3. Do **not** auto-revert the merged PR. Forward-fix through a follow-up plan or a scoped repair PR.
+4. If the same rule is violated three or more times in one quarter, open a new `dp-process-NN` hardening plan.
+
+The prevention mechanism is the pre-merge verify gate. Post-merge handling is observational + tracked, not punitive.
 
 ---
 
@@ -225,17 +287,31 @@ The script exits non-zero if any hard rule fails. **Do not merge if it exits non
 Options:
 - `--expected-base '^master$'` — for config/infra PRs targeting master
 - `--allow-actionable --reason "..."` — bypass CR clean-verdict check with logged rationale (last resort; writes audit entry to `.sisyphus/notepads/ralph-loop-waivers.jsonl`)
+- `--allow-direct-default --reason "..."` — allow a default-branch-targeting PR only for true bootstrap cases; never for routine dp-NN work
+- `--quiet-period-seconds <N>` / `QUIET_PERIOD_SECONDS=<N>` — override the Rule 8 wait threshold (default 600)
+- `--wait` — wait out Rule 8 automatically instead of hard-failing on an unsatisfied quiet period
+- `--skip-quiet-period --reason "..."` — emergency-only Rule 8 bypass with logged rationale
+- `--dry-run` — print pass/fail outcomes for every rule without exiting non-zero
 
-If the script is unavailable, run the inline equivalent:
+If the integration branch on a repo is also the repo default, `--expected-base` will legitimately match that default and no Rule 6 waiver is needed — the required discipline is "feature branch off default, then PR back to it," not a direct push. Use `--allow-direct-default` only for true bootstrap/default-target exceptions outside that normal feature-branch PR flow.
+
+If the script is unavailable, run the inline equivalent (including the Rule 6/7/8 checks):
 ```bash
 pr=<PR_NUMBER>; repo=<owner/name>
+expected='<expected-base-regex>'
+default=$(gh repo view "$repo" --json defaultBranchRef --jq .defaultBranchRef.name)
+base=$(gh pr view $pr --repo $repo --json baseRefName --jq '.baseRefName')
 gh pr view $pr --repo $repo --json author --jq '.author.login'  # must be Jordanmuss99
+if [ "$base" = "$default" ] && ! printf '%s' "$default" | grep -qE "$expected"; then
+  echo "FAIL: base branch '$base' is the repo default and does not match the expected integration-branch regex"
+fi
 gh pr checks $pr --repo $repo | grep -E '^CodeRabbit\b'          # must show pass
 gh pr view $pr --repo $repo --json mergeStateStatus --jq '.mergeStateStatus'  # must be CLEAN
 owner=${repo%%/*}; rname=${repo##*/}
 gh api graphql -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved}}}}}' \
   -F o="$owner" -F r="$rname" -F p="$pr" \
   --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length'  # must be 0
+# then run the Rule 7 thread-reply and Rule 8 quiet-period GraphQL/jq checks from ralph-loop-verify.sh verbatim
 ```
 
 ---
@@ -309,7 +385,13 @@ cr whoami   # must print: Jordanmuss99
 ```bash
 cr review   # reviews committed diff; exits non-zero on blocking findings
 ```
-Run before every `git push` during dp-NN work. Does not substitute for the full PR gate (ralph-loop-verify.sh), but catches regressions before consuming a CLI-review slot.
+**Required for every dp-NN PR before `gh pr create`:**
+
+```bash
+cr review --plain --type committed --base <integration-branch>
+```
+
+Run after local changes are committed on the feature branch and before `gh pr create`. A clean result does not substitute for the full PR gate (`ralph-loop-verify.sh`), but it is now mandatory because it catches regressions before consuming PR-review cycles.
 
 ### CR Skills — agent-invocable review + autofix
 
@@ -354,10 +436,10 @@ CR auto-detects `**/CLAUDE.md`, `**/AGENTS.md`, `**/.cursorrules`, and several o
 
 ## Related files
 
-- `.sisyphus/templates/ralph-loop-verify.sh` — executable gate (v2)
+- `.sisyphus/templates/ralph-loop-verify.sh` — executable gate (v3)
 - `.sisyphus/plans/dp-process-01-ralph-loop-v2.md` — this refactor's plan + Phase 2 live validation results
 - `.sisyphus/notepads/dp-process-audit/incident-2026-04-24.md` — root-cause record
-- `.sisyphus/notepads/ralph-loop-waivers.jsonl` — audit log for `--allow-actionable` bypass uses
+- `.sisyphus/notepads/ralph-loop-waivers.jsonl` — audit log for `--allow-actionable`, `--allow-direct-default`, and `--skip-quiet-period` waiver uses
 - `ObsidianNetwork/Paymenter-Obsidian-Network:.coderabbit.yaml` — repo-level CR config (on `master`)
 - `Jordanmuss99/dynamic-pterodactyl:.coderabbit.yaml` — repo-level CR config (on `dynamic-slider`)
 - `extensions/Others/DynamicPterodactyl/CLAUDE.md` — references this file at "CodeRabbit Review Mandate"
