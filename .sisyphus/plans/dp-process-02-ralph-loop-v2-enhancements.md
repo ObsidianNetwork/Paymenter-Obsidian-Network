@@ -475,6 +475,8 @@ Identical to config A except:
 
 ## Status
 
+- **Superseded in part by dp-process-03** — Rule-6-style default-branch enforcement replaces the old default-branch shortcut gap; Rule-7 thread-reply enforcement hardens the old "reply + resolve" prose into a mechanical gate; Rule-8 adds the post-approval quiet period that dp-process-02 did not define.
+
 - [x] Phase A0: bootstrap `.sisyphus/` to ObsidianNetwork master (PR + audit + .gitignore)
 - [x] Phase C: status-page escalation in verify.sh + outage bypass rule in contract (PR #8 merged 28101ff1)
 - [x] Phase A.1: ObsidianNetwork `.coderabbit.yaml` tuned + `@coderabbitai configuration` validates (PR #9 merged ea5ebe28)
