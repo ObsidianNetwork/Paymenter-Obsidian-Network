@@ -11,6 +11,8 @@ class ConfigOptionProduct extends Pivot implements Auditable
 {
     use SerializesCapacityConfigurationMutations, Traits\Auditable;
 
+    protected $table = 'config_option_products';
+
     public $incrementing = true;
 
     protected $fillable = [

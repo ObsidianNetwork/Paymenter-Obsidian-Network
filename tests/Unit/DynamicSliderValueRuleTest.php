@@ -83,6 +83,31 @@ class DynamicSliderValueRuleTest extends TestCase
         $this->assertSame([], $this->metadataErrors($base));
     }
 
+    public function test_metadata_rule_accepts_only_lossless_whole_form_floats(): void
+    {
+        $filamentState = [
+            'min' => 1024.0,
+            'max' => 65536.0,
+            'step' => 1024.0,
+            'default' => 4096.0,
+            'display_divisor' => 1024.0,
+            'pricing' => [
+                'model' => 'linear',
+                'rate_per_unit' => 1,
+            ],
+        ];
+
+        $this->assertSame([], $this->metadataErrors($filamentState));
+        $this->assertNotEmpty($this->metadataErrors([
+            ...$filamentState,
+            'step' => 1024.5,
+        ]));
+        $this->assertNotEmpty($this->metadataErrors([
+            ...$filamentState,
+            'max' => INF,
+        ]));
+    }
+
     private function option(array $metadata): ConfigOption
     {
         return new ConfigOption([

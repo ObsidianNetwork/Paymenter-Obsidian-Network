@@ -19,7 +19,9 @@ class DynamicSliderMetadataRule implements ValidationRule
 
         $integers = [];
         foreach (['min', 'max', 'step', 'default', 'display_divisor'] as $key) {
-            $candidate = $value[$key] ?? null;
+            $candidate = $this->normalizeFormInteger(
+                $value[$key] ?? null
+            );
             $integer = StrictInteger::parse($candidate);
             if ($integer === null) {
                 $fail("The dynamic slider {$key} value must be a canonical, in-range whole internal resource unit.");
@@ -28,6 +30,7 @@ class DynamicSliderMetadataRule implements ValidationRule
             }
 
             $integers[$key] = $integer;
+            $value[$key] = $integer;
         }
 
         if ($integers['min'] < 0) {
@@ -105,5 +108,24 @@ class DynamicSliderMetadataRule implements ValidationRule
         } catch (\InvalidArgumentException $exception) {
             $fail($exception->getMessage());
         }
+    }
+
+    /**
+     * Filament's numeric text input dehydrates whole numbers as floats. Accept
+     * only that narrow, lossless form boundary without weakening strict
+     * parsing for customer, API, or provisioning inputs.
+     */
+    private function normalizeFormInteger(mixed $value): mixed
+    {
+        if (
+            ! is_float($value)
+            || ! is_finite($value)
+            || floor($value) !== $value
+            || abs($value) > StrictInteger::MAX_STORED_SLIDER_VALUE
+        ) {
+            return $value;
+        }
+
+        return (int) $value;
     }
 }

@@ -18,6 +18,8 @@ class DynamicResourceStockFrontendTest extends TestCase
         $this->assertStringContainsString("this.quoteState = 'ready'", $controller);
         $this->assertStringContainsString('config_options:', $controller);
         $this->assertStringContainsString('cart_item_id:', $controller);
+        $this->assertStringContainsString('role="alert"', $view);
+        $this->assertStringContainsString('x-text="quoteError"', $view);
     }
 
     public function test_quote_controller_ignores_stale_responses_and_aborts_superseded_requests(): void

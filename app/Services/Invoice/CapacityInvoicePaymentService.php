@@ -16,9 +16,55 @@ use Illuminate\Support\Facades\Schema;
 class CapacityInvoicePaymentService
 {
     /**
+     * @var array<int, int>
+     */
+    private static array $paymentEvidenceCoordinatorDepth = [];
+
+    /**
      * @var array<int, string>
      */
     private static array $paymentEvidenceRecoveryReasons = [];
+
+    public function recordPaymentEvidence(
+        Invoice|int $invoice,
+        Closure $persist
+    ): mixed {
+        $invoiceId = $invoice instanceof Invoice
+            ? (int) $invoice->id
+            : $invoice;
+
+        return DB::transaction(function () use (
+            $invoiceId,
+            $persist
+        ): mixed {
+            self::$paymentEvidenceCoordinatorDepth[$invoiceId] =
+                (self::$paymentEvidenceCoordinatorDepth[$invoiceId] ?? 0) + 1;
+
+            try {
+                return $persist();
+            } finally {
+                $remainingDepth =
+                    self::$paymentEvidenceCoordinatorDepth[$invoiceId] - 1;
+                if ($remainingDepth === 0) {
+                    unset(
+                        self::$paymentEvidenceCoordinatorDepth[$invoiceId]
+                    );
+                } else {
+                    self::$paymentEvidenceCoordinatorDepth[$invoiceId] =
+                        $remainingDepth;
+                }
+            }
+        }, 5);
+    }
+
+    public function isRecordingPaymentEvidence(Invoice|int $invoice): bool
+    {
+        $invoiceId = $invoice instanceof Invoice
+            ? (int) $invoice->id
+            : $invoice;
+
+        return (self::$paymentEvidenceCoordinatorDepth[$invoiceId] ?? 0) > 0;
+    }
 
     public function paymentEvidenceRecoveryReason(int $invoiceId): ?string
     {

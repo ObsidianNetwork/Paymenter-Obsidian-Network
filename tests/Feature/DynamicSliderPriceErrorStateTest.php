@@ -11,7 +11,7 @@ class DynamicSliderPriceErrorStateTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_dynamic_slider_renders_pricing_error_state_bindings(): void
+    public function test_dynamic_slider_renders_capacity_failure_bindings(): void
     {
         $fixture = $this->createProduct();
 
@@ -51,8 +51,11 @@ class DynamicSliderPriceErrorStateTest extends TestCase
             'showPriceTag' => true,
         ])->render();
 
-        $this->assertStringContainsString("pricingState: 'idle'", $html);
-        $this->assertStringContainsString('aria-live="assertive"', $html);
-        $this->assertStringContainsString('pricingError', $html);
+        $this->assertStringContainsString('stockDisabled: false', $html);
+        $this->assertStringContainsString(
+            'dynamic-capacity-failed.window',
+            $html
+        );
+        $this->assertStringContainsString(':disabled="stockDisabled"', $html);
     }
 }

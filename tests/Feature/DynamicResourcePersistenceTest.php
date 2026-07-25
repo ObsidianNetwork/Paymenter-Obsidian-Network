@@ -247,6 +247,7 @@ class DynamicResourcePersistenceTest extends TestCase
             'config_option_id' => $this->dynamicOption()->id,
         ]);
         $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
             'status' => Service::STATUS_ACTIVE,
             'quantity' => 1,
         ]);

@@ -1664,12 +1664,22 @@ class Pterodactyl extends Server
         $upgradeContract = $properties['_dynamic_upgrade'] ?? null;
         unset($properties['_dynamic_upgrade']);
         $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+        $hasDurableReservation = app(DurableFulfillmentService::class)
+            ->isReservationBacked($service);
         if (
             ! is_array($upgradeContract)
-            && class_exists($reservationServiceClass)
-            && method_exists(app($reservationServiceClass), 'hasCheckoutReservation')
-            && app($reservationServiceClass)
-                ->hasCheckoutReservation((int) $service->id)
+            && (
+                $hasDurableReservation
+                || (
+                    class_exists($reservationServiceClass)
+                    && method_exists(
+                        app($reservationServiceClass),
+                        'hasCheckoutReservation'
+                    )
+                    && app($reservationServiceClass)
+                        ->hasCheckoutReservation((int) $service->id)
+                )
+            )
         ) {
             throw new PermanentProvisioningException(
                 'Reservation-backed services can only be upgraded through the capacity-aware upgrade coordinator.'

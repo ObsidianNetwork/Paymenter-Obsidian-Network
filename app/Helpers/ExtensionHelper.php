@@ -499,74 +499,80 @@ class ExtensionHelper
         if ($existingEvidence['exact'] ?? false) {
             return $existingEvidence['transaction'];
         }
-        $persist = static fn () => DB::transaction(function () use (
-            $invoiceId,
-            $gatewayId,
-            $amount,
-            $fee,
-            $transactionId,
-            $status,
-            $isCreditTransaction
-        ) {
-            $invoice = Invoice::query()
-                ->whereKey($invoiceId)
-                ->lockForUpdate()
-                ->firstOrFail();
-            app(CapacityInvoicePaymentService::class)
-                ->assertPaymentAttemptAllowed($invoice);
-            $lateAttentionReason = app(
-                CapacityInvoicePaymentService::class
-            )->incomingEvidenceAttentionReason($invoice, $status);
-            if (
-                $lateAttentionReason !== null
-                && app(CapacityInvoicePaymentService::class)
-                    ->paymentEvidenceRecoveryReason($invoiceId) === null
-            ) {
-                throw new LateCapacityPaymentException(
-                    $lateAttentionReason
-                );
-            }
+        $persist = static fn () =>
+            $capacityPayments->recordPaymentEvidence(
+                $invoiceId,
+                static function () use (
+                    $invoiceId,
+                    $gatewayId,
+                    $amount,
+                    $fee,
+                    $transactionId,
+                    $status,
+                    $isCreditTransaction
+                ) {
+                    $invoice = Invoice::query()
+                        ->whereKey($invoiceId)
+                        ->lockForUpdate()
+                        ->firstOrFail();
+                    app(CapacityInvoicePaymentService::class)
+                        ->assertPaymentAttemptAllowed($invoice);
+                    $lateAttentionReason = app(
+                        CapacityInvoicePaymentService::class
+                    )->incomingEvidenceAttentionReason($invoice, $status);
+                    if (
+                        $lateAttentionReason !== null
+                        && app(CapacityInvoicePaymentService::class)
+                            ->paymentEvidenceRecoveryReason($invoiceId) === null
+                    ) {
+                        throw new LateCapacityPaymentException(
+                            $lateAttentionReason
+                        );
+                    }
 
-            if ($transactionId === null) {
-                return $invoice->transactions()->create([
-                    'gateway_id' => $gatewayId,
-                    'amount' => $amount,
-                    'fee' => $fee,
-                    'status' => $status,
-                    'is_credit_transaction' => $isCreditTransaction,
-                ]);
-            }
+                    if ($transactionId === null) {
+                        return $invoice->transactions()->create([
+                            'gateway_id' => $gatewayId,
+                            'amount' => $amount,
+                            'fee' => $fee,
+                            'status' => $status,
+                            'is_credit_transaction' =>
+                                $isCreditTransaction,
+                        ]);
+                    }
 
-            $updateData = [
-                'gateway_id' => $gatewayId,
-                'transaction_id' => $transactionId,
-                'amount' => $amount,
-                'status' => $status,
-                'is_credit_transaction' => $isCreditTransaction,
-            ];
-            if ($fee !== null) {
-                $updateData['fee'] = $fee;
-            }
+                    $updateData = [
+                        'gateway_id' => $gatewayId,
+                        'transaction_id' => $transactionId,
+                        'amount' => $amount,
+                        'status' => $status,
+                        'is_credit_transaction' => $isCreditTransaction,
+                    ];
+                    if ($fee !== null) {
+                        $updateData['fee'] = $fee;
+                    }
 
-            $guard = InvoiceTransaction::gatewayTransactionGuard(
-                $gatewayId,
-                $transactionId
+                    $guard =
+                        InvoiceTransaction::gatewayTransactionGuard(
+                            $gatewayId,
+                            $transactionId
+                        );
+                    $identity = Schema::hasColumn(
+                        'invoice_transactions',
+                        'gateway_transaction_guard'
+                    )
+                        ? ['gateway_transaction_guard' => $guard]
+                        : [
+                            'gateway_id' => $gatewayId,
+                            'transaction_id' => $transactionId,
+                        ];
+
+                    return $invoice->transactions()->updateOrCreate(
+                        $identity,
+                        $updateData
+                    );
+                }
             );
-            $identity = Schema::hasColumn(
-                'invoice_transactions',
-                'gateway_transaction_guard'
-            )
-                ? ['gateway_transaction_guard' => $guard]
-                : [
-                    'gateway_id' => $gatewayId,
-                    'transaction_id' => $transactionId,
-                ];
-
-            return $invoice->transactions()->updateOrCreate(
-                $identity,
-                $updateData
-            );
-        }, 5);
 
         $invoiceState = Invoice::query()->findOrFail($invoiceId);
         $lateAttentionReason =

@@ -899,6 +899,7 @@ class InvoicePaymentProcessingTest extends TestCase
     public function test_non_capacity_invoice_may_be_created_paid(): void
     {
         $invoice = Invoice::factory()->create([
+            'user_id' => User::factory()->create()->id,
             'status' => Invoice::STATUS_PAID,
         ]);
 
@@ -995,6 +996,155 @@ class InvoicePaymentProcessingTest extends TestCase
             'transaction_id' => 'unsafe-capacity-success',
             'status' => InvoiceTransactionStatus::Succeeded,
         ]);
+    }
+
+    public function test_capacity_payment_scope_is_invoice_specific(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+        $otherInvoice = $this->createInvoiceWithItem();
+        $payments = new class(
+            [(int) $invoice->id, (int) $otherInvoice->id]
+        ) extends CapacityInvoicePaymentService
+        {
+            /**
+             * @param  list<int>  $capacityInvoiceIds
+             */
+            public function __construct(
+                private readonly array $capacityInvoiceIds
+            ) {
+            }
+
+            public function isCapacityBacked(Invoice|int $invoice): bool
+            {
+                $invoiceId = $invoice instanceof Invoice
+                    ? (int) $invoice->id
+                    : $invoice;
+
+                return in_array(
+                    $invoiceId,
+                    $this->capacityInvoiceIds,
+                    true
+                );
+            }
+        };
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            $payments
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage(
+            'Succeeded capacity invoice transactions'
+        );
+
+        $payments->recordPaymentEvidence(
+            (int) $invoice->id,
+            fn () => InvoiceTransaction::create([
+                'invoice_id' => $otherInvoice->id,
+                'amount' => 1,
+                'fee' => 0,
+                'transaction_id' => 'wrong-invoice-scope',
+                'status' => InvoiceTransactionStatus::Succeeded,
+            ])
+        );
+    }
+
+    public function test_payment_scope_rolls_back_and_clears_after_exception(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+        $payments = new class(
+            (int) $invoice->id
+        ) extends CapacityInvoicePaymentService
+        {
+            public function __construct(
+                private readonly int $capacityInvoiceId
+            ) {
+            }
+
+            public function isCapacityBacked(Invoice|int $invoice): bool
+            {
+                $invoiceId = $invoice instanceof Invoice
+                    ? (int) $invoice->id
+                    : $invoice;
+
+                return $invoiceId === $this->capacityInvoiceId;
+            }
+        };
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            $payments
+        );
+
+        try {
+            $payments->recordPaymentEvidence(
+                (int) $invoice->id,
+                function () use ($invoice): void {
+                    InvoiceTransaction::create([
+                        'invoice_id' => $invoice->id,
+                        'amount' => 1,
+                        'fee' => 0,
+                        'transaction_id' => 'rolled-back-scope',
+                        'status' => InvoiceTransactionStatus::Succeeded,
+                    ]);
+
+                    throw new \RuntimeException('scope sentinel');
+                }
+            );
+            $this->fail('Expected the payment scope to roll back.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('scope sentinel', $exception->getMessage());
+        }
+
+        $this->assertDatabaseMissing('invoice_transactions', [
+            'transaction_id' => 'rolled-back-scope',
+        ]);
+        $this->assertFalse(
+            $payments->isRecordingPaymentEvidence((int) $invoice->id)
+        );
+    }
+
+    public function test_nested_payment_scope_preserves_and_clears_depth(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+        $payments = app(CapacityInvoicePaymentService::class);
+
+        $this->assertFalse(
+            $payments->isRecordingPaymentEvidence((int) $invoice->id)
+        );
+        $payments->recordPaymentEvidence(
+            (int) $invoice->id,
+            function () use ($invoice, $payments): void {
+                $this->assertTrue(
+                    $payments->isRecordingPaymentEvidence(
+                        (int) $invoice->id
+                    )
+                );
+
+                try {
+                    $payments->recordPaymentEvidence(
+                        (int) $invoice->id,
+                        static fn () => throw new \RuntimeException(
+                            'nested scope sentinel'
+                        )
+                    );
+                    $this->fail('Expected the nested scope to throw.');
+                } catch (\RuntimeException $exception) {
+                    $this->assertSame(
+                        'nested scope sentinel',
+                        $exception->getMessage()
+                    );
+                }
+
+                $this->assertTrue(
+                    $payments->isRecordingPaymentEvidence(
+                        (int) $invoice->id
+                    )
+                );
+            }
+        );
+        $this->assertFalse(
+            $payments->isRecordingPaymentEvidence((int) $invoice->id)
+        );
     }
 
     public function test_missing_fulfillment_reference_rolls_back_paid_status(): void

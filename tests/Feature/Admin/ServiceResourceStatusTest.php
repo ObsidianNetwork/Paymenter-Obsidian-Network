@@ -4,6 +4,7 @@ namespace Tests\Feature\Admin;
 
 use App\Admin\Resources\ServiceResource;
 use App\Models\Service;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -33,7 +34,10 @@ class ServiceResourceStatusTest extends TestCase
 
     public function test_navigation_badge_surfaces_all_nonterminal_operator_work(): void
     {
-        Service::withoutEvents(function (): void {
+        $fixture = $this->createProduct();
+        $user = User::factory()->create();
+
+        Service::withoutEvents(function () use ($fixture, $user): void {
             Service::query()->delete();
             foreach ([
                 Service::STATUS_PENDING,
@@ -43,7 +47,12 @@ class ServiceResourceStatusTest extends TestCase
                 Service::STATUS_ACTIVE,
                 Service::STATUS_CANCELLED,
             ] as $status) {
-                Service::factory()->create(['status' => $status]);
+                Service::factory()->create([
+                    'user_id' => $user->id,
+                    'product_id' => $fixture->product->id,
+                    'plan_id' => $fixture->plan->id,
+                    'status' => $status,
+                ]);
             }
         });
 

@@ -7,9 +7,11 @@ use App\Models\ConfigOption;
 use App\Models\Extension;
 use App\Models\Service;
 use App\Models\User;
+use App\Services\Service\DurableFulfillmentService;
 use App\Support\PanelEndpointIdentity;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Mockery;
 use Paymenter\Extensions\Others\DynamicPterodactyl\Services\ReservationConfigurationService;
 use Paymenter\Extensions\Others\DynamicPterodactyl\Services\ReservationService;
@@ -71,6 +73,8 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_reserved_node_and_limits_drive_the_create_request(): void
     {
+        $this->requireDynamicPterodactylRuntime();
+
         $fixture = $this->createProduct();
         $user = User::factory()->create();
         $service = Service::factory()->create([
@@ -235,6 +239,8 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_existing_external_server_reconciles_the_pending_hold(): void
     {
+        $this->requireDynamicPterodactylRuntime();
+
         $fixture = $this->createProduct();
         $service = Service::factory()->create([
             'user_id' => User::factory()->create()->id,
@@ -361,6 +367,8 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_row_backed_service_cannot_fall_through_after_dynamic_metadata_is_removed(): void
     {
+        $this->requireDynamicPterodactylRuntime();
+
         $fixture = $this->createProduct();
         $service = Service::factory()->create([
             'user_id' => User::factory()->create()->id,
@@ -401,6 +409,8 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_panel_identity_mismatch_releases_the_attempt_lease_and_stops(): void
     {
+        $this->requireDynamicPterodactylRuntime();
+
         $fixture = $this->createProduct();
         $service = Service::factory()->create([
             'user_id' => User::factory()->create()->id,
@@ -478,6 +488,8 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_termination_never_deletes_a_replacement_with_the_same_external_id(): void
     {
+        $this->requireDynamicPterodactylRuntime();
+
         $fixture = $this->createProduct();
         $user = User::factory()->create();
         $service = Service::factory()->create([
@@ -622,6 +634,8 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_missing_pinned_server_never_falls_back_to_external_id_replacement(): void
     {
+        $this->requireDynamicPterodactylRuntime();
+
         $fixture = $this->createProduct();
         $user = User::factory()->create();
         $service = Service::factory()->create([
@@ -835,12 +849,17 @@ class PterodactylReservationIntegrationTest extends TestCase
             'product_id' => $fixture->product->id,
             'plan_id' => $fixture->plan->id,
         ]);
-        $reservations = Mockery::mock(ReservationService::class);
-        $reservations->shouldReceive('hasCheckoutReservation')
-            ->once()
-            ->with($service->id)
-            ->andReturnTrue();
-        $this->app->instance(ReservationService::class, $reservations);
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class extends DurableFulfillmentService
+            {
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return true;
+                }
+            }
+        );
 
         $this->expectException(PermanentProvisioningException::class);
         $this->expectExceptionMessage('capacity-aware upgrade coordinator');
@@ -1501,5 +1520,32 @@ class PterodactylReservationIntegrationTest extends TestCase
             'type' => 'other',
             'enabled' => true,
         ]);
+    }
+
+    protected function beforeRefreshingDatabase(): void
+    {
+        $migrationPath = base_path(
+            'extensions/Others/DynamicPterodactyl/database/migrations'
+        );
+        if (
+            class_exists(ReservationService::class)
+            && is_dir($migrationPath)
+        ) {
+            $this->app->make('migrator')->path($migrationPath);
+        }
+    }
+
+    private function requireDynamicPterodactylRuntime(): void
+    {
+        if (! class_exists(ReservationService::class)) {
+            $this->markTestSkipped(
+                'The companion DynamicPterodactyl checkout is not available.'
+            );
+        }
+
+        $this->assertTrue(
+            Schema::hasTable('ptero_resource_reservations'),
+            'The DynamicPterodactyl migration set was not loaded.'
+        );
     }
 }

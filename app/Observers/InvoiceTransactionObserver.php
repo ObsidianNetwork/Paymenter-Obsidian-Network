@@ -121,9 +121,15 @@ class InvoiceTransactionObserver
 
         if (
             $status === InvoiceTransactionStatus::Succeeded
-            && DB::transactionLevel() === 0
             && app(CapacityInvoicePaymentService::class)
                 ->isCapacityBacked((int) $transaction->invoice_id)
+            && (
+                DB::transactionLevel() === 0
+                || ! app(CapacityInvoicePaymentService::class)
+                    ->isRecordingPaymentEvidence(
+                        (int) $transaction->invoice_id
+                    )
+            )
         ) {
             throw new \RuntimeException(
                 'Succeeded capacity invoice transactions must be recorded through the atomic payment coordinator.'
