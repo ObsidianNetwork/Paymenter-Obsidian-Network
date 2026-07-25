@@ -5,8 +5,10 @@ namespace App\Admin\Resources\ConfigOptionResource\Pages;
 use App\Admin\Resources\ConfigOptionResource;
 use App\Admin\Resources\ConfigOptionResource\Concerns\ValidatesDynamicSliderPricing;
 use App\Models\ConfigOption;
+use App\Services\Service\CapacityConfigurationMutationGuard;
 use Filament\Actions\DeleteAction;
 use Filament\Resources\Pages\EditRecord;
+use Illuminate\Support\Facades\DB;
 
 class EditConfigOption extends EditRecord
 {
@@ -26,8 +28,15 @@ class EditConfigOption extends EditRecord
                         : 'Are you sure you want to delete this config option?',
                 )
                 ->action(function () {
-                    $this->record->serviceConfigs()->delete();
-                    $this->record->delete();
+                    DB::transaction(function (): void {
+                        app(CapacityConfigurationMutationGuard::class)
+                            ->assertConfigOptionMutable(
+                                $this->record,
+                                true
+                            );
+                        $this->record->serviceConfigs()->delete();
+                        $this->record->delete();
+                    }, 5);
 
                     return redirect()->to(ConfigOptionResource::getUrl());
                 }),
@@ -37,12 +46,6 @@ class EditConfigOption extends EditRecord
     protected function mutateFormDataBeforeSave(array $data): array
     {
         $this->validateDynamicSliderPricing($data);
-
-        // Server-side enforcement: dynamic_slider options can never be upgradable
-        // (covers existing rows whose form data still carries upgradable=true).
-        if (($data['type'] ?? null) === 'dynamic_slider') {
-            $data['upgradable'] = false;
-        }
 
         return $data;
     }

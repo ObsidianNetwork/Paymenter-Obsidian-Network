@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Helpers\ExtensionHelper;
 use App\Models\Invoice;
 use App\Models\Setting;
 use App\Models\User;
@@ -75,9 +76,7 @@ class InvoiceNumberTest extends TestCase
         $this->assertEquals(2000, config('settings.invoice_number'));
 
         // Add paid transaction
-        $invoice->transactions()->create([
-            'amount' => 10,
-        ]);
+        ExtensionHelper::addPayment($invoice->id, null, 10);
 
         // Refresh invoice
         $invoice->refresh();

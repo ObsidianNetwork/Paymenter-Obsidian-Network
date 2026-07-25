@@ -4,6 +4,7 @@ namespace App\Listeners;
 
 use App\Events\InvoiceTransaction\Created;
 use App\Events\InvoiceTransaction\Updated;
+use App\Services\Invoice\MarkInvoicePaidService;
 
 class InvoiceTransactionCreatedListener
 {
@@ -14,8 +15,7 @@ class InvoiceTransactionCreatedListener
     {
         $invoice = $event->invoiceTransaction->invoice;
         if ($invoice->remaining <= 0 && $invoice->status !== 'paid') {
-            $invoice->status = 'paid';
-            $invoice->save();
+            app(MarkInvoicePaidService::class)->handle($invoice);
         }
     }
 }

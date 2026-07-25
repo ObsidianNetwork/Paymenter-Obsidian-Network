@@ -12,9 +12,14 @@ use App\Models\Invoice;
 use App\Models\Notification;
 use App\Models\Service;
 use App\Models\ServiceUpgrade;
+use App\Services\Invoice\CancelInvoiceService;
+use App\Services\ServiceUpgrade\ServiceUpgradeService;
 use App\Models\Setting;
 use App\Models\Ticket;
 use App\Services\Service\RenewServiceService;
+use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\FulfillmentStatusTransitionService;
+use App\Services\Service\ProductStockService;
 use Exception;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Config;
@@ -126,12 +131,24 @@ class CronJob extends Command
                 Service::where('status', 'pending')->whereDoesntHave('invoices', function ($query) {
                     $query->where('status', 'paid');
                 })->where('created_at', '<', now()->subDays((int) config('settings.cronjob_order_cancel', 7)))->get()->each(function ($service) use (&$number) {
-                    $service->invoices()->where('status', 'pending')->update(['status' => 'cancelled']);
+                    // Capacity-backed checkout orders are governed by their
+                    // immutable guarantee timestamp, not this configurable
+                    // generic order-age policy.
+                    if (app(DurableFulfillmentService::class)->isReservationBacked($service)) {
+                        return;
+                    }
 
-                    $service->update(['status' => 'cancelled']);
+                    $this->cancelPendingInvoices(
+                        $service,
+                        'The unpaid order expired.'
+                    );
 
-                    if ($service->product->stock !== null) {
-                        $service->product->increment('stock', $service->quantity);
+                    $dynamicCancellation = $this->requestDynamicCancellation($service);
+                    if (! $dynamicCancellation) {
+                        $service->update(['status' => 'cancelled']);
+                    }
+                    if (! $dynamicCancellation && $service->product->stock !== null) {
+                        app(ProductStockService::class)->release($service);
                     }
 
                     $number++;
@@ -141,29 +158,47 @@ class CronJob extends Command
             });
 
             $this->runCronJob('upgrade_invoices_updated', function ($number = 0) {
-                // Update pending upgrade invoices
-                ServiceUpgrade::where('status', 'pending')->get()->each(function ($upgrade) use (&$number) {
-                    if ($upgrade->service->expires_at < now()) {
-                        $upgrade->update(['status' => 'cancelled']);
-                        // Somehow people manage to have an upgrade without an invoice
-                        if ($upgrade->invoice) {
-                            $upgrade->invoice->update(['status' => 'cancelled']);
+                // Upgrade quotes are immutable. Expire unpaid commitments at
+                // their invoice boundary; never silently reprice them. The
+                // Dynamic Pterodactyl scheduler is the sole authority for
+                // capacity-backed upgrades because it must release stock and
+                // preserve partial/in-flight payment evidence atomically.
+                ServiceUpgrade::query()
+                    ->whereIn('status', [
+                        ServiceUpgrade::STATUS_PENDING,
+                        ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+                    ])
+                    ->whereHas('invoice', fn ($query) => $query
+                        ->where('status', \App\Models\Invoice::STATUS_PENDING)
+                        ->where('due_at', '<=', now()))
+                    ->get()
+                    ->each(function ($upgrade) use (&$number): void {
+                        $payments = app(
+                            \App\Services\Invoice\CapacityInvoicePaymentService::class
+                        );
+                        if ($payments->isCapacityBacked($upgrade->invoice)) {
+                            return;
                         }
+                        if ($payments->hasInFlightOrSucceededPayment($upgrade->invoice)) {
+                            $payments->requireAttention(
+                                $upgrade->invoice,
+                                'The upgrade invoice expired after a partial or in-flight payment. Refund or account-credit review is required.'
+                            );
+                            $upgrade->forceFill([
+                                'status' => ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+                                'last_error' => 'The upgrade invoice expired with payment activity.',
+                                'failed_at' => now(),
+                            ])->save();
+                            $number++;
 
+                            return;
+                        }
+                        app(ServiceUpgradeService::class)->cancel(
+                            $upgrade,
+                            'The unpaid upgrade invoice expired.'
+                        );
                         $number++;
-
-                        return;
-                    }
-                    if (!$upgrade->invoice) {
-                        return;
-                    }
-
-                    $upgrade->invoice->items()->update([
-                        'price' => $upgrade->calculatePrice()->price,
-                    ]);
-
-                    $number++;
-                });
+                    });
 
                 return $number;
             });
@@ -173,7 +208,10 @@ class CronJob extends Command
                 Service::where('status', 'active')->where('expires_at', '<', now()->subDays((int) config('settings.cronjob_order_suspend', 2)))->get()->each(function ($service) use (&$number) {
                     SuspendJob::dispatch($service);
 
-                    $service->update(['status' => 'suspended']);
+                    FulfillmentStatusTransitionService::run(
+                        $service,
+                        fn () => $service->update(['status' => Service::STATUS_SUSPENDED])
+                    );
                     $number++;
                 });
 
@@ -183,16 +221,19 @@ class CronJob extends Command
             $this->runCronJob('services_terminated', function ($number = 0) {
                 // Terminate orders if due date is overdue for x days
                 Service::where('status', 'suspended')->where('expires_at', '<', now()->subDays((int) config('settings.cronjob_order_terminate', 14)))->each(function ($service) use (&$number) {
-                    TerminateJob::dispatch($service);
-
-                    $service->update(['status' => 'cancelled']);
-                    // Cancel outstanding invoices
-                    $service->invoices()->where('status', 'pending')->update(['status' => 'cancelled']);
-
-                    if ($service->product->stock !== null) {
-                        $service->product->increment('stock', $service->quantity);
+                    // Invoice is the first lifecycle lock everywhere; payment
+                    // also locks invoice before service.
+                    $this->cancelPendingInvoices(
+                        $service,
+                        'The overdue service was terminated.'
+                    );
+                    $dynamicCancellation = $this->requestDynamicCancellation($service);
+                    if ($dynamicCancellation) {
+                        $service->refresh();
+                    } else {
+                        DB::afterCommit(fn () => TerminateJob::dispatch($service));
+                        $service->update(['status' => 'cancelled']);
                     }
-
                     $number++;
                 });
 
@@ -254,6 +295,24 @@ class CronJob extends Command
         $this->info('Checking for updates...');
 
         $this->call(CheckForUpdates::class);
+    }
+
+    private function cancelPendingInvoices(Service $service, string $reason): void
+    {
+        $service->invoices()
+            ->where('status', Invoice::STATUS_PENDING)
+            ->orderBy('invoices.id')
+            ->get()
+            ->each(
+                fn (Invoice $invoice) => app(CancelInvoiceService::class)
+                    ->handle($invoice, $reason)
+            );
+    }
+
+    private function requestDynamicCancellation(Service $service): bool
+    {
+        return app(DurableFulfillmentService::class)
+            ->requestCancellation($service);
     }
 
     private function payInvoiceWithCredits(Invoice $invoice): void

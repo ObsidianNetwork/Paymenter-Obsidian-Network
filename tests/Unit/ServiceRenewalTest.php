@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Helpers\ExtensionHelper;
 use App\Models\Invoice;
 use App\Models\Service;
 use App\Models\User;
@@ -43,9 +44,7 @@ class ServiceRenewalTest extends TestCase
         ]);
 
         // Process the paid invoice
-        $invoice->transactions()->create([
-            'amount' => 10.00,
-        ]);
+        ExtensionHelper::addPayment($invoice->id, null, 10.00);
 
         $invoice->refresh();
         $service->refresh();
@@ -88,9 +87,7 @@ class ServiceRenewalTest extends TestCase
         ]);
 
         // Process the paid invoice
-        $invoice->transactions()->create([
-            'amount' => 10.00,
-        ]);
+        ExtensionHelper::addPayment($invoice->id, null, 10.00);
 
         $invoice->refresh();
         $service->refresh();
@@ -135,9 +132,7 @@ class ServiceRenewalTest extends TestCase
         ]);
 
         // Process the paid invoice
-        $invoice->transactions()->create([
-            'amount' => 10.00,
-        ]);
+        ExtensionHelper::addPayment($invoice->id, null, 10.00);
 
         $invoice->refresh();
         $service->refresh();

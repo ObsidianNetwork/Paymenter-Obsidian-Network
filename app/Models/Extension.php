@@ -3,6 +3,8 @@
 namespace App\Models;
 
 use App\Helpers\ExtensionHelper;
+use App\Services\Extensions\ExtensionLifecycleGuard;
+use App\Services\Service\DurableFulfillmentService;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -21,6 +23,29 @@ class Extension extends Model implements Auditable
     ];
 
     protected $guarded = [];
+
+    protected static function booted(): void
+    {
+        static::updating(function (Extension $extension): void {
+            if ($extension->isDirty('enabled') && ! (bool) $extension->enabled) {
+                if ($extension->type === 'server') {
+                    app(DurableFulfillmentService::class)
+                        ->assertServerHostMutable((int) $extension->id);
+                }
+                app(ExtensionLifecycleGuard::class)
+                    ->assertCanDeactivate($extension);
+            }
+        });
+
+        static::deleting(function (Extension $extension): void {
+            if ($extension->type === 'server') {
+                app(DurableFulfillmentService::class)
+                    ->assertServerHostMutable((int) $extension->id);
+            }
+            app(ExtensionLifecycleGuard::class)
+                ->assertCanDeactivate($extension);
+        });
+    }
 
     /**
      * Get the extension's settings.

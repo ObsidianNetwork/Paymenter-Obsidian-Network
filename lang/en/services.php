@@ -41,6 +41,8 @@ return [
 
     'statuses' => [
         'pending' => 'Pending',
+        'provisioning' => 'Provisioning',
+        'provisioning_failed' => 'Provisioning Failed',
         'active' => 'Active',
         'cancelled' => 'Cancelled',
         'suspended' => 'Suspended',

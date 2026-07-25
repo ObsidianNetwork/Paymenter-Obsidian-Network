@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use OwenIt\Auditing\Contracts\Auditable;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 #[ObservedBy([ServiceObserver::class])]
 class Service extends Model implements Auditable
@@ -19,11 +20,17 @@ class Service extends Model implements Auditable
 
     public const STATUS_PENDING = 'pending';
 
+    public const STATUS_PROVISIONING = 'provisioning';
+
+    public const STATUS_PROVISIONING_FAILED = 'provisioning_failed';
+
     public const STATUS_ACTIVE = 'active';
 
     public const STATUS_CANCELLED = 'cancelled';
 
     public const STATUS_SUSPENDED = 'suspended';
+
+    public const STATUS_CANCELLATION_PENDING = 'cancellation_pending';
 
     protected $fillable = [
         'order_id',
@@ -34,6 +41,7 @@ class Service extends Model implements Auditable
         'expires_at',
         'subscription_id',
         'status',
+        'product_stock_released_at',
         'coupon_id',
         'user_id',
         'currency_code',
@@ -42,7 +50,30 @@ class Service extends Model implements Auditable
 
     protected $casts = [
         'expires_at' => 'date',
+        'product_stock_released_at' => 'datetime',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (Service $service): void {
+            if (
+                $service->exists
+                && ! $service->isDirty(['product_id', 'quantity'])
+            ) {
+                return;
+            }
+            if ((int) $service->quantity === 1 || ! $service->product_id) {
+                return;
+            }
+
+            $product = Product::query()->find($service->product_id);
+            if ($product?->usesDynamicResources()) {
+                throw ValidationException::withMessages([
+                    'quantity' => 'Dynamic resource services must have a quantity of one.',
+                ]);
+            }
+        });
+    }
 
     /**
      * Get the order that owns the service.
@@ -189,14 +220,22 @@ class Service extends Model implements Auditable
     public function cancellable(): Attribute
     {
         return Attribute::make(
-            get: fn () => $this->status !== 'cancelled' && $this->plan->type != 'free' && $this->plan->type != 'one-time' && !$this->cancellation?->exists()
+            get: fn () => ! in_array($this->status, [
+                self::STATUS_CANCELLED,
+                self::STATUS_CANCELLATION_PENDING,
+            ], true)
+                && $this->plan->type != 'free'
+                && $this->plan->type != 'one-time'
+                && ! $this->cancellation?->exists()
         );
     }
 
     public function upgradable(): Attribute
     {
         return Attribute::make(
-            get: fn () => ($this->productUpgrades()->count() > 0 || $this->product->upgradableConfigOptions()->count() > 0) && $this->status == 'active' && $this->upgrade->where('status', ServiceUpgrade::STATUS_PENDING)->count() == 0
+            get: fn () => ($this->productUpgrades()->count() > 0 || $this->product->upgradableConfigOptions()->count() > 0)
+                && $this->status == 'active'
+                && $this->upgrade->whereIn('status', ServiceUpgrade::activeStatuses())->count() == 0
         );
     }
 

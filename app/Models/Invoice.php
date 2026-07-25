@@ -24,10 +24,23 @@ class Invoice extends Model implements Auditable
 
     public const STATUS_CANCELLED = 'cancelled';
 
-    protected $fillable = ['number', 'user_id', 'currency_code', 'due_at', 'status'];
+    protected $fillable = [
+        'number',
+        'user_id',
+        'currency_code',
+        'due_at',
+        'status',
+        'payment_attention_required_at',
+        'payment_attention_reason',
+        'payment_attention_alerted_at',
+    ];
 
     protected $casts = [
-        'due_at' => 'date',
+        // Checkout capacity guarantees are timestamp-precise. Casting this as a
+        // date normalized the value to midnight and shortened seven-day holds.
+        'due_at' => 'datetime',
+        'payment_attention_required_at' => 'datetime',
+        'payment_attention_alerted_at' => 'datetime',
     ];
 
     public bool $send_create_email = true;

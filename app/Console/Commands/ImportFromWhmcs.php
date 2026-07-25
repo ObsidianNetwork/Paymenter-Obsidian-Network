@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Category;
 use App\Models\ConfigOption;
 use App\Models\CustomProperty;
+use App\Models\InvoiceTransaction;
 use App\Models\Product;
 use App\Models\Service;
 use App\Models\Setting;
@@ -989,6 +990,11 @@ class ImportFromWhmcs extends Command
                     'invoice_id' => $record['invoiceid'],
                     'amount' => $record['amountin'],
                     'transaction_id' => $record['transid'],
+                    'gateway_transaction_guard' =>
+                        InvoiceTransaction::gatewayTransactionGuard(
+                            null,
+                            $record['transid']
+                        ),
                     'created_at' => $this->validateDate($record['date']),
                     'updated_at' => $this->validateDate($record['date']),
                 ];

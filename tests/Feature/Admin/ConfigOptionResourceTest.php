@@ -201,20 +201,16 @@ class ConfigOptionResourceTest extends TestCase
         ]);
     }
     // -----------------------------------------------------------------------
-    // Patch 4: upgradable toggle hidden for dynamic_slider
+    // Dynamic resource upgrades are now capacity-aware.
     // -----------------------------------------------------------------------
 
-    public function test_upgradable_toggle_not_rendered_for_dynamic_slider(): void
+    public function test_upgradable_toggle_is_available_for_dynamic_slider(): void
     {
         $this->actingAsAdmin();
 
-        // The upgradable checkbox should not be visible when type=dynamic_slider.
-        // We verify this by creating a dynamic_slider option and confirming
-        // the upgradable field is not set (defaults to false) and the form
-        // does not expose it as a settable field.
         Livewire::test(CreateConfigOption::class)
             ->fillForm($this->baseDynamicSliderFormData())
-            ->assertFormFieldIsHidden('upgradable');
+            ->assertFormFieldIsVisible('upgradable');
     }
 
     public function test_upgradable_toggle_visible_for_select_type(): void

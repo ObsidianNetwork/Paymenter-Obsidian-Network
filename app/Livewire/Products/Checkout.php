@@ -8,6 +8,7 @@ use App\Helpers\ExtensionHelper;
 use App\Livewire\Component;
 use App\Models\Category;
 use App\Models\Plan;
+use App\Rules\DynamicSliderValueRule;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Livewire\Attributes\Locked;
@@ -77,7 +78,7 @@ class Checkout extends Component
                     return [$option->id => $this->configOptions[$option->id] ?? $default];
                 }
 
-                return [$option->id => $this->configOptions[$option->id] ?? $option->children->first()->id];
+                return [$option->id => $this->configOptions[$option->id] ?? $option->availableChildren->first()?->id];
             })->toArray();
             foreach ($this->getCheckoutConfig() as $config) {
                 if (in_array($config['type'], ['select', 'radio'])) {
@@ -111,8 +112,8 @@ class Checkout extends Component
         $this->product->configOptions->each(function ($option) use (&$total, &$setup_fee) {
             // Check if checkbox is set, if so, add price if checked
             if ($option->type === 'checkbox' && (isset($this->configOptions[$option->id]) && $this->configOptions[$option->id])) {
-                $total += $option->children->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
-                $setup_fee += $option->children->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
+                $total += $option->availableChildren->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
+                $setup_fee += $option->availableChildren->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
 
                 return;
             }
@@ -132,8 +133,8 @@ class Checkout extends Component
             }
 
             // Add price of selected option
-            $total += $option->children->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
-            $setup_fee += $option->children->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
+            $total += $option->availableChildren->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
+            $setup_fee += $option->availableChildren->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
         });
 
         $this->total = new Price([
@@ -163,7 +164,7 @@ class Checkout extends Component
 
     public function hasDynamicSliderOptions(): bool
     {
-        return $this->product->configOptions->contains(fn ($option) => $option->type === 'dynamic_slider');
+        return $this->product->usesDynamicResources();
     }
 
     public function getReservationLocationIdProperty(): ?int
@@ -208,13 +209,14 @@ class Checkout extends Component
             } elseif ($option->type === 'checkbox') {
                 // No validation needed for checkbox
             } elseif ($option->type === 'dynamic_slider') {
-                $min = $option->getMetadata('min', 0);
-                $max = $option->getMetadata('max', PHP_INT_MAX);
-                $rules["configOptions.{$option->id}"] = ['required', 'numeric', "min:{$min}", "max:{$max}"];
+                $rules["configOptions.{$option->id}"] = [
+                    'required',
+                    new DynamicSliderValueRule($option),
+                ];
             } else {
                 $rules["configOptions.{$option->id}"] = [
                     'required',
-                    Rule::in($option->children->pluck('id')->toArray()),
+                    Rule::in($option->availableChildren->pluck('id')->toArray()),
                 ];
             }
         }
@@ -296,7 +298,7 @@ class Checkout extends Component
                     'option_name' => $option->name,
                     'option_type' => $option->type,
                     'option_env_variable' => $option->env_variable,
-                    'value' => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? $option->children->first()->id : null,
+                    'value' => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? $option->availableChildren->first()?->id : null,
                     'value_name' => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? 'Yes' : 'No',
                 ];
             }
@@ -329,7 +331,7 @@ class Checkout extends Component
                 'option_type' => $option->type,
                 'option_env_variable' => $option->env_variable,
                 'value' => $this->configOptions[$option->id],
-                'value_name' => $option->children->where('id', $this->configOptions[$option->id])->first()->name,
+                'value_name' => $option->availableChildren->where('id', $this->configOptions[$option->id])->firstOrFail()->name,
             ];
         });
 

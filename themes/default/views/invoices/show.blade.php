@@ -1,6 +1,10 @@
 <div class="container mt-14">
     <div @if ($checkPayment) wire:poll.5s="checkPaymentStatus" @endif>
-        @if ($this->pay || $showPayModal)
+        @if (
+            ($this->pay || $showPayModal)
+            && ! $this->paymentRequiresAttention
+            && ! $this->capacityPaymentDeadlineExpired
+        )
         @include('invoices.partials.payment-modal')
         @endif
 
@@ -53,10 +57,25 @@
                         {{ __('invoices.paid') }}
                     </div>
                     @elseif ($invoice->status == 'pending')
-                    @if($checkPayment || $invoice->transactions->where('status', \App\Enums\InvoiceTransactionStatus::Processing)->where('created_at', '>=', now()->subDays(1))->count() > 0)
+                    @if($this->paymentRequiresAttention)
+                    <div
+                        class="mb-6 text-red-500 text-center"
+                        data-testid="invoice-payment-attention"
+                    >
+                        <p class="font-semibold">Manual payment review required</p>
+                        <p class="mt-1 text-sm">
+                            Payment was received, but fulfillment could not be committed safely.
+                            New payment attempts are disabled while our team reviews this invoice.
+                        </p>
+                    </div>
+                    @elseif($checkPayment || $invoice->transactions->where('status', \App\Enums\InvoiceTransactionStatus::Processing)->where('created_at', '>=', now()->subDays(1))->count() > 0)
                     <div class="text-yellow-500 mb-6 text-lg text-center flex items-center justify-center">
                         {{ __('invoices.payment_processing') }}
                         <x-ri-loader-5-fill aria-hidden="true" class="size-6 ms-2 fill-yellow-600 animate-spin" />
+                    </div>
+                    @elseif($this->capacityPaymentDeadlineExpired)
+                    <div class="mb-6 text-red-500 text-center">
+                        This invoice can no longer be paid because its capacity guarantee expired.
                     </div>
                     @else
                     <div class="mb-6 text-lg text-center">
@@ -67,7 +86,7 @@
                         <span class="text-yellow-500">{{ __('invoices.payment_pending') }}</span>
                         @endif
                     </div>
-                    <x-button.primary wire:click="$set('showPayModal', true)" class="mt-2" wire:loading.attr="disabled"
+                    <x-button.primary data-testid="invoice-pay-button" wire:click="$set('showPayModal', true)" class="mt-2" wire:loading.attr="disabled"
                         wire:target="$set('showPayModal')">
                         <span wire:loading wire:target="pay">Processing...</span>
                         <span wire:loading.remove wire:target="pay">Pay</span>

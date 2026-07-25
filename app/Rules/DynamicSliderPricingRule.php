@@ -2,11 +2,14 @@
 
 namespace App\Rules;
 
+use App\Support\StrictDecimal;
 use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 
 class DynamicSliderPricingRule implements ValidationRule
 {
+    public function __construct(private readonly ?float $requiredCoverage = null) {}
+
     /**
      * Recognized pricing models and their required keys.
      */
@@ -40,15 +43,16 @@ class DynamicSliderPricingRule implements ValidationRule
             return;
         }
 
-        // Validate base_price is non-negative when present
+        // Validate the legacy metadata base price against the plan column it
+        // may be migrated into (DECIMAL(10,2)).
         if (array_key_exists('base_price', $value) && $value['base_price'] !== null && $value['base_price'] !== '') {
-            if (! is_numeric($value['base_price'])) {
-                $fail('The base price must be numeric.');
-
-                return;
-            }
-            if ((float) $value['base_price'] < 0) {
-                $fail('The base price must be 0 or greater.');
+            if ($this->decimal(
+                $value['base_price'],
+                99_999_999.99
+            ) === null) {
+                $fail(
+                    'The base price must be a finite non-negative numeric decimal with at most 8 decimal places.'
+                );
 
                 return;
             }
@@ -73,14 +77,10 @@ class DynamicSliderPricingRule implements ValidationRule
 
     private function validateLinear(array $pricing, Closure $fail): void
     {
-        if (! is_numeric($pricing['rate_per_unit'])) {
-            $fail('The rate per unit must be numeric.');
-
-            return;
-        }
-
-        if ((float) $pricing['rate_per_unit'] < 0) {
-            $fail('The rate per unit must be 0 or greater.');
+        if ($this->decimal($pricing['rate_per_unit']) === null) {
+            $fail(
+                'The rate per unit must be a finite non-negative numeric decimal with at most 8 decimal places.'
+            );
         }
     }
 
@@ -111,14 +111,10 @@ class DynamicSliderPricingRule implements ValidationRule
                 return;
             }
 
-            if (! is_numeric($tier['rate'])) {
-                $fail("Tier {$tierNum} rate must be numeric.");
-
-                return;
-            }
-
-            if ((float) $tier['rate'] < 0) {
-                $fail("Tier {$tierNum} rate must be 0 or greater.");
+            if ($this->decimal($tier['rate']) === null) {
+                $fail(
+                    "Tier {$tierNum} rate must be a finite non-negative numeric decimal with at most 8 decimal places."
+                );
 
                 return;
             }
@@ -144,16 +140,11 @@ class DynamicSliderPricingRule implements ValidationRule
                 continue;
             }
 
-            if (! is_numeric($tier['up_to'])) {
-                $fail("Tier {$tierNum} \"up_to\" must be numeric when provided.");
-
-                return;
-            }
-
-            $upTo = (float) $tier['up_to'];
-
-            if ($upTo < 0) {
-                $fail("Tier {$tierNum} \"up_to\" value ({$upTo}) must be non-negative.");
+            $upTo = $this->decimal($tier['up_to']);
+            if ($upTo === null) {
+                $fail(
+                    "Tier {$tierNum} \"up_to\" must be a finite non-negative numeric decimal with at most 8 decimal places."
+                );
 
                 return;
             }
@@ -166,30 +157,43 @@ class DynamicSliderPricingRule implements ValidationRule
 
             $previousUpTo = $upTo;
         }
+
+        $lastTier = $tiers[$lastIndex] ?? null;
+        $lastUpTo = is_array($lastTier) ? ($lastTier['up_to'] ?? null) : null;
+        if (
+            $this->requiredCoverage !== null
+            && $lastUpTo !== null
+            && ($parsedLastUpTo = $this->decimal($lastUpTo)) !== null
+            && $parsedLastUpTo < $this->requiredCoverage
+        ) {
+            $fail(sprintf(
+                'The final pricing tier must be unlimited or cover the slider maximum of %s display units.',
+                rtrim(rtrim(number_format($this->requiredCoverage, 4, '.', ''), '0'), '.')
+            ));
+        }
     }
 
     private function validateBaseAddon(array $pricing, Closure $fail): void
     {
-        if (! is_numeric($pricing['included_units'])) {
-            $fail('The included units must be numeric.');
+        if ($this->decimal($pricing['included_units']) === null) {
+            $fail(
+                'The included units must be a finite non-negative numeric decimal with at most 8 decimal places.'
+            );
 
             return;
         }
 
-        if ((float) $pricing['included_units'] < 0) {
-            $fail('The included units must be 0 or greater.');
-
-            return;
+        if ($this->decimal($pricing['overage_rate']) === null) {
+            $fail(
+                'The overage rate must be a finite non-negative numeric decimal with at most 8 decimal places.'
+            );
         }
+    }
 
-        if (! is_numeric($pricing['overage_rate'])) {
-            $fail('The overage rate must be numeric.');
-
-            return;
-        }
-
-        if ((float) $pricing['overage_rate'] < 0) {
-            $fail('The overage rate must be 0 or greater.');
-        }
+    private function decimal(
+        mixed $value,
+        float $maximum = StrictDecimal::MAX_VALUE
+    ): ?float {
+        return StrictDecimal::parseNonNegative($value, $maximum);
     }
 }

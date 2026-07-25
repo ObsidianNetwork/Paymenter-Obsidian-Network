@@ -3,13 +3,15 @@
 namespace App\Models;
 
 use App\Classes\Price as PriceClass;
+use App\Models\Concerns\SerializesCapacityConfigurationMutations;
+use App\Services\Service\CapacityConfigurationMutationGuard;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use OwenIt\Auditing\Contracts\Auditable;
 
 class Plan extends Model implements Auditable
 {
-    use HasFactory, Traits\Auditable;
+    use HasFactory, SerializesCapacityConfigurationMutations, Traits\Auditable;
 
     public $timestamps = false;
 
@@ -18,12 +20,36 @@ class Plan extends Model implements Auditable
         'type',
         'billing_period',
         'billing_unit',
+        'dynamic_slider_base_price',
         'sort',
     ];
 
     protected $casts = [
         'billing_period' => 'integer',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(
+            fn (Plan $plan) =>
+                app(CapacityConfigurationMutationGuard::class)
+                    ->assertPlanMutable(
+                        $plan,
+                        $plan->exists && $plan->isDirty([
+                            'priceable_type',
+                            'priceable_id',
+                            'type',
+                            'billing_period',
+                            'billing_unit',
+                        ])
+                    )
+        );
+        static::deleting(
+            fn (Plan $plan) =>
+                app(CapacityConfigurationMutationGuard::class)
+                    ->assertPlanMutable($plan, true)
+        );
+    }
 
     /**
      * Get the available prices of the plan.

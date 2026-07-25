@@ -4,6 +4,9 @@ namespace App\Observers;
 
 use App\Events\Invoice as InvoiceEvent;
 use App\Models\Invoice;
+use App\Services\Invoice\MarkInvoicePaidService;
+use App\Services\Invoice\CancelInvoiceService;
+use App\Services\Invoice\CapacityInvoicePaymentService;
 use App\Services\Invoice\ProcessPaidInvoiceService;
 
 class InvoiceObserver
@@ -35,7 +38,45 @@ class InvoiceObserver
      */
     public function updating(Invoice $invoice): void
     {
+        if (
+            $invoice->isDirty(['user_id', 'currency_code', 'due_at'])
+            && app(CapacityInvoicePaymentService::class)
+                ->isCapacityBacked($invoice)
+        ) {
+            throw new \RuntimeException(
+                'Capacity-backed invoice ownership, currency, and deadline are immutable.'
+            );
+        }
+
+        if (
+            $invoice->isDirty('status')
+            && $invoice->status === Invoice::STATUS_PAID
+            && app(CapacityInvoicePaymentService::class)
+                ->isCapacityBacked($invoice)
+            && ! MarkInvoicePaidService::isCoordinating($invoice)
+        ) {
+            throw new \RuntimeException(
+                'Invoices must be marked paid through the fulfillment coordinator.'
+            );
+        }
+        if (
+            $invoice->isDirty('status')
+            && $invoice->status === Invoice::STATUS_CANCELLED
+            && app(CapacityInvoicePaymentService::class)
+                ->isCapacityBacked($invoice)
+            && ! CancelInvoiceService::isCoordinating($invoice)
+        ) {
+            throw new \RuntimeException(
+                'Capacity-backed invoices must be cancelled through the fulfillment coordinator.'
+            );
+        }
+
         event(new InvoiceEvent\Updating($invoice));
+    }
+
+    public function deleting(Invoice $invoice): void
+    {
+        app(CancelInvoiceService::class)->assertCanDelete($invoice);
     }
 
     /**

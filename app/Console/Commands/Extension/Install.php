@@ -28,7 +28,9 @@ class Install extends Command
     {
         $extensionClass = 'Paymenter\\Extensions\\' . ucfirst($this->argument('type')) . 's\\' . ucfirst($this->argument('name')) . '\\' . ucfirst($this->argument('name'));
         if (!class_exists($extensionClass)) {
-            return $this->error("The extension class {$extensionClass} does not exist.");
+            $this->error("The extension class {$extensionClass} does not exist.");
+
+            return Command::FAILURE;
         }
 
         $extensionInstance = new $extensionClass;
@@ -38,8 +40,12 @@ class Install extends Command
             } catch (\Exception $e) {
                 Log::error("Error during installation of extension {$this->argument('name')}: " . $e->getMessage());
 
-                return $this->error('An error occurred while installing the extension: ' . $e->getMessage());
+                $this->error('An error occurred while installing the extension: ' . $e->getMessage());
+
+                return Command::FAILURE;
             }
         }
+
+        return Command::SUCCESS;
     }
 }

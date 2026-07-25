@@ -265,4 +265,18 @@ class ConfigOptionDynamicPricingTest extends TestCase
         $this->assertEquals(20.0, $delta);
         $this->assertEquals($full, $delta + 5.0);
     }
+
+    public function test_runtime_rejects_non_finite_or_exponent_pricing_metadata(): void
+    {
+        $option = $this->createConfigOption([
+            'pricing' => [
+                'model' => 'linear',
+                'rate_per_unit' => '1e309',
+            ],
+            'display_divisor' => 1,
+        ]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $option->calculateDynamicPriceDelta(10);
+    }
 }

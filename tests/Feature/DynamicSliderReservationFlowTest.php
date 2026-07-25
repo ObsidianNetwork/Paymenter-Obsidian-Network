@@ -38,10 +38,81 @@ class DynamicSliderReservationFlowTest extends TestCase
     {
         $contents = file_get_contents(app_path('Livewire/Cart.php'));
 
+        $this->assertStringContainsString(
+            'CapacityConfigurationLockService::class',
+            $contents
+        );
+        $this->assertStringContainsString(
+            ')->lockProduct((int) $item->product_id)',
+            $contents
+        );
+        $this->assertStringNotContainsString(
+            '$item->product->lockForUpdate();',
+            $contents
+        );
+        $this->assertStringContainsString(
+            '$requiresPayment = $cart->items->contains(',
+            $contents
+        );
+        $this->assertStringNotContainsString(
+            'if ($this->total->price > 0)',
+            $contents
+        );
         $this->assertStringContainsString('->reserveForCartItem($item)', $contents);
         $this->assertStringContainsString('->bindCartItemToService(', $contents);
+        $invoiceLine = strpos(
+            $contents,
+            '$invoice->items()->create(['
+        );
+        $binding = strpos(
+            $contents,
+            '$binding[\'reservation_service\']->bindCartItemToService('
+        );
+        $bindingQueue = strpos($contents, '$capacityBindings = [];');
+        $bindingSort = strpos($contents, 'usort(');
+        $this->assertNotFalse($invoiceLine);
+        $this->assertNotFalse($binding);
+        $this->assertNotFalse($bindingQueue);
+        $this->assertNotFalse($bindingSort);
+        $this->assertLessThan($invoiceLine, $bindingQueue);
+        $this->assertLessThan($bindingSort, $invoiceLine);
+        $this->assertLessThan($binding, $invoiceLine);
+        $this->assertStringContainsString(
+            'CapacityServiceCreationCoordinator::run(',
+            $contents
+        );
         $this->assertStringNotContainsString('dp_reservation_token', $contents);
         $this->assertStringNotContainsString('->confirm(', $contents);
+    }
+
+    public function test_capacity_configuration_snapshot_uses_one_lock_order(): void
+    {
+        $contents = file_get_contents(
+            app_path('Services/Service/CapacityConfigurationLockService.php')
+        );
+        $product = strpos($contents, 'Product::query()');
+        $pivot = strpos($contents, "DB::table('config_option_products')");
+        $option = strpos($contents, 'ConfigOption::query()');
+        $plan = strpos($contents, 'Plan::query()');
+        $price = strpos($contents, 'Price::query()');
+
+        $this->assertNotFalse($product);
+        $this->assertNotFalse($pivot);
+        $this->assertNotFalse($option);
+        $this->assertNotFalse($plan);
+        $this->assertNotFalse($price);
+        $this->assertLessThan($pivot, $product);
+        $this->assertLessThan($option, $pivot);
+        $this->assertLessThan($plan, $option);
+        $this->assertLessThan($price, $plan);
+        $this->assertGreaterThanOrEqual(
+            4,
+            substr_count($contents, '->lockForUpdate()')
+        );
+        $this->assertStringContainsString(
+            'Capacity configuration locks must be acquired inside the transaction',
+            $contents
+        );
     }
 
     public function test_guest_login_transfers_cart_and_holds_in_one_path(): void
@@ -89,6 +160,56 @@ class DynamicSliderReservationFlowTest extends TestCase
 
         $this->assertStringContainsString(
             'CreateJob::dispatch($service)->afterCommit()',
+            $contents
+        );
+    }
+
+    public function test_termination_requires_the_durable_runtime_before_external_delete(): void
+    {
+        $contents = file_get_contents(app_path('Jobs/Server/TerminateJob.php'));
+        $terminal = strpos(
+            $contents,
+            '->cancellationIsDurablyComplete($this->service)'
+        );
+        $preflight = strpos($contents, '->assertRuntimeAvailable($this->service)');
+        $externalDelete = strpos($contents, 'ExtensionHelper::terminateServer($this->service)');
+        $completion = strpos($contents, '->completeCancellation($this->service)');
+
+        $this->assertNotFalse($terminal);
+        $this->assertNotFalse($preflight);
+        $this->assertNotFalse($externalDelete);
+        $this->assertNotFalse($completion);
+        $this->assertLessThan($preflight, $terminal);
+        $this->assertLessThan($externalDelete, $preflight);
+        $this->assertLessThan($completion, $externalDelete);
+        $this->assertStringContainsString(
+            'Reservation-backed server cancellation requires operator intervention.',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'NotificationHelper::sendSystemEmailNotification(',
+            $contents
+        );
+    }
+
+    public function test_provisioning_failure_has_a_missing_runtime_operator_fallback(): void
+    {
+        $contents = file_get_contents(app_path('Jobs/Server/CreateJob.php'));
+
+        $this->assertStringContainsString(
+            '->isReservationBacked($this->service)',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'Reservation-backed server provisioning requires operator intervention.',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'NotificationHelper::sendSystemEmailNotification(',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'recording_error',
             $contents
         );
     }

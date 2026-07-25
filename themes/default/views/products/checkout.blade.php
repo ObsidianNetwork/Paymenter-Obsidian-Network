@@ -1,4 +1,14 @@
-<div class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6">
+<div
+    class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
+    @if ($this->hasDynamicSliderOptions())
+        x-data="dynamicResourceStock({
+            endpoint: @js(url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote')),
+            cartItemId: @js($cartProductKey),
+        })"
+        x-on:slider-change="queueQuote()"
+        x-on:change="queueQuote()"
+    @endif
+>
     <div class="flex flex-col gap-4 w-full col-span-3">
         <h1 class="text-3xl font-bold">{{ $product->name }}</h1>
         <div class="flex flex-row w-full gap-4">
@@ -27,18 +37,18 @@
 
         @foreach ($product->configOptions as $configOption)
             @php
-                $showPriceTag = $configOption->children->filter(fn ($value) => !$value->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit)->is_free)->count() > 0;
+                $showPriceTag = $configOption->availableChildren->filter(fn ($value) => !$value->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit)->is_free)->count() > 0;
             @endphp
             <x-form.configoption :config="$configOption" :name="'configOptions.' . $configOption->id" :showPriceTag="$showPriceTag" :plan="$plan">
                 @if ($configOption->type == 'select')
-                    @foreach ($configOption->children as $configOptionValue)
+                    @foreach ($configOption->availableChildren as $configOptionValue)
                         <option value="{{ $configOptionValue->id }}">
                             {{ $configOptionValue->name }}
                             {{ ($showPriceTag && $configOptionValue->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit) : '' }}
                         </option>
                     @endforeach
                 @elseif($configOption->type == 'radio')
-                    @foreach ($configOption->children as $configOptionValue)
+                    @foreach ($configOption->availableChildren as $configOptionValue)
                         <div class="flex items-center gap-2">
                             <input type="radio" id="{{ $configOptionValue->id }}" name="{{ $configOption->id }}"
                                 wire:model.live="configOptions.{{ $configOption->id }}"
@@ -75,6 +85,22 @@
                 @endif
             </x-form.configoption>
         @endforeach
+        @if ($this->hasDynamicSliderOptions())
+            <div
+                x-show="quoteState === 'loading'"
+                role="status"
+                aria-live="polite"
+                class="text-sm text-primary-500"
+            >
+                Checking live resource availability…
+            </div>
+            <div
+                x-show="quoteState === 'error'"
+                x-text="quoteError"
+                role="alert"
+                class="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
+            ></div>
+        @endif
     </div>
     <div class="flex flex-col gap-2 w-full col-span-1 bg-background-secondary p-3 rounded-md h-fit">
         <h2 class="text-2xl font-semibold  mb-2">
@@ -99,7 +125,14 @@
         @endif
         @if (($product->stock > 0 || !$product->stock) && $product->price()->available)
             <div>
-                <x-button.primary wire:click="checkout" wire:loading.attr="disabled">
+                <x-button.primary
+                    wire:click="checkout"
+                    wire:loading.attr="disabled"
+                    @if ($this->hasDynamicSliderOptions())
+                        x-bind:disabled="!canCheckout"
+                        x-bind:aria-disabled="(!canCheckout).toString()"
+                    @endif
+                >
                     <x-loading target="checkout" />
                     <div wire:loading.remove wire:target="checkout">
                         {{ __('product.checkout') }}

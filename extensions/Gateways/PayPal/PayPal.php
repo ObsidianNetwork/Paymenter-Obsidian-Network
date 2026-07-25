@@ -104,6 +104,7 @@ class PayPal extends Gateway
 
     public function charge(Invoice $invoice, $total, BillingAgreement $billingAgreement)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $url = $this->config('test_mode') ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
         $result = $this->request('post', $url . '/v2/checkout/orders', [
             'intent' => 'CAPTURE',
@@ -235,6 +236,7 @@ class PayPal extends Gateway
 
     public function pay($invoice, $total)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $url = $this->config('test_mode') ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
 
         $order = $this->request('post', $url . '/v2/checkout/orders', [
@@ -271,6 +273,10 @@ class PayPal extends Gateway
         if ($order->status === 'COMPLETED') {
             return $order;
         }
+        $invoice = Invoice::query()->findOrFail(
+            $order->purchase_units[0]->invoice_id
+        );
+        $this->assertPaymentAttemptAllowed($invoice);
 
         $response = $this->request('post', $url . '/v2/checkout/orders/' . $orderID . '/capture', [
             'intent' => 'CAPTURE',

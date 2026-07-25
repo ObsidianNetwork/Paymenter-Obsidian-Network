@@ -13,7 +13,21 @@ class CreateServiceRequest extends AdminApiRequest
     public function rules(): array
     {
         return [
-            'product_id' => 'required|exists:products,id',
+            'product_id' => [
+                'required',
+                'exists:products,id',
+                function ($attribute, $value, $fail): void {
+                    if (
+                        Product::query()
+                            ->find($value)
+                            ?->usesDynamicResources()
+                    ) {
+                        $fail(
+                            'Dynamic resource services cannot be created directly. Use customer checkout or an explicit capacity-aware import coordinator.'
+                        );
+                    }
+                },
+            ],
             'plan_id' => [
                 'required',
                 'exists:plans,id',
@@ -29,11 +43,27 @@ class CreateServiceRequest extends AdminApiRequest
             /**
              * @default 1
              */
-            'quantity' => 'required|integer|min:1',
+            'quantity' => [
+                'required',
+                'integer',
+                'min:1',
+                function ($attribute, $value, $fail): void {
+                    $product = Product::query()->find($this->input('product_id'));
+                    if (
+                        (int) $value !== 1
+                        && $product?->usesDynamicResources()
+                    ) {
+                        $fail('Dynamic resource services must have a quantity of one.');
+                    }
+                },
+            ],
             /**
              * @default pending
              */
-            'status' => 'required|in:pending,active,cancelled,suspended',
+            'status' => [
+                'required',
+                'in:pending,provisioning,provisioning_failed,active,cancellation_pending,cancelled,suspended',
+            ],
             'expires_at' => 'nullable|date|after_or_equal:today',
             /**
              * @example USD

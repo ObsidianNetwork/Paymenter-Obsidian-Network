@@ -11,7 +11,6 @@ use App\Helpers\ExtensionHelper;
 use App\Models\BillingAgreement;
 use App\Models\Extension;
 use App\Models\Invoice;
-use App\Models\InvoiceTransaction;
 use App\Models\Service;
 use App\Models\User;
 use Carbon\Carbon;
@@ -177,6 +176,7 @@ class Stripe extends Gateway
 
     public function pay($invoice, $total)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $intentData = [
             'description' => __('invoices.payment_for_invoice', ['number' => $invoice->number ?? $invoice->id]),
             'amount' => $total * 100,
@@ -235,17 +235,17 @@ class Stripe extends Gateway
                 break;
             case 'charge.updated':
                 $charge = $event->data->object; // contains a StripeCharge
-                $invoiceTransaction = InvoiceTransaction::where('transaction_id', $charge->payment_intent)->first();
-                if (!$invoiceTransaction) {
-                    break;
-                }
                 // Get fee from charge
                 $fee = 0;
                 if ($charge->balance_transaction) {
                     $balanceTransaction = $this->request('get', '/balance_transactions/' . $charge->balance_transaction);
                     $fee = $balanceTransaction->fee / 100;
                 }
-                ExtensionHelper::addPaymentFee($charge->payment_intent, $fee);
+                ExtensionHelper::addPaymentFee(
+                    $charge->payment_intent,
+                    $fee,
+                    'Stripe'
+                );
 
                 break;
             case 'setup_intent.succeeded':
@@ -746,6 +746,7 @@ class Stripe extends Gateway
 
     public function charge(Invoice $invoice, $amount, BillingAgreement $billingAgreement)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $user = $invoice->user;
         $stripeCustomerId = $user->properties->where('key', 'stripe_id')->first();
         // Create customer if not exists

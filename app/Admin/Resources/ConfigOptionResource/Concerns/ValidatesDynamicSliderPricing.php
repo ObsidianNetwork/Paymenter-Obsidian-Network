@@ -2,7 +2,7 @@
 
 namespace App\Admin\Resources\ConfigOptionResource\Concerns;
 
-use App\Rules\DynamicSliderPricingRule;
+use App\Rules\DynamicSliderMetadataRule;
 use Filament\Notifications\Notification;
 
 /**
@@ -18,12 +18,12 @@ trait ValidatesDynamicSliderPricing
             return;
         }
 
-        $pricing = $data['metadata']['pricing'] ?? null;
+        $metadata = $data['metadata'] ?? null;
 
-        if ($pricing === null) {
+        if ($metadata === null) {
             Notification::make()
                 ->title('Invalid pricing configuration')
-                ->body('Dynamic slider options require a pricing configuration.')
+                ->body('Dynamic slider options require range and pricing metadata.')
                 ->danger()
                 ->send();
 
@@ -33,9 +33,9 @@ trait ValidatesDynamicSliderPricing
         }
 
         $errors = [];
-        (new DynamicSliderPricingRule())->validate(
-            'metadata.pricing',
-            $pricing,
+        (new DynamicSliderMetadataRule())->validate(
+            'metadata',
+            $metadata,
             function (string $message) use (&$errors) {
                 $errors[] = $message;
             }

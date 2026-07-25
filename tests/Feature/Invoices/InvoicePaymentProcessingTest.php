@@ -4,10 +4,24 @@ namespace Tests\Feature\Invoices;
 
 use App\Enums\InvoiceTransactionStatus;
 use App\Helpers\ExtensionHelper;
+use App\Jobs\Server\CreateJob;
+use App\Livewire\Invoices\Show;
+use App\Models\Gateway;
 use App\Models\Invoice;
+use App\Models\InvoiceTransaction;
 use App\Models\Service;
+use App\Models\ServiceUpgrade;
 use App\Models\User;
+use App\Services\Invoice\CapacityInvoicePaymentService;
+use App\Services\Invoice\MarkInvoicePaidService;
+use App\Services\Service\DurableFulfillmentService;
+use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
+use Livewire\Livewire;
+use Mockery\MockInterface;
 use Tests\TestCase;
 
 class InvoicePaymentProcessingTest extends TestCase
@@ -44,10 +58,7 @@ class InvoicePaymentProcessingTest extends TestCase
         $this->assertEquals(100.00, $invoice->remaining);
 
         // Add partial payment
-        $invoice->transactions()->create([
-            'amount' => 30.00,
-            'status' => InvoiceTransactionStatus::Succeeded,
-        ]);
+        ExtensionHelper::addPayment($invoice->id, null, 30.00);
 
         $this->assertEquals(70.00, $invoice->fresh()->remaining);
     }
@@ -134,6 +145,689 @@ class InvoicePaymentProcessingTest extends TestCase
         $this->assertNotNull($service->expires_at);
     }
 
+    public function test_external_payment_survives_checkout_commit_failure_as_attention(): void
+    {
+        Queue::fake();
+        $user = User::factory()->create();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'status' => Service::STATUS_PENDING,
+            'user_id' => $user->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $invoice = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => now()->addDays(7),
+            'currency_code' => $service->currency_code,
+        ]);
+        $invoice->items()->create([
+            'reference_type' => Service::class,
+            'reference_id' => $service->id,
+            'price' => 100,
+            'quantity' => 1,
+            'description' => 'Reserved server',
+        ]);
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class extends CapacityInvoicePaymentService
+            {
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    return true;
+                }
+
+                public function deadlineExpired(Invoice $invoice): bool
+                {
+                    return false;
+                }
+            }
+        );
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class extends DurableFulfillmentService
+            {
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return true;
+                }
+
+                public function preflightPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): ?string {
+                    return null;
+                }
+
+                public function commitPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): bool {
+                    throw new \RuntimeException(
+                        'Deterministic reservation commit failure.'
+                    );
+                }
+            }
+        );
+
+        $transaction = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            100,
+            transactionId: 'captured-checkout-failure'
+        );
+
+        $this->assertDatabaseHas('invoice_transactions', [
+            'invoice_id' => $invoice->id,
+            'transaction_id' => 'captured-checkout-failure',
+            'status' => \App\Enums\InvoiceTransactionStatus::Succeeded->value,
+        ]);
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $invoice->fresh()->status
+        );
+        $this->assertNotNull(
+            $invoice->fresh()->payment_attention_required_at
+        );
+        $this->assertStringContainsString(
+            'Deterministic reservation commit failure',
+            (string) $invoice->fresh()->payment_attention_reason
+        );
+        $this->assertSame(
+            Service::STATUS_PENDING,
+            $service->fresh()->status
+        );
+        $attentionAt = $invoice->fresh()
+            ->payment_attention_required_at?->toJSON();
+        $replayed = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            100,
+            transactionId: 'captured-checkout-failure'
+        );
+        $this->assertTrue($replayed->is($transaction));
+        $this->assertSame(1, $invoice->transactions()->count());
+        $this->assertSame(
+            $attentionAt,
+            $invoice->fresh()->payment_attention_required_at?->toJSON()
+        );
+
+        foreach ([
+            fn () => ExtensionHelper::addPayment(
+                $invoice->id,
+                null,
+                101,
+                transactionId: 'captured-checkout-failure'
+            ),
+            fn () => ExtensionHelper::addPayment(
+                $invoice->id,
+                null,
+                100,
+                transactionId: 'captured-checkout-failure',
+                status: InvoiceTransactionStatus::Processing
+            ),
+            fn () => ExtensionHelper::addPayment(
+                $invoice->id,
+                null,
+                100,
+                transactionId: 'captured-checkout-failure',
+                isCreditTransaction: true
+            ),
+        ] as $mismatchedReplay) {
+            try {
+                $mismatchedReplay();
+                $this->fail(
+                    'Expected conflicting payment evidence to be rejected.'
+                );
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString(
+                    'transaction',
+                    strtolower($exception->getMessage())
+                );
+            }
+        }
+
+        try {
+            ExtensionHelper::addPayment(
+                $invoice->id,
+                null,
+                100,
+                transactionId: 'second-captured-payment'
+            );
+            $this->fail(
+                'Expected payment attention to reject a duplicate payment.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'manual payment review',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame(1, $invoice->transactions()->count());
+        $this->assertDatabaseMissing('invoice_transactions', [
+            'invoice_id' => $invoice->id,
+            'transaction_id' => 'second-captured-payment',
+        ]);
+        try {
+            $transaction->forceFill(['fee' => 9.99])->save();
+            $this->fail(
+                'Expected attention payment evidence to be immutable.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'manual payment review',
+                $exception->getMessage()
+            );
+        }
+        try {
+            $transaction->delete();
+            $this->fail(
+                'Expected attention payment evidence deletion to fail.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'manual payment review',
+                $exception->getMessage()
+            );
+        }
+
+        try {
+            app(MarkInvoicePaidService::class)->handle($invoice);
+            $this->fail(
+                'Expected manual paid transition to remain blocked.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'manual payment review',
+                $exception->getMessage()
+            );
+        }
+        Queue::assertNotPushed(CreateJob::class);
+    }
+
+    public function test_gateway_scoped_payment_identity_is_case_sensitive_and_fee_safe(): void
+    {
+        $invoice = $this->createInvoiceWithItem(100);
+        $firstGateway = Gateway::create([
+            'name' => 'First gateway',
+            'extension' => 'FirstGateway',
+            'type' => 'gateway',
+            'enabled' => true,
+        ]);
+        $secondGateway = Gateway::create([
+            'name' => 'Second gateway',
+            'extension' => 'SecondGateway',
+            'type' => 'gateway',
+            'enabled' => true,
+        ]);
+
+        $first = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            $firstGateway,
+            1,
+            fee: 0,
+            transactionId: 'Case-Sensitive-Reference'
+        );
+        $second = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            $secondGateway,
+            1,
+            fee: 0,
+            transactionId: 'Case-Sensitive-Reference'
+        );
+        $caseVariant = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            $firstGateway,
+            1,
+            fee: 0,
+            transactionId: 'case-sensitive-reference'
+        );
+
+        $this->assertNotSame($first->id, $second->id);
+        $this->assertNotSame($first->id, $caseVariant->id);
+        $this->assertNotSame(
+            $first->gateway_transaction_guard,
+            $second->gateway_transaction_guard
+        );
+        $this->assertNotSame(
+            $first->gateway_transaction_guard,
+            $caseVariant->gateway_transaction_guard
+        );
+
+        ExtensionHelper::addPaymentFee(
+            'Case-Sensitive-Reference',
+            2.50,
+            $secondGateway
+        );
+        $this->assertSame('0.00', $first->fresh()->fee);
+        $this->assertSame('2.50', $second->fresh()->fee);
+        $this->assertSame('0.00', $caseVariant->fresh()->fee);
+
+        try {
+            ExtensionHelper::addPaymentFee(
+                'Case-Sensitive-Reference',
+                9.99
+            );
+            $this->fail(
+                'Expected an unscoped cross-gateway fee update to fail.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'ambiguous across gateways',
+                $exception->getMessage()
+            );
+        }
+        $this->assertSame('0.00', $first->fresh()->fee);
+        $this->assertSame('2.50', $second->fresh()->fee);
+    }
+
+    public function test_capacity_invoice_line_cannot_move_to_non_capacity_invoice(): void
+    {
+        $capacityInvoice = $this->createInvoiceWithItem(100);
+        $ordinaryInvoice = $this->createInvoiceWithItem(100);
+        $line = $capacityInvoice->items()->firstOrFail();
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class((int) $capacityInvoice->id) extends CapacityInvoicePaymentService
+            {
+                public function __construct(
+                    private readonly int $capacityInvoiceId
+                ) {
+                }
+
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    $invoiceId = $invoice instanceof Invoice
+                        ? (int) $invoice->id
+                        : $invoice;
+
+                    return $invoiceId === $this->capacityInvoiceId;
+                }
+            }
+        );
+        $line->invoice_id = $ordinaryInvoice->id;
+
+        try {
+            $line->save();
+            $this->fail(
+                'Expected moving a capacity line off its invoice to fail.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'fulfillment lines are immutable',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            $capacityInvoice->id,
+            $line->fresh()->invoice_id
+        );
+    }
+
+    public function test_expired_partial_payment_immediately_requires_attention_and_can_progress(): void
+    {
+        Queue::fake();
+        $invoice = $this->createInvoiceWithItem(100);
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class extends CapacityInvoicePaymentService
+            {
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    return true;
+                }
+
+                public function deadlineExpired(Invoice $invoice): bool
+                {
+                    return true;
+                }
+            }
+        );
+
+        $processing = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            null,
+            10,
+            transactionId: 'late-partial-payment'
+        );
+
+        $this->assertSame(
+            InvoiceTransactionStatus::Processing,
+            $processing->status
+        );
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+        $this->assertNotNull(
+            $invoice->fresh()->payment_attention_required_at
+        );
+        $this->assertNotNull(
+            $invoice->fresh()->payment_attention_alerted_at
+        );
+
+        $succeeded = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            10,
+            transactionId: 'late-partial-payment'
+        );
+
+        $this->assertTrue($succeeded->is($processing));
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $succeeded->fresh()->status
+        );
+        $this->assertSame(1, $invoice->transactions()->count());
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+        Queue::assertNotPushed(CreateJob::class);
+    }
+
+    public function test_late_processing_payment_can_fail_without_clearing_attention(): void
+    {
+        Queue::fake();
+        $invoice = $this->createInvoiceWithItem(100);
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class extends CapacityInvoicePaymentService
+            {
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    return true;
+                }
+
+                public function deadlineExpired(Invoice $invoice): bool
+                {
+                    return true;
+                }
+            }
+        );
+
+        $processing = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            null,
+            10,
+            transactionId: 'late-payment-that-failed'
+        );
+        $attentionAt = $invoice->fresh()
+            ->payment_attention_required_at?->toJSON();
+        $attentionReason = $invoice->fresh()->payment_attention_reason;
+
+        $failed = ExtensionHelper::addFailedPayment(
+            $invoice->id,
+            null,
+            10,
+            transactionId: 'late-payment-that-failed'
+        );
+
+        $this->assertTrue($failed->is($processing));
+        $this->assertSame(
+            InvoiceTransactionStatus::Failed,
+            $failed->fresh()->status
+        );
+        $this->assertSame(1, $invoice->transactions()->count());
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+        $this->assertSame(
+            $attentionAt,
+            $invoice->fresh()->payment_attention_required_at?->toJSON()
+        );
+        $this->assertSame(
+            $attentionReason,
+            $invoice->fresh()->payment_attention_reason
+        );
+        Queue::assertNotPushed(CreateJob::class);
+    }
+
+    public function test_cancelled_capacity_invoice_records_partial_payment_as_attention(): void
+    {
+        Queue::fake();
+        $invoice = $this->createInvoiceWithItem(100);
+        $invoice->status = Invoice::STATUS_CANCELLED;
+        $invoice->save();
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class extends CapacityInvoicePaymentService
+            {
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    return true;
+                }
+
+                public function deadlineExpired(Invoice $invoice): bool
+                {
+                    return false;
+                }
+            }
+        );
+
+        $transaction = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            10,
+            transactionId: 'cancelled-capacity-payment'
+        );
+
+        $this->assertTrue($transaction->exists);
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $transaction->status
+        );
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
+        );
+        $this->assertNotNull(
+            $invoice->fresh()->payment_attention_required_at
+        );
+        $this->assertStringContainsString(
+            'cancelled',
+            (string) $invoice->fresh()->payment_attention_reason
+        );
+        Queue::assertNotPushed(CreateJob::class);
+    }
+
+    public function test_whmcs_import_populates_gateway_transaction_guard(): void
+    {
+        $source = file_get_contents(
+            app_path('Console/Commands/ImportFromWhmcs.php')
+        );
+
+        $this->assertStringContainsString(
+            "'gateway_transaction_guard' =>",
+            $source
+        );
+        $this->assertStringContainsString(
+            'InvoiceTransaction::gatewayTransactionGuard(',
+            $source
+        );
+    }
+
+    public function test_database_guard_rejects_concurrent_nullable_gateway_duplicate(): void
+    {
+        $firstInvoice = $this->createInvoiceWithItem(100);
+        $secondInvoice = $this->createInvoiceWithItem(100);
+        $guard = InvoiceTransaction::gatewayTransactionGuard(
+            null,
+            'concurrent-null-gateway-reference'
+        );
+        $row = [
+            'gateway_id' => null,
+            'amount' => 10,
+            'fee' => null,
+            'transaction_id' => 'concurrent-null-gateway-reference',
+            'gateway_transaction_guard' => $guard,
+            'status' => InvoiceTransactionStatus::Processing->value,
+            'is_credit_transaction' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+        DB::table('invoice_transactions')->insert(
+            ['invoice_id' => $firstInvoice->id] + $row
+        );
+
+        try {
+            DB::table('invoice_transactions')->insert(
+                ['invoice_id' => $secondInvoice->id] + $row
+            );
+            $this->fail(
+                'Expected the database idempotency guard to reject duplicate evidence.'
+            );
+        } catch (QueryException) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    public function test_paid_and_cancelled_capacity_invoices_share_the_same_lock_order(): void
+    {
+        $paid = file_get_contents(
+            app_path('Services/Invoice/ProcessPaidInvoiceService.php')
+        );
+        $cancelled = file_get_contents(
+            app_path('Services/Invoice/CancelInvoiceService.php')
+        );
+
+        $this->assertOrderedSourceMarkers($paid, [
+            '$services = Service::query()',
+            '$upgrades = ServiceUpgrade::query()',
+            "DB::table('ptero_resource_reservations')",
+            '$items = $invoice->items()',
+        ]);
+        $this->assertOrderedSourceMarkers($cancelled, [
+            '$services = Service::query()',
+            '$upgrades = ServiceUpgrade::query()',
+            '$reservations = DB::table(',
+            '$items = $invoice->items()',
+        ]);
+    }
+
+    public function test_payment_attention_invoice_hides_pay_and_rejects_modal_open(): void
+    {
+        $invoice = $this->createInvoiceWithItem(100);
+        $invoice->forceFill([
+            'payment_attention_required_at' => now(),
+            'payment_attention_reason' => 'Captured payment needs review.',
+        ])->save();
+        $user = $invoice->user;
+        $this->actingAs($user);
+        session($this->loginUser($user));
+
+        Livewire::test(Show::class, ['invoice' => $invoice->fresh()])
+            ->assertSee('Manual payment review required')
+            ->assertSeeHtml('data-testid="invoice-payment-attention"')
+            ->assertDontSeeHtml('data-testid="invoice-pay-button"')
+            ->set('showPayModal', true)
+            ->assertSet('showPayModal', false)
+            ->set('selectedMethod', 'credit')
+            ->call('processPayment')
+            ->assertSet('showPayModal', false);
+    }
+
+    public function test_expired_capacity_deadline_hides_pay_and_stops_polling(): void
+    {
+        $invoice = $this->createInvoiceWithItem(100);
+        $user = $invoice->user;
+        $this->actingAs($user);
+        session($this->loginUser($user));
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class extends CapacityInvoicePaymentService
+            {
+                public function deadlineExpired(Invoice $invoice): bool
+                {
+                    return true;
+                }
+            }
+        );
+
+        Livewire::test(Show::class, ['invoice' => $invoice])
+            ->assertSee('capacity guarantee expired')
+            ->assertDontSeeHtml('data-testid="invoice-pay-button"')
+            ->set('showPayModal', true)
+            ->assertSet('showPayModal', false)
+            ->set('checkPayment', true)
+            ->call('checkPaymentStatus')
+            ->assertSet('checkPayment', false)
+            ->assertSet('showPayModal', false);
+    }
+
+    public function test_non_capacity_fulfillment_failure_is_not_recovered_as_attention(): void
+    {
+        $user = User::factory()->create();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'status' => Service::STATUS_PENDING,
+            'user_id' => $user->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $invoice = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'status' => Invoice::STATUS_PENDING,
+            'currency_code' => $service->currency_code,
+        ]);
+        $invoice->items()->create([
+            'reference_type' => Service::class,
+            'reference_id' => $service->id,
+            'price' => 100,
+            'quantity' => 1,
+            'description' => 'Ordinary server',
+        ]);
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class extends DurableFulfillmentService
+            {
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return true;
+                }
+
+                public function preflightPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): ?string {
+                    return null;
+                }
+
+                public function commitPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): bool {
+                    throw new \RuntimeException(
+                        'Ordinary fulfillment failure.'
+                    );
+                }
+            }
+        );
+
+        try {
+            ExtensionHelper::addPayment(
+                $invoice->id,
+                null,
+                100,
+                transactionId: 'ordinary-failure'
+            );
+            $this->fail(
+                'Expected an ordinary fulfillment failure to propagate.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Ordinary fulfillment failure.',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(0, $invoice->transactions()->count());
+        $this->assertNull(
+            $invoice->fresh()->payment_attention_required_at
+        );
+    }
+
     public function test_invoice_handles_multiple_partial_payments()
     {
         $invoice = $this->createInvoiceWithItem(100.00);
@@ -191,5 +885,258 @@ class InvoicePaymentProcessingTest extends TestCase
 
         $transaction = $invoice->transactions()->first();
         $this->assertEquals(2.90, $transaction->fee);
+    }
+
+    public function test_non_capacity_invoice_may_retain_legacy_direct_paid_transition(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+        $invoice->status = Invoice::STATUS_PAID;
+        $invoice->save();
+
+        $this->assertSame(Invoice::STATUS_PAID, $invoice->fresh()->status);
+    }
+
+    public function test_non_capacity_invoice_may_be_created_paid(): void
+    {
+        $invoice = Invoice::factory()->create([
+            'status' => Invoice::STATUS_PAID,
+        ]);
+
+        $this->assertSame(Invoice::STATUS_PAID, $invoice->status);
+    }
+
+    public function test_direct_capacity_paid_model_transition_is_rejected(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class((int) $invoice->id) extends CapacityInvoicePaymentService
+            {
+                public function __construct(
+                    private readonly int $capacityInvoiceId
+                ) {
+                }
+
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    $invoiceId = $invoice instanceof Invoice
+                        ? (int) $invoice->id
+                        : $invoice;
+
+                    return $invoiceId === $this->capacityInvoiceId;
+                }
+            }
+        );
+        $invoice->status = Invoice::STATUS_PAID;
+
+        try {
+            $invoice->save();
+            $this->fail('Expected the fulfillment coordinator guard to reject the direct transition.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('fulfillment coordinator', $exception->getMessage());
+        }
+
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+    }
+
+    public function test_non_capacity_succeeded_evidence_retains_legacy_write_semantics(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+
+        $transaction = InvoiceTransaction::create([
+            'invoice_id' => $invoice->id,
+            'amount' => 1,
+            'fee' => 0,
+            'transaction_id' => 'legacy-direct-success',
+            'status' => InvoiceTransactionStatus::Succeeded,
+        ]);
+
+        $this->assertTrue($transaction->exists);
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $transaction->status
+        );
+    }
+
+    public function test_capacity_succeeded_evidence_requires_atomic_coordinator(): void
+    {
+        $invoice = $this->createInvoiceWithItem();
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class((int) $invoice->id) extends CapacityInvoicePaymentService
+            {
+                public function __construct(
+                    private readonly int $capacityInvoiceId
+                ) {
+                }
+
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    $invoiceId = $invoice instanceof Invoice
+                        ? (int) $invoice->id
+                        : $invoice;
+
+                    return $invoiceId === $this->capacityInvoiceId;
+                }
+            }
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage(
+            'Succeeded capacity invoice transactions'
+        );
+
+        InvoiceTransaction::create([
+            'invoice_id' => $invoice->id,
+            'amount' => 1,
+            'fee' => 0,
+            'transaction_id' => 'unsafe-capacity-success',
+            'status' => InvoiceTransactionStatus::Succeeded,
+        ]);
+    }
+
+    public function test_missing_fulfillment_reference_rolls_back_paid_status(): void
+    {
+        $user = User::factory()->create();
+        $invoice = Invoice::factory()->create(['user_id' => $user->id]);
+        $invoice->items()->create([
+            'reference_type' => Service::class,
+            'reference_id' => 999999,
+            'price' => 100,
+            'quantity' => 1,
+            'description' => 'Missing service',
+        ]);
+
+        try {
+            app(MarkInvoicePaidService::class)->handle($invoice);
+            $this->fail('Expected the missing service reference to abort payment.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('references missing service', $exception->getMessage());
+        }
+
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+    }
+
+    public function test_capacity_upgrade_payment_fails_closed_when_coordinator_is_missing(): void
+    {
+        [$invoice, $upgrade] = $this->upgradeInvoice(
+            ServiceUpgrade::STATUS_PENDING
+        );
+        $this->mock(
+            CapacityUpgradeReservationIdentity::class,
+            function (MockInterface $mock) use ($upgrade): void {
+                $mock->shouldReceive('requiresCoordinator')
+                    ->once()
+                    ->with(\Mockery::on(
+                        fn (ServiceUpgrade $candidate): bool =>
+                            $candidate->is($upgrade)
+                    ))
+                    ->andReturnTrue();
+            }
+        );
+
+        try {
+            app(MarkInvoicePaidService::class)->handle($invoice);
+            $this->fail(
+                'Expected a row-backed upgrade to require its coordinator.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'reservation coordinator is unavailable',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $invoice->fresh()->status
+        );
+    }
+
+    public function test_non_capacity_upgrade_is_not_blocked_by_missing_coordinator(): void
+    {
+        [$invoice, $upgrade] = $this->upgradeInvoice(
+            ServiceUpgrade::STATUS_CANCELLED
+        );
+        $this->mock(
+            CapacityUpgradeReservationIdentity::class,
+            function (MockInterface $mock) use ($upgrade): void {
+                $mock->shouldReceive('requiresCoordinator')
+                    ->twice()
+                    ->with(\Mockery::on(
+                        fn (ServiceUpgrade $candidate): bool =>
+                            $candidate->is($upgrade)
+                    ))
+                    ->andReturnFalse();
+            }
+        );
+
+        app(MarkInvoicePaidService::class)->handle($invoice);
+
+        $this->assertSame(Invoice::STATUS_PAID, $invoice->fresh()->status);
+        $this->assertSame(
+            ServiceUpgrade::STATUS_CANCELLED,
+            $upgrade->fresh()->status
+        );
+    }
+
+    private function upgradeInvoice(string $upgradeStatus): array
+    {
+        $user = User::factory()->create();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => $user->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_PENDING,
+        ]);
+        $invoice = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'status' => Invoice::STATUS_PENDING,
+            'currency_code' => $service->currency_code,
+            'due_at' => now()->addDays(7),
+        ]);
+        $upgrade = ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'invoice_id' => $invoice->id,
+            'status' => $upgradeStatus,
+            'type' => 'product',
+        ]);
+        $invoice->items()->create([
+            'reference_type' => ServiceUpgrade::class,
+            'reference_id' => $upgrade->id,
+            'price' => 10,
+            'quantity' => 1,
+            'description' => 'Resource upgrade',
+        ]);
+
+        return [$invoice->fresh('items'), $upgrade];
+    }
+
+    /**
+     * @param  list<string>  $markers
+     */
+    private function assertOrderedSourceMarkers(
+        string $source,
+        array $markers
+    ): void {
+        $previous = -1;
+        foreach ($markers as $marker) {
+            $position = strpos($source, $marker);
+            $this->assertNotFalse(
+                $position,
+                "Missing lock-order marker: {$marker}"
+            );
+            $this->assertGreaterThan(
+                $previous,
+                $position,
+                "Lock-order marker is out of order: {$marker}"
+            );
+            $previous = $position;
+        }
     }
 }

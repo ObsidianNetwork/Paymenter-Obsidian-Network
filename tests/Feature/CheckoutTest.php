@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Models\Cart;
+use App\Models\ConfigOption;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Once;
 use Livewire\Livewire;
 use Tests\TestCase;
@@ -146,5 +148,93 @@ class CheckoutTest extends TestCase
             ->set('plan_id', $plan->id)
             ->call('checkout')
             ->assertHasErrors(['plan_id' => 'exists']);
+    }
+
+    public function test_dynamic_resource_values_must_be_integers_on_an_anchored_step(): void
+    {
+        $option = ConfigOption::create([
+            'name' => 'Memory',
+            'env_variable' => 'MEMORY',
+            'type' => 'dynamic_slider',
+            'sort' => 1,
+            'hidden' => false,
+            'upgradable' => true,
+            'metadata' => [
+                'min' => 1024,
+                'max' => 32768,
+                'step' => 1024,
+                'default' => 2048,
+                'display_divisor' => 1024,
+                'resource_type' => 'memory',
+                'pricing' => [
+                    'model' => 'linear',
+                    'rate_per_unit' => 1,
+                ],
+            ],
+        ]);
+        DB::table('config_option_products')->insert([
+            'config_option_id' => $option->id,
+            'product_id' => $this->product->product->id,
+        ]);
+
+        Livewire::test('products.checkout', [
+            'category' => $this->product->product->category,
+            'product' => $this->product->product->slug,
+        ])
+            ->set("configOptions.{$option->id}", '2048.5')
+            ->call('checkout')
+            ->assertHasErrors(["configOptions.{$option->id}"])
+            ->set("configOptions.{$option->id}", 1536)
+            ->call('checkout')
+            ->assertHasErrors(["configOptions.{$option->id}"]);
+    }
+
+    public function test_custom_or_non_pterodactyl_slider_does_not_enable_stock_gate(): void
+    {
+        $option = ConfigOption::create([
+            'name' => 'Custom amount',
+            'env_variable' => 'CUSTOM_AMOUNT',
+            'type' => 'dynamic_slider',
+            'sort' => 1,
+            'hidden' => false,
+            'upgradable' => true,
+            'metadata' => [
+                'min' => 1,
+                'max' => 10,
+                'step' => 1,
+                'default' => 1,
+                'display_divisor' => 1,
+                'resource_type' => 'custom',
+                'pricing' => [
+                    'model' => 'linear',
+                    'rate_per_unit' => 1,
+                ],
+            ],
+        ]);
+        DB::table('config_option_products')->insert([
+            'config_option_id' => $option->id,
+            'product_id' => $this->product->product->id,
+        ]);
+
+        Livewire::test('products.checkout', [
+            'category' => $this->product->product->category,
+            'product' => $this->product->product->slug,
+        ])
+            ->assertDontSee('dynamicResourceStock(', false)
+            ->assertDontSee('/resource-quote', false);
+
+        $option->update([
+            'metadata' => [
+                ...$option->metadata,
+                'resource_type' => 'memory',
+            ],
+        ]);
+
+        Livewire::test('products.checkout', [
+            'category' => $this->product->product->category,
+            'product' => $this->product->product->slug,
+        ])
+            ->assertDontSee('dynamicResourceStock(', false)
+            ->assertDontSee('/resource-quote', false);
     }
 }

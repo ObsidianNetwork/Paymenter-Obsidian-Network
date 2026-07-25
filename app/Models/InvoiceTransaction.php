@@ -31,6 +31,22 @@ class InvoiceTransaction extends Model implements Auditable
         'status' => InvoiceTransactionStatus::class,
     ];
 
+    public static function gatewayTransactionGuard(
+        int|string|null $gatewayId,
+        mixed $transactionId
+    ): ?string {
+        if ($transactionId === null || (string) $transactionId === '') {
+            return null;
+        }
+
+        return hash('sha256', json_encode([
+            'gateway_id' => $gatewayId !== null
+                ? (int) $gatewayId
+                : null,
+            'transaction_id' => (string) $transactionId,
+        ], JSON_THROW_ON_ERROR));
+    }
+
     public function invoice()
     {
         return $this->belongsTo(Invoice::class);

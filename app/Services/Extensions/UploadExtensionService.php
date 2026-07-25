@@ -8,6 +8,7 @@ use App\Classes\Extension\Gateway;
 use App\Classes\Extension\Server;
 use App\Console\Commands\Extension\Install;
 use App\Console\Commands\Extension\Upgrade;
+use App\Helpers\ExtensionHelper;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
 use ReflectionClass;
@@ -39,6 +40,10 @@ class UploadExtensionService
 
         $this->unzip($filePath, $extractPath);
 
+        $destinationPath = null;
+        $backupPath = null;
+        $activated = false;
+        $enteredMaintenance = false;
         try {
             // Define if the folder path is correct or we need to traverse it (based on .php files)
             $path = $this->validateExtensionPath($extractPath);
@@ -55,49 +60,119 @@ class UploadExtensionService
             if (is_dir($destinationPath)) {
                 $updating = true;
             }
+            $enteredMaintenance = $this->enterMaintenanceMode();
 
             if ($updating) {
-                // Read the extension class for current version
-                $extensionClass = 'Paymenter\\Extensions\\' . ucfirst($type['type']) . 's\\' . ucfirst($type['class']);
-                if (class_exists($extensionClass)) {
-                    $reflection = new ReflectionClass($extensionClass);
-                    $attributes = $reflection->getAttributes(ExtensionMeta::class);
+                app(ExtensionLifecycleGuard::class)
+                    ->assertCanUpgrade($type['class']);
 
-                    if (count($attributes) > 0) {
-                        $extensionMeta = $attributes[0]->newInstance();
-                        if ($extensionMeta->version) {
-                            $oldVersion = $extensionMeta->version;
-                        }
-                    }
+                $oldVersion = $this->installedExtensionVersion(
+                    $type['type'],
+                    $type['class']
+                );
+                $backupPath = dirname($destinationPath).'/.'
+                    .basename($destinationPath).'.backup-'
+                    .bin2hex(random_bytes(8));
+                if (! rename($destinationPath, $backupPath)) {
+                    throw new \RuntimeException(
+                        'Failed to preserve the installed extension before updating it.'
+                    );
                 }
-                File::deleteDirectory($destinationPath);
             }
 
             if (!rename($path, $destinationPath)) {
                 throw new \Exception('Failed to move the extension files to the destination.');
             }
-        } catch (\Exception $e) {
+            $activated = true;
+        } catch (\Throwable $e) {
             // Clean up the extracted files in case of an error
             File::deleteDirectory($extractPath);
-            throw $e; // Re-throw the exception after cleanup
+            $this->recoverFailedActivation(
+                $destinationPath,
+                $backupPath,
+                $activated,
+                false,
+                $enteredMaintenance,
+                $e
+            );
+
+            throw $e;
         }
 
         // Remove the extracted files
         File::deleteDirectory($extractPath);
 
-        // Execute the upgraded method if it exists
-        if ($updating) {
-            Artisan::call(Upgrade::class, [
-                'type' => $type['type'],
-                'name' => $type['class'],
-                'oldVersion' => $oldVersion,
-            ]);
-        } else {
-            Artisan::call(Install::class, [
-                'type' => $type['type'],
-                'name' => $type['class'],
-            ]);
+        $schemaActivationStarted = false;
+        try {
+            // Extension lifecycle hooks may commit schema mutations before
+            // returning or failing. From this point onward, recovery must keep
+            // the application in maintenance until an operator completes a
+            // compatible forward repair.
+            $schemaActivationStarted = true;
+
+            // Execute the upgraded method if it exists
+            if ($updating) {
+                $exitCode = Artisan::call(Upgrade::class, [
+                    'type' => $type['type'],
+                    'name' => $type['class'],
+                    'oldVersion' => $oldVersion,
+                ]);
+            } else {
+                $exitCode = Artisan::call(Install::class, [
+                    'type' => $type['type'],
+                    'name' => $type['class'],
+                ]);
+            }
+
+            if ($exitCode !== 0) {
+                $output = trim(Artisan::output());
+                throw new \RuntimeException(
+                    $output !== ''
+                        ? "Extension lifecycle failed: {$output}"
+                        : 'Extension lifecycle failed. Review the application log for details.'
+                );
+            }
+
+            // The previous extension class may already be loaded in this PHP
+            // process during an update. Run the newly installed destination's
+            // migrations by path so schema activation never depends on that
+            // stale class definition invoking its new upgraded() hook.
+            $migrationPath = $destinationPath.'/database/migrations';
+            if (is_dir($migrationPath)) {
+                ExtensionHelper::runMigrationsOrFail(
+                    'extensions/'.ucfirst($type['type']).'s/'
+                    .$type['class'].'/database/migrations'
+                );
+            }
+            $this->runDestinationReadinessHook($destinationPath);
+            $this->restartQueueWorkers();
+        } catch (\Throwable $exception) {
+            $this->recoverFailedActivation(
+                $destinationPath,
+                $backupPath,
+                true,
+                $schemaActivationStarted,
+                $enteredMaintenance,
+                $exception
+            );
+
+            throw new \RuntimeException(
+                'The extension lifecycle failed and the previous extension '
+                .'files were restored. Extension migrations are forward-only '
+                .'and were not rolled back. Paymenter remains in maintenance; '
+                .'install compatible extension files, complete a forward '
+                .'schema/readiness repair, restart queue workers, and run '
+                .'php artisan up only after verification. '
+                .$exception->getMessage(),
+                0,
+                $exception
+            );
         }
+
+        if ($backupPath !== null && is_dir($backupPath)) {
+            File::deleteDirectory($backupPath);
+        }
+        $this->leaveMaintenanceMode($enteredMaintenance);
 
         return $type['type'];
     }
@@ -187,6 +262,146 @@ class UploadExtensionService
             File::delete($filePath);
         } else {
             throw new \Exception('Failed to open the zip file.');
+        }
+    }
+
+    private function restorePreviousExtension(
+        ?string $destinationPath,
+        ?string $backupPath,
+        bool $activated,
+        \Throwable $original
+    ): void {
+        if ($destinationPath === null) {
+            return;
+        }
+
+        if ($activated && is_dir($destinationPath)) {
+            File::deleteDirectory($destinationPath);
+        }
+        if ($backupPath === null || ! is_dir($backupPath)) {
+            return;
+        }
+        if (! rename($backupPath, $destinationPath)) {
+            throw new \RuntimeException(
+                'The extension update failed and the previous extension files could not be restored: '
+                .$original->getMessage(),
+                0,
+                $original
+            );
+        }
+    }
+
+    /**
+     * Restore files after a failed activation. Once lifecycle execution starts,
+     * schema changes may already have committed and the application must remain
+     * down until an operator completes a compatible forward repair.
+     */
+    private function recoverFailedActivation(
+        ?string $destinationPath,
+        ?string $backupPath,
+        bool $activated,
+        bool $schemaActivationStarted,
+        bool $enteredMaintenance,
+        \Throwable $original
+    ): void {
+        $this->restorePreviousExtension(
+            $destinationPath,
+            $backupPath,
+            $activated,
+            $original
+        );
+
+        if (! $schemaActivationStarted) {
+            $this->leaveMaintenanceMode($enteredMaintenance);
+        }
+    }
+
+    private function installedExtensionVersion(
+        string $type,
+        string $class
+    ): ?string {
+        $extensionClass = 'Paymenter\\Extensions\\'
+            .ucfirst($type).'s\\'
+            .ucfirst($class).'\\'
+            .ucfirst($class);
+        if (! class_exists($extensionClass)) {
+            return null;
+        }
+
+        $reflection = new ReflectionClass($extensionClass);
+        $attributes = $reflection->getAttributes(ExtensionMeta::class);
+        if ($attributes === []) {
+            return null;
+        }
+
+        $version = $attributes[0]->newInstance()->version;
+
+        return $version !== '' ? $version : null;
+    }
+
+    /**
+     * Load the readiness contract directly from the newly activated tree.
+     * The returned anonymous object/callable is not the extension's main class,
+     * so an update remains correct when the previous class is already loaded.
+     */
+    private function runDestinationReadinessHook(string $destinationPath): void
+    {
+        $hookPath = $destinationPath.'/migration-readiness.php';
+        if (! is_file($hookPath)) {
+            return;
+        }
+
+        $hook = require $hookPath;
+        if (is_callable($hook)) {
+            $hook();
+
+            return;
+        }
+        if (is_object($hook) && method_exists($hook, 'assertReady')) {
+            $hook->assertReady();
+
+            return;
+        }
+
+        throw new \RuntimeException(
+            'The destination extension migration-readiness.php file must '
+            .'return a callable or an object with assertReady().'
+        );
+    }
+
+    private function enterMaintenanceMode(): bool
+    {
+        if (app()->isDownForMaintenance()) {
+            return false;
+        }
+        if (Artisan::call('down') !== 0) {
+            throw new \RuntimeException(
+                'Failed to put Paymenter into deployment maintenance.'
+            );
+        }
+
+        return true;
+    }
+
+    private function leaveMaintenanceMode(bool $enteredMaintenance): void
+    {
+        if (! $enteredMaintenance) {
+            return;
+        }
+        if (Artisan::call('up') !== 0) {
+            throw new \RuntimeException(
+                'Paymenter could not leave deployment maintenance. Run '
+                .'php artisan up manually after inspecting the extension state.'
+            );
+        }
+    }
+
+    private function restartQueueWorkers(): void
+    {
+        if (Artisan::call('queue:restart') !== 0) {
+            throw new \RuntimeException(
+                'Queue workers could not be signalled to restart.'
+            );
         }
     }
 }

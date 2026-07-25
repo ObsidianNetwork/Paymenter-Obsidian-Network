@@ -2,82 +2,484 @@
 
 namespace App\Services\ServiceUpgrade;
 
+use App\Exceptions\DisplayException;
 use App\Jobs\Server\UpgradeJob;
+use App\Models\Credit;
 use App\Models\Service;
 use App\Models\ServiceUpgrade;
+use App\Services\Invoice\CancelInvoiceService;
+use App\Services\Service\FulfillmentStatusTransitionService;
+use App\Support\StrictDecimal;
+use App\Support\StrictInteger;
 use Illuminate\Support\Facades\DB;
 
 class ServiceUpgradeService
 {
     /**
-     * Handle the uploaded extension file.
-     * The added file is always a zip file.
-     *
-     * @return void
+     * Backward-compatible entry point for legacy callers.
      */
-    public function handle(ServiceUpgrade $serviceUpgrade)
+    public function handle(ServiceUpgrade $serviceUpgrade): void
     {
-        return DB::transaction(function () use ($serviceUpgrade) {
-            $serviceUpgrade->status = ServiceUpgrade::STATUS_COMPLETED;
-            $serviceUpgrade->save();
+        $this->markPaidCommitted($serviceUpgrade);
+    }
 
-            // Check if old product stock should be increased
-            $service = $serviceUpgrade->service;
-            if ($service->product->stock !== null) {
-                $serviceUpgrade->service->product->increment('stock', $serviceUpgrade->service->quantity);
+    public function markPaidCommitted(ServiceUpgrade $serviceUpgrade): void
+    {
+        $upgradeId = $serviceUpgrade->id;
+
+        $sourceMismatch = DB::transaction(function () use ($upgradeId): bool {
+            $upgrade = $this->lockedUpgrade($upgradeId);
+
+            if (in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_PAID_COMMITTED,
+                ServiceUpgrade::STATUS_PROVISIONING,
+                ServiceUpgrade::STATUS_RETRYABLE_FAILED,
+                ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+                ServiceUpgrade::STATUS_COMPLETED,
+            ], true)) {
+                return false;
             }
 
-            $service->plan_id = $serviceUpgrade->plan_id;
-            $service->product_id = $serviceUpgrade->product_id;
-            $service->save();
-
-            $service->refresh();
-
-            // Decrease stock of new product if applicable
-            if ($service->product->stock !== null) {
-                $service->product->decrement('stock', $service->quantity);
+            if (! in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_PENDING,
+                ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            ], true)) {
+                throw new DisplayException('This upgrade can no longer be committed.');
             }
 
-            // Update service configurations - remove old configs and add new ones
-            $newConfigOptionIds = $serviceUpgrade->configs->pluck('config_option_id')->toArray();
+            $this->ensureSnapshots($upgrade);
+            if (! $upgrade->sourceStillMatches()) {
+                $upgrade->forceFill([
+                    'status' => ServiceUpgrade::STATUS_CANCELLED,
+                    'active_service_guard_id' => null,
+                    'last_error' => 'The service changed before the upgrade was paid.',
+                    'failed_at' => now(),
+                ])->save();
 
-            // Delete configs that are no longer applicable
-            $service->configs()
-                ->whereNotIn('config_option_id', $newConfigOptionIds)
-                ->delete();
+                return true;
+            }
 
-            // Update or create new configs
-            foreach ($serviceUpgrade->configs as $config) {
-                $service->configs()->updateOrCreate(
-                    ['config_option_id' => $config->config_option_id],
-                    ['config_value_id' => $config->config_value_id]
+            $upgrade->forceFill([
+                'status' => ServiceUpgrade::STATUS_PAID_COMMITTED,
+                'active_service_guard_id' => $upgrade->service_id,
+                'paid_at' => $upgrade->paid_at ?? now(),
+                'last_error' => null,
+                'failed_at' => null,
+            ])->save();
+
+            DB::afterCommit(
+                fn () => UpgradeJob::dispatch(
+                    ServiceUpgrade::query()->findOrFail($upgradeId)
+                )
+            );
+
+            return false;
+        }, 5);
+
+        if ($sourceMismatch) {
+            throw new DisplayException(
+                'The service changed before payment. The upgrade was cancelled for manual review.'
+            );
+        }
+    }
+
+    public function beginProvisioning(ServiceUpgrade $serviceUpgrade): ?ServiceUpgrade
+    {
+        $result = DB::transaction(function () use ($serviceUpgrade): array {
+            $upgrade = $this->lockedUpgrade($serviceUpgrade->id);
+
+            if (in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_COMPLETED,
+                ServiceUpgrade::STATUS_CANCELLED,
+            ], true)) {
+                return ['upgrade' => null, 'source_mismatch' => false];
+            }
+
+            if (! in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_PAID_COMMITTED,
+                ServiceUpgrade::STATUS_RETRYABLE_FAILED,
+            ], true)) {
+                throw new \RuntimeException(
+                    "Upgrade {$upgrade->id} is not ready for provisioning."
                 );
             }
 
-            $service->refresh();
+            if (! $upgrade->sourceStillMatches()) {
+                $upgrade->forceFill([
+                    'status' => ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+                    'last_error' => 'The service changed after the upgrade commitment.',
+                    'failed_at' => now(),
+                ])->save();
 
-            $service->price = $service->calculatePrice();
-            $service->save();
+                return ['upgrade' => null, 'source_mismatch' => true];
+            }
 
-            // Is there a pending renewal invoice? Update it.
-            $pendingInvoice = $service->invoices()
-                ->where('status', 'pending')
-                ->first();
+            $upgrade->forceFill([
+                'status' => ServiceUpgrade::STATUS_PROVISIONING,
+                'provisioning_started_at' => now(),
+                'provisioning_attempts' => (int) $upgrade->provisioning_attempts + 1,
+                'last_error' => null,
+            ])->save();
 
-            if ($pendingInvoice) {
-                $item = $pendingInvoice->items()
-                    ->where('reference_type', Service::class)
-                    ->where('reference_id', $service->id)
-                    ->first();
-                if ($item) {
-                    $item->price = $service->price;
-                    $item->save();
+            return [
+                'upgrade' => $upgrade->fresh([
+                    'service.product.server.settings',
+                    'service.plan',
+                    'service.configs.configOption',
+                    'service.configs.configValue',
+                    'product.server.settings',
+                    'plan',
+                    'configs.configOption',
+                    'configs.configValue',
+                ]),
+                'source_mismatch' => false,
+            ];
+        }, 5);
+
+        if ($result['source_mismatch']) {
+            throw new \App\Exceptions\PermanentProvisioningException(
+                'The service no longer matches the paid upgrade source snapshot.'
+            );
+        }
+
+        return $result['upgrade'];
+    }
+
+    /**
+     * Finalize local state only after the server extension accepted the target.
+     */
+    public function complete(
+        ServiceUpgrade $serviceUpgrade,
+        ?string $reservationLeaseId = null
+    ): void {
+        DB::transaction(function () use ($serviceUpgrade, $reservationLeaseId): void {
+            $upgrade = $this->lockedUpgrade($serviceUpgrade->id);
+            if ($upgrade->status === ServiceUpgrade::STATUS_COMPLETED) {
+                return;
+            }
+            if ($upgrade->status !== ServiceUpgrade::STATUS_PROVISIONING) {
+                throw new \RuntimeException(
+                    "Upgrade {$upgrade->id} cannot be completed from {$upgrade->status}."
+                );
+            }
+
+            $service = Service::query()
+                ->with(['product', 'plan', 'configs.configOption', 'user'])
+                ->lockForUpdate()
+                ->findOrFail($upgrade->service_id);
+
+            if ($this->usesDynamicCapacity($upgrade)) {
+                $this->capacityService()->completeProvisioning(
+                    $upgrade,
+                    $reservationLeaseId
+                );
+            }
+
+            if ((int) $service->product_id !== (int) $upgrade->product_id) {
+                if ($service->product->stock !== null) {
+                    $service->product->increment('stock', $service->quantity);
+                }
+
+                $targetProduct = $upgrade->product;
+                if ($targetProduct->stock !== null) {
+                    $targetProduct->decrement('stock', $service->quantity);
                 }
             }
 
-            if ($service->product->server) {
-                UpgradeJob::dispatch($service);
+            FulfillmentStatusTransitionService::run(
+                $service,
+                fn () => $service->forceFill([
+                    'product_id' => $upgrade->product_id,
+                    'plan_id' => $upgrade->plan_id,
+                    'quantity' => 1,
+                ])->save()
+            );
+
+            FulfillmentStatusTransitionService::run(
+                $service,
+                function () use ($upgrade, $service): void {
+                    foreach ($upgrade->configs as $config) {
+                        $option = $config->configOption;
+                        if ($option === null) {
+                            continue;
+                        }
+
+                        if ($option->isDynamicSlider()) {
+                            $storedValue = StrictInteger::parseStoredDecimal(
+                                $config->slider_value
+                            );
+                            if ($storedValue === null) {
+                                throw new \RuntimeException(
+                                    "The stored target for {$option->name} must be a whole number."
+                                );
+                            }
+                            $value = $option->normalizeDynamicSliderValue(
+                                $storedValue
+                            );
+                            $service->configs()->updateOrCreate(
+                                ['config_option_id' => $option->id],
+                                [
+                                    'config_value_id' => null,
+                                    'slider_value' => $value,
+                                ]
+                            );
+                            $service->properties()->updateOrCreate(
+                                ['key' => $option->env_variable ?: $option->name],
+                                [
+                                    'name' => $option->name,
+                                    'value' => $value,
+                                ]
+                            );
+
+                            continue;
+                        }
+
+                        $service->configs()->updateOrCreate(
+                            ['config_option_id' => $option->id],
+                            [
+                                'config_value_id' => $config->config_value_id,
+                                'slider_value' => null,
+                            ]
+                        );
+                    }
+                }
+            );
+
+            $service->refresh();
+            $service->load(['plan.prices', 'configs.configOption', 'configs.configValue']);
+            $targetRecurring = StrictDecimal::parseNonNegative(
+                data_get($upgrade->target_snapshot, 'recurring_price')
+            );
+            if ($targetRecurring === null) {
+                throw new \RuntimeException(
+                    'The upgrade target is missing its immutable recurring price.'
+                );
             }
-        });
+            $service->price = number_format(
+                $targetRecurring,
+                2,
+                '.',
+                ''
+            );
+            FulfillmentStatusTransitionService::run(
+                $service,
+                fn () => $service->save()
+            );
+            $this->updatePendingRenewal($service);
+            $this->applyCreditOnce($upgrade, $service);
+
+            $upgrade->forceFill([
+                'status' => ServiceUpgrade::STATUS_COMPLETED,
+                'active_service_guard_id' => null,
+                'completed_at' => now(),
+                'last_error' => null,
+                'failed_at' => null,
+            ])->save();
+        }, 5);
+    }
+
+    public function recordFailure(
+        ServiceUpgrade $serviceUpgrade,
+        \Throwable $exception,
+        bool $permanent = false,
+        ?string $reservationLeaseId = null
+    ): void
+    {
+        $shouldAlert = DB::transaction(function () use (
+            $serviceUpgrade,
+            $exception,
+            $permanent,
+            $reservationLeaseId
+        ): bool {
+            $upgrade = $this->lockedUpgrade($serviceUpgrade->id);
+            if (in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_COMPLETED,
+                ServiceUpgrade::STATUS_CANCELLED,
+            ], true)) {
+                return false;
+            }
+
+            if ($this->usesDynamicCapacity($upgrade)) {
+                $ownsFailure = $this->capacityService()->failProvisioning(
+                    $upgrade,
+                    $exception,
+                    $reservationLeaseId
+                );
+                if (! $ownsFailure) {
+                    // A newer worker owns the reservation (or has already
+                    // completed it). A stale failure must not overwrite the
+                    // authoritative lifecycle state.
+                    return false;
+                }
+            }
+
+            $terminal = $permanent
+                || (int) $upgrade->provisioning_attempts >= 5;
+            $shouldAlert = $terminal
+                && $upgrade->failure_alerted_at === null;
+            $upgrade->forceFill([
+                'status' => $terminal
+                    ? ServiceUpgrade::STATUS_NEEDS_ATTENTION
+                    : ServiceUpgrade::STATUS_RETRYABLE_FAILED,
+                'last_error' => mb_substr($exception->getMessage(), 0, 65535),
+                'failed_at' => now(),
+                'failure_alerted_at' => $shouldAlert
+                    ? now()
+                    : $upgrade->failure_alerted_at,
+            ])->save();
+
+            return $shouldAlert;
+        }, 5);
+
+        if ($shouldAlert) {
+            app(UpgradeFailureAlertService::class)->notify(
+                (int) $serviceUpgrade->id
+            );
+        }
+    }
+
+    public function cancel(ServiceUpgrade $serviceUpgrade, string $reason): void
+    {
+        $invoice = $serviceUpgrade->invoice()->first();
+        if (
+            $invoice?->status === \App\Models\Invoice::STATUS_PENDING
+            && ! CancelInvoiceService::isCoordinating($invoice)
+        ) {
+            app(CancelInvoiceService::class)->handle($invoice, $reason);
+
+            return;
+        }
+
+        DB::transaction(function () use ($serviceUpgrade, $reason): void {
+            $upgrade = $this->lockedUpgrade($serviceUpgrade->id);
+            if (in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_COMPLETED,
+                ServiceUpgrade::STATUS_CANCELLED,
+            ], true)) {
+                return;
+            }
+            if (in_array($upgrade->status, [
+                ServiceUpgrade::STATUS_PAID_COMMITTED,
+                ServiceUpgrade::STATUS_PROVISIONING,
+                ServiceUpgrade::STATUS_RETRYABLE_FAILED,
+                ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            ], true)) {
+                throw new \RuntimeException(
+                    'A paid committed upgrade requires operator reconciliation before cancellation.'
+                );
+            }
+
+            if ($this->usesDynamicCapacity($upgrade)) {
+                $this->capacityService()->cancelUpgrade($upgrade, $reason);
+            }
+
+            $upgrade->forceFill([
+                'status' => ServiceUpgrade::STATUS_CANCELLED,
+                'active_service_guard_id' => null,
+                'last_error' => $reason,
+                'failed_at' => now(),
+            ])->save();
+
+        }, 5);
+    }
+
+    private function lockedUpgrade(int $upgradeId): ServiceUpgrade
+    {
+        return ServiceUpgrade::query()
+            ->with([
+                'service.product.server.settings',
+                'service.plan.prices',
+                'service.configs.configOption',
+                'service.configs.configValue',
+                'service.user',
+                'product.server.settings',
+                'plan.prices',
+                'configs.configOption',
+                'configs.configValue',
+                'invoice',
+            ])
+            ->lockForUpdate()
+            ->findOrFail($upgradeId);
+    }
+
+    private function ensureSnapshots(ServiceUpgrade $upgrade): void
+    {
+        if (
+            $upgrade->source_fingerprint !== null
+            && $upgrade->target_fingerprint !== null
+        ) {
+            return;
+        }
+
+        $upgrade->captureSnapshots();
+        $upgrade->quoted_amount ??= round(
+            (float) $upgrade->calculatePrice()->price,
+            2
+        );
+        $upgrade->currency_code ??= strtoupper(
+            (string) $upgrade->service->currency_code
+        );
+        $upgrade->active_service_guard_id = $upgrade->service_id;
+        $upgrade->save();
+    }
+
+    private function usesDynamicCapacity(ServiceUpgrade $upgrade): bool
+    {
+        return $upgrade->service->product->usesDynamicResources()
+            || $upgrade->product->usesDynamicResources();
+    }
+
+    private function capacityService(): object
+    {
+        $class = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\UpgradeReservationService';
+        if (! class_exists($class)) {
+            throw new \RuntimeException(
+                'Dynamic upgrade reservation support is unavailable.'
+            );
+        }
+
+        return app($class);
+    }
+
+    private function updatePendingRenewal(Service $service): void
+    {
+        $pendingInvoice = $service->invoices()
+            ->where('status', \App\Models\Invoice::STATUS_PENDING)
+            ->first();
+        if ($pendingInvoice === null) {
+            return;
+        }
+
+        $pendingInvoice->items()
+            ->where('reference_type', Service::class)
+            ->where('reference_id', $service->id)
+            ->update(['price' => $service->price]);
+    }
+
+    private function applyCreditOnce(ServiceUpgrade $upgrade, Service $service): void
+    {
+        $amount = (float) ($upgrade->credit_amount ?? 0);
+        if ($amount <= 0 || $upgrade->credit_applied_at !== null) {
+            return;
+        }
+
+        $credit = Credit::query()
+            ->where('user_id', $service->user_id)
+            ->where('currency_code', $upgrade->currency_code)
+            ->lockForUpdate()
+            ->first();
+
+        if ($credit === null) {
+            Credit::create([
+                'user_id' => $service->user_id,
+                'currency_code' => $upgrade->currency_code,
+                'amount' => $amount,
+            ]);
+        } else {
+            $credit->amount = (float) $credit->amount + $amount;
+            $credit->save();
+        }
+
+        $upgrade->credit_applied_at = now();
     }
 }

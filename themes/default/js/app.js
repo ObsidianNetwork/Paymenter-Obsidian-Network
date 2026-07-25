@@ -1,5 +1,6 @@
 import { Livewire, Alpine } from '../../../vendor/livewire/livewire/dist/livewire.esm';
 import anchor from '@alpinejs/anchor'
+import dynamicResourceStock from './dynamic-resource-stock'
 
 document.addEventListener('livewire:init', () => {
     Livewire.hook('request', ({ fail }) => {
@@ -97,6 +98,7 @@ Alpine.store('confirmation', {
     }
 })
 
+Alpine.data('dynamicResourceStock', dynamicResourceStock)
 Alpine.plugin(anchor)
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker

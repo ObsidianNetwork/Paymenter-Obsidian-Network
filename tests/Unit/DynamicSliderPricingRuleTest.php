@@ -325,4 +325,51 @@ class DynamicSliderPricingRuleTest extends TestCase
         $this->assertStringContainsString('Unknown', $errors[0]);
     }
 
+    public function test_non_finite_exponent_and_overprecision_values_fail(): void
+    {
+        foreach (['1e309', '1e2', '0.123456789', INF, NAN] as $rate) {
+            $errors = $this->runRule([
+                'model' => 'linear',
+                'rate_per_unit' => $rate,
+            ]);
+            $this->assertNotEmpty(
+                $errors,
+                'Unsafe rate unexpectedly passed: '.var_export($rate, true)
+            );
+        }
+    }
+
+    public function test_every_monetary_field_uses_the_strict_decimal_contract(): void
+    {
+        $cases = [
+            [
+                'model' => 'linear',
+                'base_price' => '1e2',
+                'rate_per_unit' => 1,
+            ],
+            [
+                'model' => 'tiered',
+                'tiers' => [['up_to' => '1e2', 'rate' => 1]],
+            ],
+            [
+                'model' => 'tiered',
+                'tiers' => [['up_to' => 4, 'rate' => '1e2']],
+            ],
+            [
+                'model' => 'base_addon',
+                'included_units' => '1e2',
+                'overage_rate' => 1,
+            ],
+            [
+                'model' => 'base_addon',
+                'included_units' => 1,
+                'overage_rate' => '1e2',
+            ],
+        ];
+
+        foreach ($cases as $pricing) {
+            $this->assertNotEmpty($this->runRule($pricing));
+        }
+    }
+
 }

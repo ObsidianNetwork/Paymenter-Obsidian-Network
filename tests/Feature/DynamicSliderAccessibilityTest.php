@@ -52,8 +52,8 @@ class DynamicSliderAccessibilityTest extends TestCase
         ])->render();
 
         $this->assertStringContainsString('role="slider"', $html);
-        $this->assertStringContainsString('aria-valuemin="1"', $html);
-        $this->assertStringContainsString('aria-valuemax="64"', $html);
+        $this->assertStringContainsString(':aria-valuemin="min"', $html);
+        $this->assertStringContainsString(':aria-valuemax="max"', $html);
         $this->assertStringContainsString(':aria-valuenow="value"', $html);
         $this->assertStringContainsString(':aria-valuetext="formattedValue"', $html);
         $this->assertStringContainsString('aria-labelledby="slider-label-'.$option->id.'"', $html);
@@ -61,6 +61,8 @@ class DynamicSliderAccessibilityTest extends TestCase
         $this->assertStringContainsString('role="status"', $html);
         $this->assertStringContainsString('aria-live="polite"', $html);
         $this->assertStringContainsString('class="sr-only"', $html);
+        $this->assertStringContainsString('dynamic-capacity-updated.window', $html);
+        $this->assertStringContainsString(':disabled="stockDisabled"', $html);
 
         // Smoke: obsidian theme delegates to the same shared partial
         $obsidianHtml = view()->file(base_path('themes/obsidian/views/components/form/configoption.blade.php'), [

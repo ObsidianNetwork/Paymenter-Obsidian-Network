@@ -57,6 +57,7 @@ class Mollie extends Gateway
      */
     public function pay(Invoice $invoice, $total)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $response = $this->request('/v2/payments', 'post', [
             'amount' => [
                 'currency' => $invoice->currency_code,

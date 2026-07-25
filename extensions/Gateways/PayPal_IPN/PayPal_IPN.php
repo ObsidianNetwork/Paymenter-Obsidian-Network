@@ -56,6 +56,7 @@ class PayPal_IPN extends Gateway
      */
     public function pay(Invoice $invoice, $total)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $paypal_url = $this->config('test_mode') ? 'https://www.sandbox.paypal.com/cgi-bin/webscr' : 'https://www.paypal.com/cgi-bin/webscr';
         $paypal_email = $this->config('email');
         $return_url = route('invoices.show', $invoice);

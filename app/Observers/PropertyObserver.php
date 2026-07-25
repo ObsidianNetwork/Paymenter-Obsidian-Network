@@ -4,9 +4,28 @@ namespace App\Observers;
 
 use App\Events\Property as PropertyEvent;
 use App\Models\Property;
+use App\Services\Service\CapacityServiceMutationGuard;
 
 class PropertyObserver
 {
+    public function creating(Property $property): void
+    {
+        app(CapacityServiceMutationGuard::class)
+            ->assertPropertyMutable($property);
+    }
+
+    public function updating(Property $property): void
+    {
+        app(CapacityServiceMutationGuard::class)
+            ->assertPropertyMutable($property);
+    }
+
+    public function deleting(Property $property): void
+    {
+        app(CapacityServiceMutationGuard::class)
+            ->assertPropertyMutable($property);
+    }
+
     /**
      * Handle the Property "creating" event.
      */

@@ -22,29 +22,29 @@
 @endphp
 <div x-data="{
     value: $wire.entangle('{{ $name }}').live,
+    optionId: {{ (int) $config->id }},
     min: {{ $min }},
     max: {{ $max }},
+    configuredMax: {{ $max }},
     step: {{ $step }},
     defaultValue: {{ $default }},
     displayDivisor: {{ $displayDivisor }},
-    displayUnit: '{{ $displayUnit }}',
-    resourceType: '{{ $resourceType }}',
-    pricingModel: '{{ $pricingModel }}',
+    displayUnit: @js($displayUnit),
+    resourceType: @js($resourceType),
+    pricingModel: @js($pricingModel),
     ratePerUnit: {{ $ratePerUnit }},
     basePrice: {{ $basePrice }},
     tiers: @js($tiers),
     includedUnits: {{ $includedUnits }},
     overageRate: {{ $overageRate }},
     billingPeriod: {{ $billingPeriod }},
-    billingUnit: '{{ $billingUnit }}',
-    billingSuffix: '{{ $billingSuffix }}',
-    currencySymbol: '{{ $currencySymbol }}',
-    pricingEndpoint: @js($config->getMetadata('pricing_endpoint')),
+    billingUnit: @js($billingUnit),
+    billingSuffix: @js($billingSuffix),
+    currencySymbol: @js($currencySymbol),
     progressPercent: '0%',
-    pricingState: 'idle',
-    pricingError: '',
+    stockManaged: {{ in_array(strtolower((string) $config->getMetadata('resource_type', '')), ['memory', 'cpu', 'disk'], true) ? 'true' : 'false' }},
+    stockDisabled: false,
     displayPrice: null,
-    _previewRequestId: 0,
 
     init() {
         if (this.value == null || this.value < this.min || this.value > this.max) {
@@ -53,12 +53,11 @@
 
         this.displayPrice = this.calculatePrice();
         this.updateProgress();
-        this.refreshPricingPreview();
         this.$nextTick(() => this.$dispatch('slider-change', { resourceType: this.resourceType, value: this.numericValue, initialize: true }));
 
         $watch('value', Alpine.debounce(() => {
             this.updateProgress();
-            this.refreshPricingPreview();
+            this.displayPrice = this.calculatePrice();
         }, 300));
     },
 
@@ -157,71 +156,57 @@
         }
     },
 
-    async refreshPricingPreview() {
-        if (!this.pricingEndpoint) {
-            this.pricingError = '';
-            this.pricingState = 'idle';
-            this.displayPrice = this.calculatePrice();
+    handleInput() {
+        this.updateProgress();
+    },
+
+    applyCapacityQuote(quote) {
+        const bounds = Object.values(quote?.bounds || {});
+        const bound = bounds.find((candidate) => Number(candidate?.config_option_id) === this.optionId);
+
+        if (!bound) {
             return;
         }
 
-        this._previewRequestId++;
-        const requestId = this._previewRequestId;
-        this.pricingState = 'loading';
-        this.pricingError = '';
+        const nextMin = Number(bound.min);
+        const nextMax = Math.min(this.configuredMax, Number(bound.max));
+        const nextStep = Number(bound.step);
 
-        try {
-            const price = await this.fetchPricingPreview();
-            if (requestId !== this._previewRequestId) return;
-            this.displayPrice = price;
-            this.pricingState = 'idle';
-        } catch (error) {
-            if (requestId !== this._previewRequestId) return;
-            this.pricingState = 'error';
-            this.displayPrice = null;
-            this.pricingError = error?.message || 'Pricing temporarily unavailable';
-        }
-    },
-
-    async fetchPricingPreview() {
-        if (!this.pricingEndpoint) {
-            return Promise.resolve(this.calculatePrice());
+        if (!Number.isSafeInteger(nextMin)
+            || !Number.isSafeInteger(nextMax)
+            || !Number.isSafeInteger(nextStep)
+            || nextStep <= 0
+            || nextMax < nextMin
+        ) {
+            this.stockDisabled = true;
+            return;
         }
 
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        this.min = nextMin;
+        this.max = nextMax;
+        this.step = nextStep;
 
-        const response = await fetch(`${this.pricingEndpoint}?value=${encodeURIComponent(this.numericValue)}`, {
-            signal: controller.signal,
-            headers: {
-                'Accept': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-            },
-        }).finally(() => clearTimeout(timeoutId));
+        const selected = quote?.selection?.[this.resourceType];
+        const hasSelectedValue = selected !== null
+            && selected !== undefined
+            && selected !== ''
+            && Number.isSafeInteger(Number(selected));
+        const candidate = hasSelectedValue ? Number(selected) : this.numericValue;
+        const clamped = this.min + Math.floor((Math.min(this.max, Math.max(this.min, candidate)) - this.min) / this.step) * this.step;
 
-        const responseJson = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-            if (response.status >= 400 && response.status < 500) {
-                throw new Error(responseJson.message || 'Pricing unavailable');
-            }
-
-            throw new Error('Pricing temporarily unavailable');
+        if (this.numericValue !== clamped) {
+            this.value = clamped;
         }
 
-        const previewPrice = responseJson.formatted_price ?? responseJson.price ?? responseJson.data?.formatted_price ?? responseJson.data?.price;
-
-        if (previewPrice === undefined || previewPrice === null || previewPrice === '') {
-            throw new Error('Pricing unavailable');
-        }
-
-        return String(previewPrice).replace(this.currencySymbol, '').trim();
-    },
-
-    handleInput() {
+        this.stockDisabled = false;
         this.updateProgress();
     }
-}" class="flex flex-col gap-1 relative">
+}"
+    x-on:dynamic-capacity-loading.window="if (stockManaged) stockDisabled = true"
+    x-on:dynamic-capacity-updated.window="applyCapacityQuote($event.detail)"
+    x-on:dynamic-capacity-failed.window="if (stockManaged) stockDisabled = true"
+    class="flex flex-col gap-1 relative"
+>
     <label id="slider-label-{{ $config->id }}" for="{{ $name }}" class="mb-1 text-sm text-primary-100">
         {{ $config->label ?? $config->name }}
     </label>
@@ -242,6 +227,7 @@
             :min="min"
             :max="max"
             :step="step"
+            :disabled="stockDisabled"
             x-model="value"
             @input="handleInput(); $dispatch('slider-change', { resourceType, value: numericValue })"
             x-on:keydown.page-up.prevent="value = Math.min(max, numericValue + step * 10)"
@@ -249,8 +235,8 @@
             x-on:keydown.home.prevent="value = min"
             x-on:keydown.end.prevent="value = max"
             role="slider"
-            aria-valuemin="{{ $config->getMetadata('min', $min) }}"
-            aria-valuemax="{{ $config->getMetadata('max', $max) }}"
+            :aria-valuemin="min"
+            :aria-valuemax="max"
             :aria-valuenow="value"
             :aria-valuetext="formattedValue"
             aria-labelledby="slider-label-{{ $config->id }}"
@@ -264,16 +250,16 @@
     <div class="flex justify-between items-center mt-2 px-2.5">
         <div class="flex items-center gap-2">
             <span class="text-sm font-semibold text-primary-100" x-text="formattedValue"></span>
-            <span class="text-xs text-primary-500">({{ $min / $displayDivisor }} - {{ $max / $displayDivisor }} {{ $displayUnit }})</span>
+            <span
+                class="text-xs text-primary-500"
+                x-text="`(${formatValueForDisplay(min)} - ${formatValueForDisplay(max)})`"
+            ></span>
         </div>
         @if($showPriceTag ?? true)
             <span class="text-sm font-semibold text-primary">
                 <span x-text="currencySymbol + (displayPrice ?? calculatePrice())"></span>
                 <span class="text-xs text-primary-500">{{ $billingSuffix }}</span>
             </span>
-            <span x-show="pricingState === 'loading'" class="sr-only" aria-live="polite" wire:ignore>Calculating price…</span>
-            <span x-show="pricingState === 'error'" class="text-red-500 text-sm" x-text="pricingError" wire:ignore></span>
-            <span x-show="pricingState === 'error'" class="sr-only" aria-live="assertive" x-text="pricingError" wire:ignore></span>
         @endif
     </div>
     <style>

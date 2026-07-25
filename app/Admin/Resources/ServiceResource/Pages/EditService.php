@@ -5,8 +5,9 @@ namespace App\Admin\Resources\ServiceResource\Pages;
 use App\Admin\Actions\AuditAction;
 use App\Admin\Resources\ServiceResource;
 use App\Helpers\ExtensionHelper;
-use App\Helpers\NotificationHelper;
+use App\Jobs\Server\CreateJob;
 use App\Models\Service;
+use App\Services\Service\DurableFulfillmentService;
 use Exception;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
@@ -35,7 +36,31 @@ class EditService extends EditRecord
                             ->default(true),
                     ];
                 })
-                ->action(function (array $data, Service $record): void {
+                ->action(function (array $data, Service $record, DeleteAction $action): void {
+                    $fulfillment = app(DurableFulfillmentService::class);
+                    if ($fulfillment->isReservationBacked($record)) {
+                        try {
+                            $fulfillment->requestCancellation($record);
+                        } catch (\RuntimeException $exception) {
+                            Notification::make('Cancellation blocked')
+                                ->title('The service cannot be cancelled yet')
+                                ->body($exception->getMessage())
+                                ->danger()
+                                ->send();
+                            $action->halt();
+
+                            return;
+                        }
+                        Notification::make('Cancellation queued')
+                            ->title('Durable cancellation was requested')
+                            ->body('The service record will be retained. It can only become cancelled after the external server is verified absent.')
+                            ->warning()
+                            ->send();
+                        $action->halt();
+
+                        return;
+                    }
+
                     try {
                         if (($data['deleteExtensionServer'] ?? false)) {
                             ExtensionHelper::terminateServer($record);
@@ -48,6 +73,9 @@ class EditService extends EditRecord
                             ->body($e->getMessage())
                             ->danger()
                             ->send();
+                        $action->halt();
+
+                        return;
                     }
                     $record->delete();
                 }),
@@ -69,12 +97,12 @@ class EditService extends EditRecord
                 ])
                 ->action(function (array $data, Service $record, Action $action): void {
                     try {
+                        $fulfillment = app(DurableFulfillmentService::class);
+                        $reservationBacked = $fulfillment->isReservationBacked($record);
+
                         switch ($data['action']) {
                             case 'create':
-                                $sdata = ExtensionHelper::createServer($record);
-                                if ($data['sendNotification']) {
-                                    NotificationHelper::serverCreatedNotification($record->order->user, $record, $sdata);
-                                }
+                                CreateJob::dispatch($record, (bool) $data['sendNotification']);
                                 break;
                             case 'suspend':
                                 $sdata = ExtensionHelper::suspendServer($record);
@@ -83,9 +111,26 @@ class EditService extends EditRecord
                                 $sdata = ExtensionHelper::unsuspendServer($record);
                                 break;
                             case 'terminate':
-                                $sdata = ExtensionHelper::terminateServer($record);
+                                if ($reservationBacked) {
+                                    $fulfillment->requestCancellation(
+                                        $record,
+                                        (bool) $data['sendNotification']
+                                    );
+                                } else {
+                                    $sdata = ExtensionHelper::terminateServer($record);
+                                }
                                 break;
                             case 'upgrade':
+                                if ($reservationBacked) {
+                                    Notification::make('Upgrade blocked')
+                                        ->title('Use the capacity-aware service upgrade flow')
+                                        ->body('Raw extension upgrades bypass stock reservation, payment, and reconciliation.')
+                                        ->danger()
+                                        ->send();
+                                    $action->halt();
+
+                                    return;
+                                }
                                 $sdata = ExtensionHelper::upgradeServer($record);
                                 break;
                         }

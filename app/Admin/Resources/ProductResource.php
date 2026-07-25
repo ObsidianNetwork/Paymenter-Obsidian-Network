@@ -241,6 +241,13 @@ class ProductResource extends Resource
                     ->required()
                     ->default('month')
                     ->hidden(fn (Get $get) => $get('type') !== 'recurring'),
+                TextInput::make('dynamic_slider_base_price')
+                    ->label('Shared dynamic resource base price')
+                    ->helperText('Charged once per billing cycle when this plan uses one or more dynamic resource sliders.')
+                    ->numeric()
+                    ->minValue(0)
+                    ->maxValue(99999999.99)
+                    ->default(0),
                 Repeater::make('pricing')
                     ->hidden(fn (Get $get) => $get('type') === 'free')
                     ->columns(3)

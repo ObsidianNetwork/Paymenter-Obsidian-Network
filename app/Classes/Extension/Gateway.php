@@ -6,6 +6,7 @@ use App\Models\BillingAgreement;
 use App\Models\Card;
 use App\Models\Invoice;
 use App\Models\User;
+use App\Services\Invoice\CapacityInvoicePaymentService;
 use Illuminate\Support\Facades\View;
 
 /**
@@ -13,6 +14,12 @@ use Illuminate\Support\Facades\View;
  */
 abstract class Gateway extends Extension
 {
+    protected function assertPaymentAttemptAllowed(Invoice $invoice): void
+    {
+        app(CapacityInvoicePaymentService::class)
+            ->assertPaymentAttemptAllowed($invoice);
+    }
+
     /**
      * Pay the given invoice with the given total amount.
      *

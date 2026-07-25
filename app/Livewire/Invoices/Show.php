@@ -9,6 +9,7 @@ use App\Livewire\Component;
 use App\Models\Gateway;
 use App\Models\Invoice;
 use App\Models\Service;
+use App\Services\Invoice\CapacityInvoicePaymentService;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Request;
@@ -36,17 +37,35 @@ class Show extends Component
 
     public function mount()
     {
-        if (Request::has('checkPayment') && $this->invoice->status === 'pending') {
+        if (
+            Request::has('checkPayment')
+            && $this->invoice->status === 'pending'
+            && ! $this->paymentRequiresAttention()
+            && ! $this->capacityPaymentDeadlineExpired()
+        ) {
             $this->checkPayment = true;
         }
-        if ($this->invoice->transactions()->where('status', InvoiceTransactionStatus::Processing)->exists()) {
+        if (
+            ! $this->paymentRequiresAttention()
+            && ! $this->capacityPaymentDeadlineExpired()
+            && $this->invoice->transactions()
+                ->where('status', InvoiceTransactionStatus::Processing)
+                ->exists()
+        ) {
             $this->checkPayment = true;
         }
 
         // Load relations
         $this->invoice->load('transactions', 'transactions.gateway', 'transactions.invoice');
 
-        if ($this->showPayModal && $this->invoice->status !== 'pending') {
+        if (
+            $this->showPayModal
+            && (
+                $this->invoice->status !== 'pending'
+                || $this->paymentRequiresAttention()
+                || $this->capacityPaymentDeadlineExpired()
+            )
+        ) {
             $this->showPayModal = false;
         }
     }
@@ -84,15 +103,39 @@ class Show extends Component
 
     public function updatedShowPayModal($value)
     {
-        if ($value && $this->invoice->status !== 'pending') {
+        if (
+            $value
+            && (
+                $this->invoice->status !== 'pending'
+                || $this->paymentRequiresAttention()
+                || $this->capacityPaymentDeadlineExpired()
+            )
+        ) {
             $this->showPayModal = false;
         }
     }
 
     public function processPayment()
     {
+        $this->invoice->refresh();
         if ($this->invoice->status !== 'pending') {
             return $this->notify(__('This invoice cannot be paid.'), 'error');
+        }
+        if ($this->paymentRequiresAttention()) {
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('This invoice requires manual payment review. New payment attempts are disabled.'),
+                'error'
+            );
+        }
+        if ($this->capacityPaymentDeadlineExpired()) {
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('This invoice can no longer be paid because its capacity guarantee expired.'),
+                'error'
+            );
         }
 
         if (is_null($this->selectedMethod)) {
@@ -197,6 +240,26 @@ class Show extends Component
     public function checkPaymentStatus()
     {
         $this->invoice->refresh();
+        if ($this->paymentRequiresAttention()) {
+            $this->checkPayment = false;
+            $this->lastChecked = null;
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('Payment was received, but this invoice requires manual review before fulfillment.'),
+                'error'
+            );
+        }
+        if ($this->capacityPaymentDeadlineExpired()) {
+            $this->checkPayment = false;
+            $this->lastChecked = null;
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('This invoice can no longer be paid because its capacity guarantee expired.'),
+                'error'
+            );
+        }
 
         // Check for transactions that failed since lastChecked
         if ($this->lastChecked) {
@@ -236,6 +299,20 @@ class Show extends Component
             'title' => __('invoices.invoice', ['id' => $this->invoice->number]),
             'sidebar' => true,
         ]);
+    }
+
+    #[Computed]
+    public function capacityPaymentDeadlineExpired(): bool
+    {
+        return app(CapacityInvoicePaymentService::class)
+            ->deadlineExpired($this->invoice);
+    }
+
+    #[Computed]
+    public function paymentRequiresAttention(): bool
+    {
+        return app(CapacityInvoicePaymentService::class)
+            ->requiresAttention($this->invoice);
     }
 
     public function downloadPDF()

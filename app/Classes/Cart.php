@@ -69,6 +69,7 @@ class Cart
 
         return DB::transaction(function () use ($cart, $product, $plan, $configOptions, $checkoutConfig, $quantity, $key) {
             self::ensureCartItemLimit($cart, $key);
+            self::ensureDynamicQuantity($cart, $product, $quantity, $key);
 
             // Synchronous CartItem observers run inside this transaction. Any
             // capacity-reservation failure therefore rolls back the cart mutation.
@@ -145,6 +146,13 @@ class Cart
     {
         $cart = self::get();
         if ($item = $cart->items()->where('id', $index)->first()) {
+            if ($item->product->usesDynamicResources()) {
+                if ((int) $quantity !== 1) {
+                    throw new DisplayException('Dynamic resource products require a quantity of one.');
+                }
+
+                return;
+            }
             if ($item->product->allow_quantity !== 'combined') {
                 return;
             }
@@ -163,6 +171,28 @@ class Cart
         });
 
         $cart->load('items');
+    }
+
+    private static function ensureDynamicQuantity($cart, Product $product, mixed $quantity, mixed $key): void
+    {
+        if (! $product->usesDynamicResources()) {
+            return;
+        }
+
+        if ((int) $quantity !== 1 || ! is_numeric($quantity) || (float) $quantity !== 1.0) {
+            throw new DisplayException('Dynamic resource products require a quantity of one.');
+        }
+
+        $duplicate = $cart->items()
+            ->where('product_id', $product->id)
+            ->when($key !== null, fn ($query) => $query->where('id', '!=', $key))
+            ->exists();
+
+        if ($duplicate) {
+            throw new DisplayException(
+                'A dynamic resource product can only appear once in a cart. Complete this order before ordering another server.'
+            );
+        }
     }
 
     /**

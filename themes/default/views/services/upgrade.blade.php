@@ -1,4 +1,13 @@
-<div class="container mt-14">
+<div
+    class="container mt-14"
+    @if ($this->hasDynamicSliderOptions())
+        x-data="dynamicResourceStock({
+            endpoint: @js(url('/api/dynamic-pterodactyl/services/' . $service->id . '/upgrade-quote')),
+        })"
+        x-on:slider-change="queueQuote()"
+        x-on:change="queueQuote()"
+    @endif
+>
     <h1 class="text-2xl font-bold">
         {{ __('services.upgrade_service', ['service' => $service->product->name]) }}
     </h1>
@@ -56,7 +65,7 @@
                     </h3>
                 </label>
             </div>
-            @foreach ($service->productUpgrades() as $product)
+            @foreach ($this->selectableProductUpgrades() as $product)
             <div>
                 <input type="radio" name="upgrade" value="{{ $product->id }}" wire:model.live="upgrade"
                     class="hidden peer" id="product-{{ $product->id }}">
@@ -101,34 +110,51 @@
             @endforeach
             @else
             <div class="col-span-2 flex flex-col gap-4">
-                @foreach ($upgradeProduct->upgradableConfigOptions as $configOption)
+                @foreach ($this->upgradeConfigOptions() as $configOption)
                 @php
-                    $showPriceTag = $configOption->children->filter(fn ($value) => !$value->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->is_free)->count() > 0;
+                    $availableChildren = $configOption->availableChildren()->get();
+                    $showPriceTag = $availableChildren->filter(fn ($value) => !$value->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->is_free)->count() > 0;
                 @endphp
                 <x-form.configoption :config="$configOption" :name="'configOptions.' . $configOption->id" :showPriceTag="$showPriceTag" :plan="$service->plan">
                     {{-- If the config option is a select, show the options --}}
                     @if ($configOption->type == 'select')
-                        @foreach ($configOption->children as $configOptionValue)
+                        @foreach ($availableChildren as $configOptionValue)
                             <option value="{{ $configOptionValue->id }}">
                                 {{ $configOptionValue->name }}
-                                {{ ($showPriceTag && $configOptionValue->price(billing_period: $service->billing_period, billing_unit: $service->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $service->billing_period, billing_unit: $service->billing_unit) : '' }}
+                                {{ ($showPriceTag && $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit) : '' }}
                             </option>
                         @endforeach
                     @elseif($configOption->type == 'radio')
-                        @foreach ($configOption->children as $configOptionValue)
+                        @foreach ($availableChildren as $configOptionValue)
                             <div class="flex items-center gap-2">
                                 <input type="radio" id="{{ $configOptionValue->id }}" name="{{ $configOption->id }}"
                                     wire:model.live="configOptions.{{ $configOption->id }}"
                                     value="{{ $configOptionValue->id }}" />
                                 <label for="{{ $configOptionValue->id }}">
                                     {{ $configOptionValue->name }}
-                                    {{ ($showPriceTag && $configOptionValue->price(billing_period: $service->billing_period, billing_unit: $service->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $service->billing_period, billing_unit: $service->billing_unit) : '' }}
+                                    {{ ($showPriceTag && $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit) : '' }}
                                 </label>
                             </div>
                         @endforeach
                     @endif
                 </x-form.configoption>
                 @endforeach
+                @if ($this->hasDynamicSliderOptions())
+                    <div
+                        x-show="quoteState === 'loading'"
+                        role="status"
+                        aria-live="polite"
+                        class="text-sm text-primary-500"
+                    >
+                        Checking the current server node’s upgrade capacity…
+                    </div>
+                    <div
+                        x-show="quoteState === 'error'"
+                        x-text="quoteError"
+                        role="alert"
+                        class="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
+                    ></div>
+                @endif
             </div>
             @endif
         </div>
@@ -153,9 +179,15 @@
             </div>
 
             <div class="flex flex-row justify-end gap-2 mt-2">
-                <x-button.primary class="h-fit" :wire:click="($upgradeProduct->upgradableConfigOptions()->count() > 0 && $step == 1)? 'nextStep' : 'doUpgrade'">
+                <x-button.primary
+                    class="h-fit"
+                    :wire:click="($this->upgradeConfigOptions()->count() > 0 && $step == 1)? 'nextStep' : 'doUpgrade'"
+                    @if ($this->hasDynamicSliderOptions() && $step > 1)
+                        x-bind:disabled="!canCheckout"
+                    @endif
+                >
                     {{-- If the next upgradeProduct supports config upgrades, show those --}}
-                    @if($upgradeProduct && $upgradeProduct->upgradableConfigOptions()->count() > 0 && $step == 1)
+                    @if($upgradeProduct && $this->upgradeConfigOptions()->count() > 0 && $step == 1)
                         <span>{{ __('services.next_step') }}</span>
                     @else
                         <span>{{ __('services.upgrade') }}</span>
