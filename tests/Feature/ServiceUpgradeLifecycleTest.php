@@ -7,7 +7,6 @@ use App\Models\ConfigOption;
 use App\Models\ConfigOptionProduct;
 use App\Models\Coupon;
 use App\Models\Invoice;
-use App\Models\InvoiceTransaction;
 use App\Models\Service;
 use App\Models\ServiceConfig;
 use App\Models\ServiceUpgrade;
@@ -181,11 +180,16 @@ class ServiceUpgradeLifecycleTest extends TestCase
     public function test_legacy_dynamic_upgrade_with_payment_evidence_requires_attention(): void
     {
         [$upgrade, $invoice] = $this->legacyDynamicUpgrade();
-        InvoiceTransaction::create([
+        // Model pre-migration payment evidence without triggering the current
+        // observer-driven payment coordinator.
+        DB::table('invoice_transactions')->insert([
             'invoice_id' => $invoice->id,
             'amount' => 1,
             'fee' => 0,
-            'status' => InvoiceTransactionStatus::Processing,
+            'status' => InvoiceTransactionStatus::Processing->value,
+            'is_credit_transaction' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
 
         LegacyServiceUpgradeMigration::reconcile();

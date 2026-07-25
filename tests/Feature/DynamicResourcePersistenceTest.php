@@ -253,7 +253,9 @@ class DynamicResourcePersistenceTest extends TestCase
         ]);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('capacity-aware upgrade coordinator');
+        $this->expectExceptionMessage(
+            'capacity-aware fulfillment coordinator'
+        );
 
         $service->product_id = $dynamicProduct->id;
         $service->save();

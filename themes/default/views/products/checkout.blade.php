@@ -1,13 +1,12 @@
+@php($usesDynamicStock = $this->hasDynamicSliderOptions())
 <div
     class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
-    @if ($this->hasDynamicSliderOptions())
-        x-data="dynamicResourceStock({
-            endpoint: @js(url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote')),
-            cartItemId: @js($cartProductKey),
-        })"
-        x-on:slider-change="queueQuote()"
-        x-on:change="queueQuote()"
-    @endif
+    x-data="@js($usesDynamicStock) ? dynamicResourceStock({
+        endpoint: @js($usesDynamicStock ? url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote') : null),
+        cartItemId: @js($cartProductKey),
+    }) : { canCheckout: true, queueQuote() {} }"
+    x-on:slider-change="queueQuote()"
+    x-on:change="queueQuote()"
 >
     <div class="flex flex-col gap-4 w-full col-span-3">
         <h1 class="text-3xl font-bold">{{ $product->name }}</h1>
@@ -128,10 +127,8 @@
                 <x-button.primary
                     wire:click="checkout"
                     wire:loading.attr="disabled"
-                    @if ($this->hasDynamicSliderOptions())
-                        x-bind:disabled="!canCheckout"
-                        x-bind:aria-disabled="(!canCheckout).toString()"
-                    @endif
+                    x-bind:disabled="!canCheckout"
+                    x-bind:aria-disabled="(!canCheckout).toString()"
                 >
                     <x-loading target="checkout" />
                     <div wire:loading.remove wire:target="checkout">

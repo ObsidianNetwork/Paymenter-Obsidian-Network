@@ -88,6 +88,54 @@ class InvoicePaymentProcessingTest extends TestCase
         $this->assertEquals('test_txn_123', $transaction->transaction_id);
     }
 
+    public function test_zero_total_invoice_waits_for_processing_evidence_to_succeed(): void
+    {
+        $invoice = $this->createInvoiceWithItem(0);
+
+        $processing = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            null,
+            0,
+            transactionId: 'zero-total-processing'
+        );
+
+        $this->assertSame(
+            InvoiceTransactionStatus::Processing,
+            $processing->status
+        );
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+
+        $succeeded = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            0,
+            transactionId: 'zero-total-processing'
+        );
+
+        $this->assertTrue($succeeded->is($processing));
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $succeeded->fresh()->status
+        );
+        $this->assertSame(Invoice::STATUS_PAID, $invoice->fresh()->status);
+        $this->assertSame(1, $invoice->transactions()->count());
+    }
+
+    public function test_zero_total_invoice_ignores_failed_payment_evidence(): void
+    {
+        $invoice = $this->createInvoiceWithItem(0);
+
+        $failed = ExtensionHelper::addFailedPayment(
+            $invoice->id,
+            null,
+            0,
+            transactionId: 'zero-total-failed'
+        );
+
+        $this->assertSame(InvoiceTransactionStatus::Failed, $failed->status);
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+    }
+
     public function test_partial_payment_keeps_invoice_pending()
     {
         $invoice = $this->createInvoiceWithItem(100.00);
