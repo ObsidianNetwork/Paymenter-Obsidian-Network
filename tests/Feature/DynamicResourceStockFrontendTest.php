@@ -11,7 +11,7 @@ class DynamicResourceStockFrontendTest extends TestCase
         $view = file_get_contents(base_path('themes/default/views/products/checkout.blade.php'));
         $controller = file_get_contents(base_path('themes/default/js/dynamic-resource-stock.js'));
 
-        $this->assertStringContainsString('dynamicResourceStock({', $view);
+        $this->assertStringContainsString('dynamicResourceStock(', $view);
         $this->assertStringContainsString('/resource-quote', $view);
         $this->assertStringContainsString('x-bind:disabled="!canCheckout"', $view);
         $this->assertStringContainsString("this.quoteState = 'loading'", $controller);

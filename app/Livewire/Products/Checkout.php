@@ -100,6 +100,22 @@ class Checkout extends Component
 
     public function updatePricing()
     {
+        $dynamicSliderValues = [];
+        foreach ($this->product->configOptions->where('type', 'dynamic_slider') as $option) {
+            $value = $this->configOptions[$option->id]
+                ?? $option->getMetadata('default', 0);
+
+            try {
+                $dynamicSliderValues[$option->id] =
+                    $option->normalizeDynamicSliderValue($value);
+            } catch (\InvalidArgumentException) {
+                // Livewire invokes this method while fields are being edited.
+                // Preserve the last valid total and let checkout validation
+                // attach the actionable error to the affected slider.
+                return;
+            }
+        }
+
         $total = $this->plan->price()->price;
         $setup_fee = $this->plan->price()->setup_fee;
 
@@ -109,7 +125,7 @@ class Checkout extends Component
             $total += $this->plan->dynamicSliderBasePrice();
         }
 
-        $this->product->configOptions->each(function ($option) use (&$total, &$setup_fee) {
+        $this->product->configOptions->each(function ($option) use (&$total, &$setup_fee, $dynamicSliderValues) {
             // Check if checkbox is set, if so, add price if checked
             if ($option->type === 'checkbox' && (isset($this->configOptions[$option->id]) && $this->configOptions[$option->id])) {
                 $total += $option->availableChildren->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
@@ -126,7 +142,7 @@ class Checkout extends Component
             }
             // Calculate dynamic slider price using delta (marginal only, base price handled above)
             if ($option->type === 'dynamic_slider') {
-                $value = $this->configOptions[$option->id] ?? $option->getMetadata('default', 0);
+                $value = $dynamicSliderValues[$option->id];
                 $total += $option->calculateDynamicPriceDelta((float) $value, $this->plan->billing_period, $this->plan->billing_unit);
 
                 return;
