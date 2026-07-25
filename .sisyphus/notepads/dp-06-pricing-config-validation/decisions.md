@@ -1,0 +1,2 @@
+- 2026-04-22: Added PricingConfigValidator as a per-option pricing metadata validator, with support for both base_addon and base_plus_addon model names so existing runtime behavior and older naming stay compatible.
+- 2026-04-22: Feature coverage for SetupWizard validation is temporarily represented by a skipped test because this extension harness does not boot the full Filament 4 panel action lifecycle needed to exercise the page submit flow reliably.

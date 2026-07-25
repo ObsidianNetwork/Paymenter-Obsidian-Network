@@ -1,0 +1,2 @@
+- 2026-04-24: `AlertService` now uses admin-user fan-out (`User::whereNotNull('role_id')->get()`) for capacity emails, mirroring shortfall-recipient rules instead of the old inert `notification_emails` stub path.
+- 2026-04-24: `ptero_audit_logs.user_id` is a required foreign key, so DB-backed audit tests must authenticate a real user before exercising `AuditLogService` writes.

@@ -1,0 +1,2 @@
+- 2026-04-22: DynamicPterodactyl pricing is stored per dynamic_slider ConfigOption under metadata.pricing, and Paymenter core currently consumes model/rate_per_unit/tiers/included_units/overage_rate rather than the older docs' memory_per_gb-style aggregate JSON.
+- 2026-04-22: SetupWizard persists pricing through ConfigOptionSetupService::buildPricingMetadata(), so write-time validation belongs on each per-resource pricing block before ConfigOption metadata is written.

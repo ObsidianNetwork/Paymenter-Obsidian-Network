@@ -1,0 +1,2 @@
+- 2026-04-23: Kept slider value formatting in Alpine instead of adding new PHP helpers because `ConfigOption::formatValueForDisplay()` already established the display contract and the prompt constrained model changes to strictly-necessary additions only.
+- 2026-04-23: Implemented pricing preview state management with an optional `pricing_endpoint` fetch path plus a local fallback so current core behavior stays functional even when no remote preview endpoint is configured.

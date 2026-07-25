@@ -1,0 +1,2 @@
+- 2026-04-22: `git push -u origin dp-06-pricing-config-validation` failed after the local commit because GitHub rejected the author email `jordanmuss@hotmail.com` under GH007 private-email protection on the remote account.
+- 2026-04-22: Resolved GH007 by rebuilding the local branch tip from `origin/dynamic-slider` and recommitting the same tree with Jordanmuss99's GitHub noreply address `164892154+Jordanmuss99@users.noreply.github.com`, then pushing successfully.

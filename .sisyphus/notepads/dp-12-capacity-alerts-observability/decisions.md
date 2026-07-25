@@ -1,0 +1,2 @@
+- 2026-04-24: Kept dp-12 implementation and merge bookkeeping inside the nested DynamicPterodactyl git repo; root-level `FORK-NOTES.md` was not folded into the extension commit series because it belongs to the parent Paymenter repository.
+- 2026-04-24: Added dedicated DB-backed audit assertions for reservation transitions while retaining the existing mocked unit tests for targeted state-transition behavior.

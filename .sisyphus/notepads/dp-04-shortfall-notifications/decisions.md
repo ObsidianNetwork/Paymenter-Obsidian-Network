@@ -1,0 +1,2 @@
+- 2026-04-21: Kept the new reservation shortfall alerts on Laravel's standard user notification path as requested, while leaving the existing capacity-alert `sendNotifications()` TODO untouched because it is a separate concern.
+- 2026-04-21: Converted `ConfigOptionSetupService` to constructor-injected `AuditLogService` and preserved all existing call sites through container resolution instead of adding manual instantiation paths.

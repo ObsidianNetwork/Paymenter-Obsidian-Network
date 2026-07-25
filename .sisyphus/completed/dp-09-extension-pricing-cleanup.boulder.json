@@ -1,0 +1,15 @@
+{
+  "active_plan": "/var/www/paymenter/.sisyphus/plans/dp-09-extension-pricing-cleanup.md",
+  "started_at": "2026-04-23T01:33:50.561Z",
+  "session_ids": [
+    "ses_24a7ade8affeFcbNYEOugrZn08",
+    "ses_248045316ffeNTWFgbzFL43SBh"
+  ],
+  "session_origins": {
+    "ses_24a7ade8affeFcbNYEOugrZn08": "direct",
+    "ses_248045316ffeNTWFgbzFL43SBh": "appended"
+  },
+  "plan_name": "dp-09-extension-pricing-cleanup",
+  "agent": "atlas",
+  "task_sessions": {}
+}

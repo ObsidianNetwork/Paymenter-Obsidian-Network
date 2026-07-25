@@ -1,0 +1,2 @@
+- 2026-04-23: The outer Paymenter repo tracks `themes/default/.../configoption.blade.php` but ignores `themes/obsidian/`; slider theme parity needed `git add -f` for the Obsidian blade on each outer-repo commit.
+- 2026-04-23: `dynamic_slider` checkout rendering can be feature-tested with `view('components.form.configoption', [...])->render()` using a real Product + Plan + `config_option_products` pivot row; the Alpine `$wire.entangle(...)` markup still renders safely in plain Blade assertions.

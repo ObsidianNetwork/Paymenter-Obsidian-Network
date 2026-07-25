@@ -1,0 +1,2 @@
+- dp-09 confirmed the extension can retire pricing math once core exposes `Plan::dynamicSliderBasePrice()` and `ConfigOption::calculateDynamicPriceDelta()`.
+- `composer dump-autoload` must be run from `/var/www/paymenter`, not the nested extension directory, because the extension has no local `composer.json`.

@@ -1,0 +1,2 @@
+- ReservationService tests must hydrate the parent class's private typed properties via reflection; subclass shadow properties do not initialize ReservationService's internals.
+- Cleanup/confirm/extend audit coverage is easiest to verify with Mockery expectations on AuditLogService plus DB facade update counts.

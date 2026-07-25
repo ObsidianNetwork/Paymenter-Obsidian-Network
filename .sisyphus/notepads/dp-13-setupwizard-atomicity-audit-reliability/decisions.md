@@ -1,0 +1,2 @@
+- 2026-04-23: Kept commit 4's invalid-pricing rejection on the real Filament action lifecycle, but used the plan-approved service-driven fallback for happy-path and rollback assertions after the page harness proved flaky for audit-row verification.
+- 2026-04-23: Left commit 1's `phpunit.xml` env block exactly as requested and handled missing local test DB provisioning outside git history, because the outage-prevention goal was environment isolation rather than local credential reshaping.

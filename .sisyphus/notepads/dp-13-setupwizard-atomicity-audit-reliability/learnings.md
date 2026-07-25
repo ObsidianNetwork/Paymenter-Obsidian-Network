@@ -1,0 +1,2 @@
+- 2026-04-23: The extension phpunit suite assumed a pre-provisioned `paymenter_test` MariaDB database with both root-app migrations and extension migrations applied. Creating/granting the DB and rebuilding it via guarded `migrate:fresh --seed` plus extension-path `migrate` restored the documented green baseline.
+- 2026-04-23: `SetupWizard` Livewire tests need the `dynamic-pterodactyl` Blade namespace registered in the test harness and a mocked `ResourceCalculationService` to avoid view-resolution/network failures during page render.

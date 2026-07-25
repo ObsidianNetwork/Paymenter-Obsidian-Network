@@ -1,0 +1,2 @@
+- 2026-04-21: Extension unit tests can cover `AlertService::notifyShortfall()` with alias-mocked `App\Models\User` collections and isolate listener branch behavior by swapping `AlertService`, `ReservationService`, and `ResourceCalculationService` in the Laravel container.
+- 2026-04-21: `ReservationShortfallNotification` should link to the Filament service edit route (`/admin/services/{record}/edit`), not the resource index-style show path.

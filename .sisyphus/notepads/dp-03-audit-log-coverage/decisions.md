@@ -1,0 +1,2 @@
+- Registered AlertConfig audit coverage through an Eloquent observer in DynamicPterodactyl::boot() so CRUD mutations are captured outside Filament resource flows too.
+- ConfigOptionSetupService resolves AuditLogService via app() inside createDynamicSliderOptions() to avoid widening constructor call-site impact.

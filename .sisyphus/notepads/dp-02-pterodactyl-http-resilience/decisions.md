@@ -1,0 +1,2 @@
+- Wrapped `ConnectionException` inside `pterodactylGet()` with a `RuntimeException` so callers get a consistent error surface while still preserving the original exception as `previous`.
+- Tests instantiate `ResourceCalculationService` without running its constructor and set private config fields via reflection to avoid DB-backed extension config lookups.
