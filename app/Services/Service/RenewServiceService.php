@@ -19,7 +19,7 @@ class RenewServiceService
             if ($service->status == Service::STATUS_SUSPENDED) {
                 UnsuspendJob::dispatch($service);
             } elseif ($service->status == Service::STATUS_PENDING) {
-                CreateJob::dispatch($service);
+                CreateJob::dispatch($service)->afterCommit();
             }
         }
 

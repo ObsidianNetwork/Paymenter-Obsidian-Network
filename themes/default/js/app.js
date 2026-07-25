@@ -98,7 +98,6 @@ Alpine.store('confirmation', {
 })
 
 Alpine.plugin(anchor)
-
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker
         .register('/service-worker.js')

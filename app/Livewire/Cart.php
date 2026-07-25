@@ -134,6 +134,7 @@ class Cart extends Component
             foreach ($cart->items as $item) {
                 // Make sure we have the latest product data and lock it
                 $item->product->lockForUpdate();
+                $this->refreshCapacityReservation($item);
 
                 if (
                     $item->product->per_user_limit > 0 && ($user->services->where('product_id', $item->product->id)->count() >= $item->product->per_user_limit ||
@@ -159,6 +160,7 @@ class Cart extends Component
             $order->save();
 
             // Create the invoice
+            $invoice = null;
             if ($this->total->price > 0) {
                 $invoice = new Invoice([
                     'user_id' => $user->id,
@@ -199,7 +201,8 @@ class Cart extends Component
 
                 foreach ($item->config_options as $configOption) {
                     $configOption = (object) $configOption;
-                    if (in_array($configOption->option_type, ['text', 'number'])) {
+                    // Text, number and dynamic_slider store values as properties (not child option references)
+                    if (in_array($configOption->option_type, ['text', 'number', 'dynamic_slider'])) {
                         if (!isset($configOption->value)) {
                             continue;
                         }
@@ -209,6 +212,18 @@ class Cart extends Component
                             'name' => $configOption->option_name,
                             'value' => $configOption->value,
                         ]);
+
+                        // Dual-write dynamic_slider selections as ServiceConfig rows so
+                        // Service::calculatePrice() can recalculate without reading properties.
+                        if ($configOption->option_type === 'dynamic_slider') {
+                            $service->configs()->updateOrCreate(
+                                ['config_option_id' => $configOption->option_id],
+                                [
+                                    'config_value_id' => null,
+                                    'slider_value' => (float) $configOption->value,
+                                ]
+                            );
+                        }
 
                         continue;
                     }
@@ -220,6 +235,16 @@ class Cart extends Component
                         'config_option_id' => $configOption->option_id,
                         'config_value_id' => $configOption->value,
                     ]);
+                }
+
+                $reservationService = $this->capacityReservationService($item);
+                if ($reservationService !== null) {
+                    $reservationService->bindCartItemToService(
+                        $item,
+                        $service,
+                        $user,
+                        $invoice?->due_at ?? now()->addHour()
+                    );
                 }
 
                 // Create the invoice items
@@ -234,7 +259,7 @@ class Cart extends Component
                 } else {
                     // We'll make the service active immediately
                     if ($service->product->server) {
-                        CreateJob::dispatch($service);
+                        DB::afterCommit(fn () => CreateJob::dispatch($service));
                     }
                     $service->status = Service::STATUS_ACTIVE;
                     $service->expires_at = $service->calculateNextDueDate();
@@ -276,5 +301,44 @@ class Cart extends Component
     public function render()
     {
         return view('cart');
+    }
+
+    private function refreshCapacityReservation($item): void
+    {
+        $reservationService = $this->capacityReservationService($item);
+        if ($reservationService !== null) {
+            $reservationService->reserveForCartItem($item);
+        }
+    }
+
+    private function capacityReservationService($item): mixed
+    {
+        $usesPterodactyl = $item->product->server?->extension === 'Pterodactyl';
+        $hasDynamicSlider = $usesPterodactyl && \App\Models\ConfigOption::query()
+            ->whereHas('products', fn ($query) => $query->whereKey($item->product_id))
+            ->where('type', 'dynamic_slider')
+            ->whereNull('parent_id')
+            ->get()
+            ->contains(fn ($option) => in_array(
+                strtolower((string) $option->getMetadata('resource_type', '')),
+                ['memory', 'cpu', 'disk'],
+                true
+            ));
+
+        if (! $hasDynamicSlider) {
+            return null;
+        }
+
+        $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+        $reservationExtensionEnabled = \App\Models\Extension::query()
+            ->where('extension', 'DynamicPterodactyl')
+            ->where('enabled', true)
+            ->exists();
+
+        if (! $reservationExtensionEnabled || ! class_exists($reservationServiceClass)) {
+            throw new DisplayException('Dynamic capacity reservations are unavailable. Please contact support.');
+        }
+
+        return app($reservationServiceClass);
     }
 }

@@ -4,8 +4,10 @@ namespace App\Listeners;
 
 use App\Classes\Cart;
 use App\Events\Auth\Login;
+use App\Models\Extension;
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Support\Facades\Cookie;
+use Illuminate\Support\Facades\DB;
 
 class UserAuthListener
 {
@@ -20,8 +22,23 @@ class UserAuthListener
                 // Merge cart with user
                 $cart = Cart::getOnce();
                 if ($cart->exists) {
-                    $cart->user_id = $event->user->id;
-                    $cart->save();
+                    DB::transaction(function () use ($cart, $event) {
+                        $cart->user_id = $event->user->id;
+                        $cart->save();
+
+                        $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+                        $reservationExtensionEnabled = Extension::query()
+                            ->where('extension', 'DynamicPterodactyl')
+                            ->where('enabled', true)
+                            ->exists();
+
+                        if ($reservationExtensionEnabled && class_exists($reservationServiceClass)) {
+                            app($reservationServiceClass)->transferCartOwnership(
+                                $cart->id,
+                                $event->user->id
+                            );
+                        }
+                    });
                 }
             } elseif ($event->user->cart) {
                 // Set cart to user

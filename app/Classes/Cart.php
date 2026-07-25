@@ -8,6 +8,7 @@ use App\Models\Plan;
 use App\Models\Product;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cookie;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Session;
 
@@ -64,39 +65,39 @@ class Cart
     {
         self::checkRateLimit();
 
-        // Match on key
         $cart = self::createCart();
-        self::ensureCartItemLimit($cart, $key);
 
-        $item = $cart->items()->updateOrCreate([
-            'id' => $key,
-        ], [
-            'product_id' => $product->id,
-            'plan_id' => $plan->id,
-            'config_options' => $configOptions,
-            'checkout_config' => $checkoutConfig,
-            'quantity' => $quantity,
-        ]);
-        $cart->load('items.plan', 'items.product', 'items.product.configOptions.children.plans.prices');
+        return DB::transaction(function () use ($cart, $product, $plan, $configOptions, $checkoutConfig, $quantity, $key) {
+            self::ensureCartItemLimit($cart, $key);
 
-        if ($cart->coupon_id) {
-            // Reapply coupon to the cart
-            try {
-                self::validateCoupon($cart->coupon->code);
-                // Check if any of the items have gotten a discount
-                if ($cart->items->filter(fn ($item) => $item->price->hasDiscount())->isEmpty()) {
+            // Synchronous CartItem observers run inside this transaction. Any
+            // capacity-reservation failure therefore rolls back the cart mutation.
+            $item = $cart->items()->updateOrCreate([
+                'id' => $key,
+            ], [
+                'product_id' => $product->id,
+                'plan_id' => $plan->id,
+                'config_options' => $configOptions,
+                'checkout_config' => $checkoutConfig,
+                'quantity' => $quantity,
+            ]);
+            $cart->load('items.plan', 'items.product', 'items.product.configOptions.children.plans.prices');
+
+            if ($cart->coupon_id) {
+                try {
+                    self::validateCoupon($cart->coupon->code);
+                    if ($cart->items->filter(fn ($item) => $item->price->hasDiscount())->isEmpty()) {
+                        $cart->coupon_id = null;
+                        $cart->save();
+                    }
+                } catch (DisplayException $e) {
                     $cart->coupon_id = null;
                     $cart->save();
                 }
-            } catch (DisplayException $e) {
-                // Coupon is invalid, remove it
-                $cart->coupon_id = null;
-                $cart->save();
             }
-        }
 
-        // Return index of the newly added item
-        return $item->id;
+            return $item->id;
+        });
     }
 
     protected static function ensureCartItemLimit($cart, $key = null)
@@ -156,8 +157,10 @@ class Cart
 
             return;
         }
-        $item->quantity = $quantity;
-        $item->save();
+        DB::transaction(function () use ($item, $quantity) {
+            $item->quantity = $quantity;
+            $item->save();
+        });
 
         $cart->load('items');
     }

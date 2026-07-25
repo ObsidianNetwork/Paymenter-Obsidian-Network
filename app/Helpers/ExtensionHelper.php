@@ -551,7 +551,21 @@ class ExtensionHelper
             $properties[$property->key] = $property->value;
         }
         foreach ($service->configs as $config) {
-            $properties[$config->configOption->env_variable] = $config->configValue->env_variable ?? $config->configValue->name;
+            $configOption = $config->configOption;
+            if (! $configOption) {
+                continue;
+            }
+
+            if ($configOption->type === 'dynamic_slider') {
+                if ($config->slider_value !== null) {
+                    $properties[$configOption->env_variable ?: $configOption->name] = $config->slider_value;
+                }
+
+                continue;
+            }
+
+            $properties[$configOption->env_variable] = $config->configValue?->env_variable
+                ?? $config->configValue?->name;
         }
 
         return $properties;

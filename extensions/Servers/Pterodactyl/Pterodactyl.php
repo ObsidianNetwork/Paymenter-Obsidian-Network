@@ -3,6 +3,7 @@
 namespace Paymenter\Extensions\Servers\Pterodactyl;
 
 use App\Classes\Extension\Server;
+use App\Models\Extension;
 use App\Models\Service;
 use Exception;
 use Illuminate\Support\Facades\Http;
@@ -255,84 +256,158 @@ class Pterodactyl extends Server
 
     public function createServer(Service $service, $settings, $properties)
     {
-        if ($this->getServer($service->id, failIfNotFound: false)) {
-            throw new Exception('Server already exists');
-        }
-        // Smash the properties into the settings
-        $settings = array_merge($settings, $properties);
-
-        $eggData = $this->request('/api/application/nests/' . $settings['nest_id'] . '/eggs/' . $settings['egg_id'], data: ['include' => 'variables']);
-        if (!isset($eggData['attributes'])) {
-            throw new Exception('Could not fetch egg data');
-        }
-        $environment = [];
-        foreach ($eggData['attributes']['relationships']['variables']['data'] as $variable) {
-            $environment[$variable['attributes']['env_variable']] = $settings[$variable['attributes']['env_variable']] ?? $variable['attributes']['default_value'];
-        }
-
-        $orderUser = $service->user;
-        // Get the user id if one already exists...
-        $user = $this->request('/api/application/users', 'get', ['filter' => ['email' => $orderUser->email]])['data'][0]['attributes']['id'] ?? null;
-
-        // Otherwise create a new user
-        if (!$user) {
-            $user = $this->request('/api/application/users', 'post', [
-                'email' => $orderUser->email,
-                'username' => (preg_replace('/[^a-zA-Z0-9]/', '', strtolower(Str::transliterate($orderUser->name))) ?? Str::random(8)) . '_' . Str::random(4),
-                'first_name' => $orderUser->first_name ?? '',
-                'last_name' => $orderUser->last_name ?? '',
-            ])['attributes']['id'];
-
-            $returnData['created_user'] = true;
+        $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+        $reservationExtensionEnabled = Extension::query()
+            ->where('extension', 'DynamicPterodactyl')
+            ->where('enabled', true)
+            ->exists();
+        $reservationService = $reservationExtensionEnabled && class_exists($reservationServiceClass)
+            ? app($reservationServiceClass)
+            : null;
+        $requiresReservation = \App\Models\ConfigOption::query()
+            ->whereHas('products', fn ($query) => $query->whereKey($service->product_id))
+            ->where('type', 'dynamic_slider')
+            ->whereNull('parent_id')
+            ->get()
+            ->contains(fn ($option) => in_array(
+                strtolower((string) $option->getMetadata('resource_type', '')),
+                ['memory', 'cpu', 'disk'],
+                true
+            ));
+        if ($requiresReservation && $reservationService === null) {
+            throw new Exception('Dynamic capacity reservations are unavailable; provisioning was stopped.');
         }
 
-        if (isset($settings['location'])) {
-            $settings['location_ids'] = [$settings['location']];
-        }
+        $reservation = $reservationService?->beginProvisioning($service);
 
-        $deploymentData = $this->generateDeploymentData($settings, $environment);
+        try {
+            if (
+                $reservation !== null
+                && ! hash_equals(
+                    (string) $reservation['panel_identity'],
+                    hash('sha256', strtolower(rtrim(trim((string) $this->config('host')), '/')))
+                )
+            ) {
+                throw new Exception('Capacity was reserved on a different Pterodactyl panel.');
+            }
 
-        $serverCreationData = [
-            'external_id' => (string) $service->id,
-            'name' => isset($settings['servername']) ? $settings['servername'] : $service->product->name . ' #' . $service->id,
-            'user' => (int) $user,
-            'egg' => $settings['egg_id'],
-            'docker_image' => isset($settings['docker_image']) ? $settings['docker_image'] : $eggData['attributes']['docker_image'],
-            'startup' => $eggData['attributes']['startup'],
-            'environment' => $deploymentData['environment'],
-            'skip_scripts' => $settings['skip_scripts'] ?? false,
-            'oom_disabled' => !($settings['oom_killer'] ?? false),
-            'limits' => [
-                'memory' => (int) $settings['memory'],
-                'swap' => (int) $settings['swap'],
-                'disk' => (int) $settings['disk'],
-                'io' => (int) $settings['io'],
-                'threads' => $settings['cpu_pinning'] ?? null,
-                'cpu' => (int) $settings['cpu'],
-            ],
-            'feature_limits' => [
-                'databases' => (int) $settings['databases'],
-                'allocations' => $deploymentData['allocations_needed'] + (int) $settings['additional_allocations'],
-                'backups' => (int) $settings['backups'],
-            ],
-            'start_on_completion' => $settings['start_on_completion'] ?? false,
-        ];
-        if ($deploymentData['auto_deploy']) {
-            $serverCreationData['deploy'] = [
-                'locations' => (array) $settings['location_ids'],
-                'dedicated_ip' => $settings['dedicated_ip'] ?? false,
-                'port_range' => $settings['port_range'] ?? [],
+            $existingServer = $this->getServer($service->id, failIfNotFound: false, raw: true);
+            if ($existingServer) {
+                if ($reservation !== null) {
+                    $reservationService->completeProvisioning(
+                        $service->id,
+                        $reservation['provisioning_lease_id']
+                    );
+                }
+
+                return [
+                    'server' => $existingServer['attributes']['id'],
+                    'link' => $this->config('host') . '/server/' . $existingServer['attributes']['identifier'],
+                ];
+            }
+
+            if (($reservation['already_consumed'] ?? false) === true) {
+                throw new Exception('Capacity reservation was consumed but the Pterodactyl server is missing.');
+            }
+
+            // Smash the properties into the settings, then let the authoritative
+            // reservation override every deployable resource and placement field.
+            $settings = array_merge($settings, $properties);
+            if ($reservation !== null) {
+                $settings['node'] = $reservation['node_id'];
+                $settings['location'] = $reservation['location_id'];
+                $settings['location_ids'] = [$reservation['location_id']];
+                $settings['memory'] = $reservation['memory'];
+                $settings['cpu'] = $reservation['cpu'];
+                $settings['disk'] = $reservation['disk'];
+            }
+
+            $eggData = $this->request('/api/application/nests/' . $settings['nest_id'] . '/eggs/' . $settings['egg_id'], data: ['include' => 'variables']);
+            if (!isset($eggData['attributes'])) {
+                throw new Exception('Could not fetch egg data');
+            }
+            $environment = [];
+            foreach ($eggData['attributes']['relationships']['variables']['data'] as $variable) {
+                $environment[$variable['attributes']['env_variable']] = $settings[$variable['attributes']['env_variable']] ?? $variable['attributes']['default_value'];
+            }
+
+            $orderUser = $service->user;
+            $user = $this->request('/api/application/users', 'get', ['filter' => ['email' => $orderUser->email]])['data'][0]['attributes']['id'] ?? null;
+
+            if (!$user) {
+                $user = $this->request('/api/application/users', 'post', [
+                    'email' => $orderUser->email,
+                    'username' => (preg_replace('/[^a-zA-Z0-9]/', '', strtolower(Str::transliterate($orderUser->name))) ?? Str::random(8)) . '_' . Str::random(4),
+                    'first_name' => $orderUser->first_name ?? '',
+                    'last_name' => $orderUser->last_name ?? '',
+                ])['attributes']['id'];
+            }
+
+            if (isset($settings['location'])) {
+                $settings['location_ids'] = [$settings['location']];
+            }
+
+            $deploymentData = $this->generateDeploymentData($settings, $environment);
+
+            $serverCreationData = [
+                'external_id' => (string) $service->id,
+                'name' => isset($settings['servername']) ? $settings['servername'] : $service->product->name . ' #' . $service->id,
+                'user' => (int) $user,
+                'egg' => $settings['egg_id'],
+                'docker_image' => isset($settings['docker_image']) ? $settings['docker_image'] : $eggData['attributes']['docker_image'],
+                'startup' => $eggData['attributes']['startup'],
+                'environment' => $deploymentData['environment'],
+                'skip_scripts' => $settings['skip_scripts'] ?? false,
+                'oom_disabled' => !($settings['oom_killer'] ?? false),
+                'limits' => [
+                    'memory' => (int) $settings['memory'],
+                    'swap' => (int) $settings['swap'],
+                    'disk' => (int) $settings['disk'],
+                    'io' => (int) $settings['io'],
+                    'threads' => $settings['cpu_pinning'] ?? null,
+                    'cpu' => (int) $settings['cpu'],
+                ],
+                'feature_limits' => [
+                    'databases' => (int) $settings['databases'],
+                    'allocations' => $deploymentData['allocations_needed'] + (int) $settings['additional_allocations'],
+                    'backups' => (int) $settings['backups'],
+                ],
+                'start_on_completion' => $settings['start_on_completion'] ?? false,
             ];
-        } else {
-            $serverCreationData['allocation'] = $deploymentData['allocation'];
+            if ($deploymentData['auto_deploy']) {
+                $serverCreationData['deploy'] = [
+                    'locations' => (array) $settings['location_ids'],
+                    'dedicated_ip' => $settings['dedicated_ip'] ?? false,
+                    'port_range' => $settings['port_range'] ?? [],
+                ];
+            } else {
+                $serverCreationData['allocation'] = $deploymentData['allocation'];
+            }
+
+            $server = $this->request('/api/application/servers', 'post', $serverCreationData);
+
+            if ($reservation !== null) {
+                $reservationService->completeProvisioning(
+                    $service->id,
+                    $reservation['provisioning_lease_id']
+                );
+            }
+
+            return [
+                'server' => $server['attributes']['id'],
+                'link' => $this->config('host') . '/server/' . $server['attributes']['identifier'],
+            ];
+        } catch (\Throwable $exception) {
+            if ($reservation !== null) {
+                $reservationService->failProvisioning(
+                    $service->id,
+                    $reservation['provisioning_lease_id'],
+                    $exception
+                );
+            }
+
+            throw $exception;
         }
-
-        $server = $this->request('/api/application/servers', 'post', $serverCreationData);
-
-        return [
-            'server' => $server['attributes']['id'],
-            'link' => $this->config('host') . '/server/' . $server['attributes']['identifier'],
-        ];
     }
 
     private function generateDeploymentData($settings, $environment)

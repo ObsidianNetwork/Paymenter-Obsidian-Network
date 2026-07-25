@@ -71,6 +71,11 @@ class Checkout extends Component
                 if ($option->type === 'checkbox') {
                     return [$option->id => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? true : false];
                 }
+                if ($option->type === 'dynamic_slider') {
+                    $default = $option->getMetadata('default', $option->getMetadata('min', 0));
+
+                    return [$option->id => $this->configOptions[$option->id] ?? $default];
+                }
 
                 return [$option->id => $this->configOptions[$option->id] ?? $option->children->first()->id];
             })->toArray();
@@ -97,6 +102,12 @@ class Checkout extends Component
         $total = $this->plan->price()->price;
         $setup_fee = $this->plan->price()->setup_fee;
 
+        // Add shared dynamic slider base price once per product (not per-slider)
+        $hasDynamicSlider = $this->product->configOptions->contains(fn ($option) => $option->type === 'dynamic_slider');
+        if ($hasDynamicSlider) {
+            $total += $this->plan->dynamicSliderBasePrice();
+        }
+
         $this->product->configOptions->each(function ($option) use (&$total, &$setup_fee) {
             // Check if checkbox is set, if so, add price if checked
             if ($option->type === 'checkbox' && (isset($this->configOptions[$option->id]) && $this->configOptions[$option->id])) {
@@ -109,6 +120,13 @@ class Checkout extends Component
             if (in_array($option->type, ['text', 'number', 'checkbox'])) {
                 $total += 0;
                 $setup_fee += 0;
+
+                return;
+            }
+            // Calculate dynamic slider price using delta (marginal only, base price handled above)
+            if ($option->type === 'dynamic_slider') {
+                $value = $this->configOptions[$option->id] ?? $option->getMetadata('default', 0);
+                $total += $option->calculateDynamicPriceDelta((float) $value, $this->plan->billing_period, $this->plan->billing_unit);
 
                 return;
             }
@@ -143,6 +161,37 @@ class Checkout extends Component
         return once(fn () => ExtensionHelper::getCheckoutConfig($this->product, $this->checkoutConfig));
     }
 
+    public function hasDynamicSliderOptions(): bool
+    {
+        return $this->product->configOptions->contains(fn ($option) => $option->type === 'dynamic_slider');
+    }
+
+    public function getReservationLocationIdProperty(): ?int
+    {
+        $checkoutLocation = $this->checkoutConfig['location'] ?? null;
+        if (is_numeric($checkoutLocation)) {
+            return (int) $checkoutLocation;
+        }
+
+        $locationSetting = $this->product->settings()
+            ->where('key', 'location_ids')
+            ->value('value');
+
+        if ($locationSetting === null || $locationSetting === '') {
+            return null;
+        }
+
+        $locationIds = is_array($locationSetting) ? $locationSetting : json_decode($locationSetting, true);
+        if (! is_array($locationIds)) {
+            return null;
+        }
+
+        $firstLocationId = collect($locationIds)
+            ->first(fn ($locationId) => is_numeric($locationId));
+
+        return $firstLocationId !== null ? (int) $firstLocationId : null;
+    }
+
     public function rules()
     {
         $rules = [
@@ -158,6 +207,10 @@ class Checkout extends Component
                 $rules["configOptions.{$option->id}"] = ['required'];
             } elseif ($option->type === 'checkbox') {
                 // No validation needed for checkbox
+            } elseif ($option->type === 'dynamic_slider') {
+                $min = $option->getMetadata('min', 0);
+                $max = $option->getMetadata('max', PHP_INT_MAX);
+                $rules["configOptions.{$option->id}"] = ['required', 'numeric', "min:{$min}", "max:{$max}"];
             } else {
                 $rules["configOptions.{$option->id}"] = [
                     'required',
@@ -255,6 +308,18 @@ class Checkout extends Component
                     'option_env_variable' => $option->env_variable,
                     'value' => $this->configOptions[$option->id],
                     'value_name' => $this->configOptions[$option->id],
+                ];
+            }
+            if ($option->type === 'dynamic_slider') {
+                $value = $this->configOptions[$option->id];
+
+                return (object) [
+                    'option_id' => $option->id,
+                    'option_name' => $option->name,
+                    'option_type' => $option->type,
+                    'option_env_variable' => $option->env_variable,
+                    'value' => $value,
+                    'value_name' => $option->formatValueForDisplay((float) $value),
                 ];
             }
 
