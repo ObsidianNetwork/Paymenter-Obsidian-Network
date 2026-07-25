@@ -21,6 +21,7 @@ use App\Services\ServiceUpgrade\UpgradeGuaranteeService;
 use App\Support\LegacyServiceUpgradeMigration;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Mockery\MockInterface;
 use Tests\TestCase;
 
@@ -144,6 +145,22 @@ class ServiceUpgradeLifecycleTest extends TestCase
         $upgrade->targetResources();
     }
 
+    public function test_empty_legacy_upgrade_reconciliation_skips_product_catalog_lookup(): void
+    {
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        LegacyServiceUpgradeMigration::reconcile();
+
+        $queries = collect(DB::getQueryLog())
+            ->pluck('query')
+            ->implode("\n");
+        DB::disableQueryLog();
+
+        $this->assertStringNotContainsString('config_options', $queries);
+        $this->assertStringNotContainsString('extensions', $queries);
+    }
+
     public function test_legacy_dynamic_upgrade_without_payment_is_retired_with_invoice(): void
     {
         [$upgrade, $invoice] = $this->legacyDynamicUpgrade();
@@ -197,6 +214,40 @@ class ServiceUpgradeLifecycleTest extends TestCase
         $this->assertSame(
             $upgrade->service_id,
             $upgrade->fresh()->active_service_guard_id
+        );
+    }
+
+    public function test_gateway_named_pterodactyl_is_not_dynamic_stock(): void
+    {
+        [$upgrade, $invoice] = $this->legacyDynamicUpgrade(
+            'Pterodactyl',
+            'gateway'
+        );
+
+        LegacyServiceUpgradeMigration::reconcile();
+
+        $this->assertSame(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            $upgrade->fresh()->status
+        );
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+    }
+
+    public function test_soft_deleted_pterodactyl_host_still_retires_unsafe_upgrade(): void
+    {
+        [$upgrade, $invoice] = $this->legacyDynamicUpgrade(
+            softDeleteServer: true
+        );
+
+        LegacyServiceUpgradeMigration::reconcile();
+
+        $this->assertSame(
+            ServiceUpgrade::STATUS_CANCELLED,
+            $upgrade->fresh()->status
+        );
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
         );
     }
 
@@ -289,18 +340,25 @@ class ServiceUpgradeLifecycleTest extends TestCase
     }
 
     private function legacyDynamicUpgrade(
-        string $serverExtension = 'Pterodactyl'
+        string $serverExtension = 'Pterodactyl',
+        string $extensionType = 'server',
+        bool $softDeleteServer = false
     ): array
     {
         $fixture = $this->createProduct();
         $server = Server::create([
             'name' => $serverExtension,
             'extension' => $serverExtension,
-            'type' => 'server',
+            'type' => $extensionType,
             'enabled' => true,
         ]);
         $fixture->product->server_id = $server->id;
         $fixture->product->save();
+        if ($softDeleteServer) {
+            DB::table('extensions')
+                ->where('id', $server->id)
+                ->update(['deleted_at' => now()]);
+        }
         $this->dynamicOption($fixture->product->id);
         $user = User::factory()->create();
         $service = CapacityServiceCreationCoordinator::run(

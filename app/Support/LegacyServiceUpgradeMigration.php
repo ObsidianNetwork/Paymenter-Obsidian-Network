@@ -19,12 +19,16 @@ final class LegacyServiceUpgradeMigration
      */
     public static function reconcile(): void
     {
-        $dynamicProducts = self::dynamicProductIds();
         $groups = DB::table('service_upgrades')
             ->where('status', 'pending')
             ->orderByDesc('id')
             ->get()
             ->groupBy('service_id');
+        if ($groups->isEmpty()) {
+            return;
+        }
+
+        $dynamicProducts = self::dynamicProductIds();
         $serviceProducts = DB::table('services')
             ->whereIn('id', $groups->keys()->map(fn ($id): int => (int) $id))
             ->pluck('product_id', 'id');
@@ -85,10 +89,16 @@ final class LegacyServiceUpgradeMigration
                 '=',
                 'config_option_products.product_id'
             )
-            ->join('servers', 'servers.id', '=', 'products.server_id')
+            ->join(
+                'extensions as server_extensions',
+                'server_extensions.id',
+                '=',
+                'products.server_id'
+            )
             ->where('config_options.type', 'dynamic_slider')
             ->whereNull('config_options.parent_id')
-            ->where('servers.extension', 'Pterodactyl')
+            ->where('server_extensions.type', 'server')
+            ->where('server_extensions.extension', 'Pterodactyl')
             ->get([
                 'config_option_products.product_id',
                 'config_options.env_variable',
