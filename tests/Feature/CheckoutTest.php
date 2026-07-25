@@ -176,17 +176,51 @@ class CheckoutTest extends TestCase
             'config_option_id' => $option->id,
             'product_id' => $this->product->product->id,
         ]);
+        $alternatePlan = $this->product->product->plans()->create([
+            'name' => 'Alternate Plan',
+            'billing_unit' => 'month',
+            'billing_period' => 1,
+            'type' => 'recurring',
+        ]);
+        $alternatePlan->prices()->create([
+            'price' => 20,
+            'currency_code' => 'USD',
+        ]);
 
-        Livewire::test('products.checkout', [
+        $component = Livewire::test('products.checkout', [
             'category' => $this->product->product->category,
             'product' => $this->product->product->slug,
-        ])
-            ->set("configOptions.{$option->id}", '2048.5')
+        ]);
+        $initialTotal = $component->get('total')->total;
+
+        $component->set("configOptions.{$option->id}", '2048.5');
+        $this->assertSame($initialTotal, $component->get('total')->total);
+        $component
             ->call('checkout')
             ->assertHasErrors(["configOptions.{$option->id}"])
-            ->set("configOptions.{$option->id}", 1536)
+            ->set("configOptions.{$option->id}", 1536);
+        $this->assertSame($initialTotal, $component->get('total')->total);
+        $component
             ->call('checkout')
-            ->assertHasErrors(["configOptions.{$option->id}"]);
+            ->assertHasErrors(["configOptions.{$option->id}"])
+            ->set('plan_id', $alternatePlan->id);
+        $alternateDefaultTotal = $component->get('total')->total;
+        $this->assertNotSame($initialTotal, $alternateDefaultTotal);
+        $component
+            ->set("configOptions.{$option->id}", 3072);
+        $this->assertNotSame(
+            $alternateDefaultTotal,
+            $component->get('total')->total
+        );
+
+        $instance = $component->instance();
+        $instance->total = null;
+        $instance->configOptions[$option->id] = 'invalid';
+        $instance->updatePricing();
+        $this->assertInstanceOf(
+            \App\Classes\Price::class,
+            $instance->total
+        );
     }
 
     public function test_custom_or_non_pterodactyl_slider_does_not_enable_stock_gate(): void

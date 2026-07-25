@@ -109,10 +109,24 @@ class Checkout extends Component
                 $dynamicSliderValues[$option->id] =
                     $option->normalizeDynamicSliderValue($value);
             } catch (\InvalidArgumentException) {
-                // Livewire invokes this method while fields are being edited.
-                // Preserve the last valid total and let checkout validation
-                // attach the actionable error to the affected slider.
-                return;
+                // Never price an invalid submitted value. A safe configured
+                // default keeps first render and plan changes usable while
+                // checkout validation retains the invalid input and attaches
+                // the actionable error to this slider.
+                try {
+                    $dynamicSliderValues[$option->id] =
+                        $option->normalizeDynamicSliderValue(
+                            $option->getMetadata(
+                                'default',
+                                $option->getMetadata('min', 0)
+                            )
+                        );
+                } catch (\InvalidArgumentException) {
+                    // Invalid product metadata must not crash checkout. The
+                    // slider contributes no marginal price and final
+                    // validation remains fail-closed.
+                    $dynamicSliderValues[$option->id] = null;
+                }
             }
         }
 
@@ -143,7 +157,9 @@ class Checkout extends Component
             // Calculate dynamic slider price using delta (marginal only, base price handled above)
             if ($option->type === 'dynamic_slider') {
                 $value = $dynamicSliderValues[$option->id];
-                $total += $option->calculateDynamicPriceDelta((float) $value, $this->plan->billing_period, $this->plan->billing_unit);
+                if ($value !== null) {
+                    $total += $option->calculateDynamicPriceDelta((float) $value, $this->plan->billing_period, $this->plan->billing_unit);
+                }
 
                 return;
             }
