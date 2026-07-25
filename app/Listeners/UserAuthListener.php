@@ -26,7 +26,7 @@ class UserAuthListener
                         $cart->user_id = $event->user->id;
                         $cart->save();
 
-                        $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+                        $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
                         $reservationExtensionEnabled = Extension::query()
                             ->where('extension', 'DynamicPterodactyl')
                             ->where('enabled', true)

@@ -329,7 +329,7 @@ class Cart extends Component
             return null;
         }
 
-        $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+        $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
         $reservationExtensionEnabled = \App\Models\Extension::query()
             ->where('extension', 'DynamicPterodactyl')
             ->where('enabled', true)

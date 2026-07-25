@@ -256,7 +256,7 @@ class Pterodactyl extends Server
 
     public function createServer(Service $service, $settings, $properties)
     {
-        $reservationServiceClass = '\\Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+        $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
         $reservationExtensionEnabled = Extension::query()
             ->where('extension', 'DynamicPterodactyl')
             ->where('enabled', true)

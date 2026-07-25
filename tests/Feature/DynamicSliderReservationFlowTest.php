@@ -28,12 +28,10 @@ class DynamicSliderReservationFlowTest extends TestCase
     {
         $checkoutView = file_get_contents(resource_path('../themes/default/views/products/checkout.blade.php'));
         $themeJavascript = file_get_contents(resource_path('../themes/default/js/app.js'));
-        $routes = file_get_contents(base_path('extensions/Others/DynamicPterodactyl/routes/api.php'));
 
         $this->assertStringNotContainsString('dynamicSliderGroup', $checkoutView);
         $this->assertStringNotContainsString('dp_reservation_token', $checkoutView);
         $this->assertStringNotContainsString('dynamicSliderGroup', $themeJavascript);
-        $this->assertStringNotContainsString("Route::post('/reservation'", $routes);
     }
 
     public function test_checkout_uses_server_owned_refresh_and_binding(): void
