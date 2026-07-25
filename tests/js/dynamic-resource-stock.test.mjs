@@ -41,6 +41,28 @@ function controller(overrides = {}) {
     )
 }
 
+test('disabled stock mode leaves ordinary checkout enabled without quoting', async () => {
+    installBrowserGlobals()
+    let quoted = false
+    globalThis.fetch = async () => {
+        quoted = true
+        throw new Error('ordinary products must not quote capacity')
+    }
+
+    const stock = controller({
+        enabled: false,
+        endpoint: null,
+        quoteState: 'disabled',
+    })
+    stock.init()
+    stock.queueQuote()
+    await stock.requestQuote()
+
+    assert.equal(stock.canCheckout, true)
+    assert.equal(stock.quoteState, 'disabled')
+    assert.equal(quoted, false)
+})
+
 test('step clamping honors both live capacity and the configured maximum', () => {
     assert.equal(snapToStep(32768, 1024, 23552, 1024), 23552)
     assert.equal(snapToStep(32768, 1024, 32768, 1024), 32768)

@@ -220,7 +220,7 @@ class CheckoutTest extends TestCase
             'category' => $this->product->product->category,
             'product' => $this->product->product->slug,
         ])
-            ->assertSee('false ? dynamicResourceStock(', false)
+            ->assertSee('dynamicResourceStock(', false)
             ->assertDontSee('/resource-quote', false);
 
         $option->update([
@@ -234,7 +234,7 @@ class CheckoutTest extends TestCase
             'category' => $this->product->product->category,
             'product' => $this->product->product->slug,
         ])
-            ->assertSee('false ? dynamicResourceStock(', false)
+            ->assertSee('dynamicResourceStock(', false)
             ->assertDontSee('/resource-quote', false);
     }
 }

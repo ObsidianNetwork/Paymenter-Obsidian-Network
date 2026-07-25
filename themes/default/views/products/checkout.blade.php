@@ -1,10 +1,16 @@
-@php($usesDynamicStock = $this->hasDynamicSliderOptions())
+@php
+    $usesDynamicStock = $this->hasDynamicSliderOptions();
+    $dynamicStockConfig = [
+        'enabled' => $usesDynamicStock,
+        'endpoint' => $usesDynamicStock
+            ? url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote')
+            : null,
+        'cartItemId' => $cartProductKey,
+    ];
+@endphp
 <div
     class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
-    x-data="@js($usesDynamicStock) ? dynamicResourceStock({
-        endpoint: @js($usesDynamicStock ? url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote') : null),
-        cartItemId: @js($cartProductKey),
-    }) : { canCheckout: true, queueQuote() {} }"
+    x-data="dynamicResourceStock(@js($dynamicStockConfig))"
     x-on:slider-change="queueQuote()"
     x-on:change="queueQuote()"
 >

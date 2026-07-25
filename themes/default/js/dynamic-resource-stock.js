@@ -48,11 +48,16 @@ function responseMessage(response, payload) {
     return safeMessage
 }
 
-export default function dynamicResourceStock({ endpoint, cartItemId = null }) {
+export default function dynamicResourceStock({
+    endpoint,
+    cartItemId = null,
+    enabled = true,
+}) {
     return {
         endpoint,
         cartItemId,
-        quoteState: 'loading',
+        enabled,
+        quoteState: enabled ? 'loading' : 'disabled',
         quoteError: '',
         latestQuote: null,
         _requestId: 0,
@@ -61,14 +66,23 @@ export default function dynamicResourceStock({ endpoint, cartItemId = null }) {
         _adjustmentPasses: 0,
 
         init() {
+            if (!this.enabled) {
+                return
+            }
+
             this.$nextTick(() => this.requestQuote())
         },
 
         get canCheckout() {
-            return this.quoteState === 'ready' && this.latestQuote?.available === true
+            return !this.enabled
+                || (this.quoteState === 'ready' && this.latestQuote?.available === true)
         },
 
         queueQuote(delay = 250) {
+            if (!this.enabled) {
+                return
+            }
+
             window.clearTimeout(this._quoteTimer)
             this.quoteState = 'loading'
             this.quoteError = ''
@@ -77,6 +91,10 @@ export default function dynamicResourceStock({ endpoint, cartItemId = null }) {
         },
 
         async requestQuote() {
+            if (!this.enabled) {
+                return
+            }
+
             if (!this.endpoint) {
                 this.failQuote(safeMessage)
                 return
