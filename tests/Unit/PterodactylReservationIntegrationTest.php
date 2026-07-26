@@ -162,6 +162,84 @@ class PterodactylReservationIntegrationTest extends TestCase
         );
     }
 
+    public function test_zero_price_confirmed_capacity_service_can_renew_without_checkout_invoice(): void
+    {
+        [$service, $reservationId] =
+            $this->confirmedRenewalFixture(Service::STATUS_ACTIVE);
+        $reservation = DB::table('ptero_resource_reservations')
+            ->where('id', $reservationId)
+            ->firstOrFail();
+        $payload = json_decode(
+            (string) $reservation->configuration_payload,
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+        $payload['calculated_price'] = '0.00';
+
+        DB::table('ptero_resource_reservations')
+            ->where('id', $reservationId)
+            ->update([
+                'invoice_id' => null,
+                'calculated_price' => '0.00',
+                'configuration_payload' => json_encode(
+                    $payload,
+                    JSON_THROW_ON_ERROR
+                ),
+                'configuration_fingerprint' => app(
+                    ReservationConfigurationService::class
+                )->fingerprint($payload),
+            ]);
+        DB::table('services')
+            ->where('id', $service->id)
+            ->update(['price' => '0.00']);
+        $service = $service->fresh(['product', 'plan']);
+        $originalExpiry = $service->expires_at->copy();
+
+        app(RenewServiceService::class)->handle($service);
+
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+        $this->assertTrue(
+            $service->fresh()->expires_at->greaterThan($originalExpiry)
+        );
+        $this->assertDatabaseHas('ptero_resource_reservations', [
+            'id' => $reservationId,
+            'invoice_id' => null,
+            'calculated_price' => '0.00',
+            'status' => 'confirmed',
+        ]);
+    }
+
+    public function test_positive_signed_checkout_amount_requires_original_invoice_identity_for_renewal(): void
+    {
+        [$service, $reservationId] =
+            $this->confirmedRenewalFixture(Service::STATUS_ACTIVE);
+        DB::table('ptero_resource_reservations')
+            ->where('id', $reservationId)
+            ->update(['invoice_id' => null]);
+        $renewal = $this->renewalInvoice($service);
+
+        $failure = app(DurableFulfillmentService::class)
+            ->preflightPaidService($service, $renewal);
+
+        $this->assertIsString($failure);
+        $this->assertStringContainsString(
+            'incomplete confirmed checkout billing commitment',
+            $failure
+        );
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $renewal->fresh()->status
+        );
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+    }
+
     public function test_capacity_renewal_requires_payment_coordinator_without_reusing_checkout_deadline(): void
     {
         [$service] = $this->confirmedRenewalFixture(

@@ -37,6 +37,7 @@ class DurableFulfillmentService
         'plan_id',
         'quantity',
         'currency_code',
+        'calculated_price',
         'configuration_fingerprint',
         'configuration_payload',
         'server_extension_id',
@@ -605,7 +606,6 @@ class DurableFulfillmentService
             || (int) $commitment->quantity !== 1
             || strtoupper((string) $commitment->currency_code)
                 !== strtoupper((string) $service->currency_code)
-            || $commitment->invoice_id === null
             || $commitment->paid_committed_at === null
             || $commitment->consumed_at === null
             || $commitment->provisioning_lease_id !== null
@@ -652,6 +652,25 @@ class DurableFulfillmentService
             );
         } catch (\JsonException) {
             return "Capacity-backed service {$service->id} has an unreadable confirmed checkout commitment.";
+        }
+
+        $signedCheckoutPrice = StrictDecimal::parseNonNegative(
+            $payload['calculated_price'] ?? null
+        );
+        $storedCheckoutPrice = StrictDecimal::parseNonNegative(
+            $commitment->calculated_price
+        );
+        if (
+            $signedCheckoutPrice === null
+            || $storedCheckoutPrice === null
+            || number_format($signedCheckoutPrice, 2, '.', '')
+                !== number_format($storedCheckoutPrice, 2, '.', '')
+            || (
+                $signedCheckoutPrice > 0
+                && (int) $commitment->invoice_id <= 0
+            )
+        ) {
+            return "Capacity-backed service {$service->id} has an incomplete confirmed checkout billing commitment.";
         }
 
         $resources = (array) ($payload['resources'] ?? []);
