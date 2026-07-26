@@ -473,7 +473,7 @@ class ServiceUpgradeLifecycleTest extends TestCase
         ]);
         $upgrade->captureSnapshots();
         $upgrade->save();
-        $originalPrice = (string) $service->price;
+        $originalPrice = (string) $service->fresh()->price;
 
         $service->expires_at = $service->expires_at->copy()->addDay();
         $service->save();
