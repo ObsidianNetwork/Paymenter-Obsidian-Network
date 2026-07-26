@@ -52,6 +52,8 @@ class Migrate extends Command
             if (method_exists($extension, 'assertMigrationReady')) {
                 $extension->assertMigrationReady();
             }
+            app(ExtensionLifecycleGuard::class)
+                ->assertCanActivate($name);
             if (Artisan::call('queue:restart') !== 0) {
                 throw new \RuntimeException(
                     'Extension migrations/readiness completed, but queue '

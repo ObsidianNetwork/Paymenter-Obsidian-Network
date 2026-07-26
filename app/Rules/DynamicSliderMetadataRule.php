@@ -38,6 +38,20 @@ class DynamicSliderMetadataRule implements ValidationRule
 
             return;
         }
+        $rawResourceType = $value['resource_type'] ?? '';
+        $resourceType = is_string($rawResourceType)
+            ? strtolower(trim($rawResourceType))
+            : '';
+        if (
+            in_array($resourceType, ['memory', 'cpu', 'disk'], true)
+            && $integers['min'] === 0
+        ) {
+            $fail(
+                'RAM, CPU, and disk sliders must have a minimum greater than zero because Pterodactyl interprets zero as unlimited.'
+            );
+
+            return;
+        }
         if ($integers['max'] < $integers['min']) {
             $fail('The dynamic slider maximum must be greater than or equal to its minimum.');
 

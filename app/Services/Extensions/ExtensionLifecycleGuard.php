@@ -2,6 +2,7 @@
 
 namespace App\Services\Extensions;
 
+use App\Models\ConfigOption;
 use App\Models\Extension;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -13,6 +14,56 @@ use Illuminate\Support\Facades\Schema;
 class ExtensionLifecycleGuard
 {
     public const DYNAMIC_PTERODACTYL = 'DynamicPterodactyl';
+
+    /**
+     * Refuse to activate dynamic fulfillment while legacy per-slider base
+     * prices can disagree with the one plan-level amount used by invoices.
+     */
+    public function assertCanActivate(Extension|string $extension): void
+    {
+        $name = $extension instanceof Extension
+            ? (string) $extension->extension
+            : $extension;
+        if (strcasecmp($name, self::DYNAMIC_PTERODACTYL) !== 0) {
+            return;
+        }
+
+        if (
+            ! Schema::hasTable('config_options')
+            || ! Schema::hasTable('plans')
+            || ! Schema::hasColumn('plans', 'dynamic_slider_base_price')
+        ) {
+            throw new \RuntimeException(
+                'Dynamic slider plan-level pricing migrations are incomplete.'
+            );
+        }
+
+        $invalid = [];
+        ConfigOption::query()
+            ->where('type', 'dynamic_slider')
+            ->orderBy('id')
+            ->get(['id', 'type', 'metadata'])
+            ->each(function (ConfigOption $option) use (&$invalid): void {
+                try {
+                    $option->assertUsesPlanLevelBasePrice();
+                } catch (\InvalidArgumentException $exception) {
+                    $invalid[] = (int) $option->id;
+                }
+            });
+
+        if ($invalid === []) {
+            return;
+        }
+
+        throw new \RuntimeException(
+            'Dynamic Pterodactyl cannot be activated while dynamic slider '
+            .'options retain legacy per-slider base prices (option IDs: '
+            .implode(', ', array_slice($invalid, 0, 20))
+            .(count($invalid) > 20 ? ', …' : '')
+            .'). Run paymenter:migrate-slider-base-price --force, resolve any '
+            .'reported conflicts, and retry activation.'
+        );
+    }
 
     public function assertCanDeactivate(Extension|string $extension): void
     {

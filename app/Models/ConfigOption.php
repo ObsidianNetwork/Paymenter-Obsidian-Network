@@ -38,6 +38,8 @@ class ConfigOption extends Model implements Auditable
     protected static function booted(): void
     {
         static::saving(function (ConfigOption $option): void {
+            $option->assertUsesPlanLevelBasePrice();
+
             $originalMetadata = json_decode(
                 (string) $option->getRawOriginal('metadata'),
                 true
@@ -131,6 +133,7 @@ class ConfigOption extends Model implements Auditable
         if (! $this->isDynamicSlider()) {
             return 0;
         }
+        $this->assertUsesPlanLevelBasePrice();
         if (
             ! is_finite($value)
             || $value < 0
@@ -160,8 +163,6 @@ class ConfigOption extends Model implements Auditable
     /**
      * @deprecated Use calculateDynamicPriceDelta() for the marginal charge and add
      *             plan->dynamicSliderBasePrice() once per product for the shared base.
-     *             This alias returns delta + sharedBase so existing callers see the
-     *             same total they always did (base_price counted once, not per-slider).
      */
     public function calculateDynamicPrice(
         float $value,
@@ -169,18 +170,49 @@ class ConfigOption extends Model implements Auditable
         ?string $billingUnit = 'month'
     ): float
     {
-        $pricing = $this->metadata['pricing'] ?? [];
-        $sharedBase = $this->pricingDecimal(
-            $pricing['base_price'] ?? 0,
-            'base price',
+        return $this->calculateDynamicPriceDelta(
+            $value,
+            $billingPeriod,
+            $billingUnit
+        );
+    }
+
+    /**
+     * Dynamic-slider base pricing has one authoritative home: the selected
+     * plan. A non-zero metadata copy is an unmigrated legacy configuration
+     * that would otherwise disagree with checkout, renewal, or browser math.
+     */
+    public function assertUsesPlanLevelBasePrice(): void
+    {
+        if (! $this->isDynamicSlider()) {
+            return;
+        }
+
+        $pricing = $this->metadata['pricing'] ?? null;
+        if (
+            ! is_array($pricing)
+            || ! array_key_exists('base_price', $pricing)
+            || $pricing['base_price'] === null
+            || $pricing['base_price'] === ''
+        ) {
+            return;
+        }
+
+        $basePrice = StrictDecimal::parseNonNegative(
+            $pricing['base_price'],
             99_999_999.99
         );
-        $multiplier = $this->getBillingMultiplier($billingPeriod, $billingUnit);
-
-        return $this->guardCalculatedPrice(
-            $this->calculateDynamicPriceDelta($value, $billingPeriod, $billingUnit)
-                + ($sharedBase * $multiplier)
-        );
+        if ($basePrice === null) {
+            throw new \InvalidArgumentException(
+                'Dynamic-slider metadata contains an invalid legacy base price.'
+            );
+        }
+        if ($basePrice > 0) {
+            throw new \InvalidArgumentException(
+                'Dynamic-slider metadata contains an unmigrated per-slider base price. '
+                .'Run paymenter:migrate-slider-base-price --force and configure the shared base on each plan.'
+            );
+        }
     }
 
     /**

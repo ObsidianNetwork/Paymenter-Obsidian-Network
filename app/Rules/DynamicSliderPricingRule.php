@@ -43,15 +43,25 @@ class DynamicSliderPricingRule implements ValidationRule
             return;
         }
 
-        // Validate the legacy metadata base price against the plan column it
-        // may be migrated into (DECIMAL(10,2)).
+        // The shared base is authoritative at the plan level. Permit an
+        // explicit zero only for compatibility with already-normalized
+        // metadata; any non-zero copy would make browser and invoice math
+        // disagree.
         if (array_key_exists('base_price', $value) && $value['base_price'] !== null && $value['base_price'] !== '') {
-            if ($this->decimal(
+            $basePrice = $this->decimal(
                 $value['base_price'],
                 99_999_999.99
-            ) === null) {
+            );
+            if ($basePrice === null) {
                 $fail(
                     'The base price must be a finite non-negative numeric decimal with at most 8 decimal places.'
+                );
+
+                return;
+            }
+            if ($basePrice > 0) {
+                $fail(
+                    'Per-slider base prices are not supported. Configure the shared dynamic resource base price on the product plan.'
                 );
 
                 return;

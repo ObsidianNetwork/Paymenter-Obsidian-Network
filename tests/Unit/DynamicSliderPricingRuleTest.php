@@ -45,17 +45,32 @@ class DynamicSliderPricingRuleTest extends TestCase
     {
         $errors = $this->runRule([
             'model'        => 'linear',
-            'base_price'   => 5.0,
+            'base_price'   => 0,
             'rate_per_unit' => 2.0,
         ]);
         $this->assertEmpty($errors);
+    }
+
+    public function test_non_zero_per_slider_base_price_fails(): void
+    {
+        $errors = $this->runRule([
+            'model' => 'linear',
+            'base_price' => 5.0,
+            'rate_per_unit' => 2.0,
+        ]);
+
+        $this->assertNotEmpty($errors);
+        $this->assertStringContainsString(
+            'shared dynamic resource base price',
+            $errors[0]
+        );
     }
 
     public function test_linear_missing_rate_per_unit_fails(): void
     {
         $errors = $this->runRule([
             'model'      => 'linear',
-            'base_price' => 5.0,
+            'base_price' => 0,
         ]);
         $this->assertNotEmpty($errors);
         $this->assertStringContainsString('rate_per_unit', $errors[0]);

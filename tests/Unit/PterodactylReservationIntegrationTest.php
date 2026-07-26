@@ -2,14 +2,28 @@
 
 namespace Tests\Unit;
 
+use App\Enums\InvoiceTransactionStatus;
 use App\Exceptions\PermanentProvisioningException;
+use App\Helpers\ExtensionHelper;
 use App\Models\ConfigOption;
 use App\Models\Extension;
+use App\Models\Invoice;
+use App\Models\InvoiceTransaction;
 use App\Models\Service;
+use App\Models\ServiceUpgrade;
+use App\Models\Server;
 use App\Models\User;
+use App\Services\Invoice\CapacityInvoicePaymentService;
+use App\Services\Invoice\MarkInvoicePaidService;
+use App\Services\Service\CapacityServiceCreationCoordinator;
 use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\RenewServiceService;
+use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
+use App\Services\ServiceUpgrade\ServiceUpgradeService;
+use App\Services\ServiceUpgrade\UpgradeFailureAlertService;
 use App\Support\PanelEndpointIdentity;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\RefreshDatabaseState;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
@@ -68,6 +82,655 @@ class PterodactylReservationIntegrationTest extends TestCase
                 'https://panel.example.com/panela'
             ),
             $identity->invoke($provisioner)
+        );
+    }
+
+    public function test_upgrade_reservation_history_remains_authoritative_after_product_metadata_is_ordinary(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $upgrade = $this->ordinaryUpgrade(
+            ServiceUpgrade::STATUS_CANCELLED
+        );
+        $this->insertUpgradeReservation($upgrade, [
+            'status' => 'cancelled',
+            'upgrade_guard_id' => null,
+        ]);
+
+        $identity = app(CapacityUpgradeReservationIdentity::class);
+        $this->assertTrue($identity->exists((int) $upgrade->id));
+        $this->assertTrue($identity->requiresCoordinator($upgrade->fresh()));
+    }
+
+    public function test_ordinary_upgrade_without_reservation_history_does_not_require_coordinator(): void
+    {
+        $upgrade = $this->ordinaryUpgrade(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+
+        $identity = app(CapacityUpgradeReservationIdentity::class);
+        $this->assertFalse($identity->exists((int) $upgrade->id));
+        $this->assertFalse(
+            $identity->requiresCoordinator($upgrade->fresh())
+        );
+    }
+
+    public function test_confirmed_capacity_service_can_pay_its_exact_active_renewal(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $originalExpiry = $service->expires_at->copy();
+        $renewal = $this->renewalInvoice($service);
+        $runtime = Mockery::mock(ReservationService::class);
+        $runtime->shouldNotReceive('preflightPaidService');
+        $this->app->instance(ReservationService::class, $runtime);
+
+        app(MarkInvoicePaidService::class)->handle($renewal);
+
+        $this->assertSame(
+            Invoice::STATUS_PAID,
+            $renewal->fresh()->status
+        );
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+        $this->assertTrue(
+            $service->fresh()->expires_at->greaterThan($originalExpiry)
+        );
+    }
+
+    public function test_confirmed_capacity_service_can_pay_its_exact_suspended_renewal(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_SUSPENDED
+        );
+        $renewal = $this->renewalInvoice($service);
+
+        app(MarkInvoicePaidService::class)->handle($renewal);
+
+        $this->assertSame(
+            Invoice::STATUS_PAID,
+            $renewal->fresh()->status
+        );
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+        $this->assertTrue(
+            $service->fresh()->expires_at->greaterThan(now())
+        );
+    }
+
+    public function test_capacity_renewal_requires_payment_coordinator_without_reusing_checkout_deadline(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+        $payments = app(CapacityInvoicePaymentService::class);
+
+        $this->assertFalse($payments->isCapacityBacked($renewal));
+        $this->assertTrue(
+            $payments->requiresFulfillmentCoordinator($renewal)
+        );
+        $this->assertNull($payments->effectiveDeadline($renewal));
+
+        try {
+            $renewal->status = Invoice::STATUS_PAID;
+            $renewal->save();
+            $this->fail(
+                'Expected a direct renewal paid transition to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'fulfillment coordinator',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $renewal->fresh()->status
+        );
+    }
+
+    public function test_capacity_renewal_succeeded_evidence_requires_atomic_coordinator(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+
+        try {
+            $renewal->transactions()->create([
+                'amount' => $service->price,
+                'status' => InvoiceTransactionStatus::Succeeded,
+                'transaction_id' => 'unsafe-renewal-success',
+            ]);
+            $this->fail(
+                'Expected direct renewal payment evidence to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'atomic payment coordinator',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertFalse(
+            InvoiceTransaction::query()
+                ->where('transaction_id', 'unsafe-renewal-success')
+                ->exists()
+        );
+    }
+
+    public function test_capacity_renewal_line_cannot_be_changed_to_bypass_coordination(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+        $line = $renewal->items()->firstOrFail();
+
+        try {
+            $line->price = 1;
+            $line->save();
+            $this->fail(
+                'Expected renewal line mutation to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'invoice lines are immutable',
+                $exception->getMessage()
+            );
+        }
+        $line->refresh();
+
+        try {
+            $line->delete();
+            $this->fail(
+                'Expected renewal line deletion to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'invoice lines cannot be deleted',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseHas('invoice_items', [
+            'id' => $line->id,
+            'invoice_id' => $renewal->id,
+            'reference_type' => Service::class,
+            'reference_id' => $service->id,
+            'price' => number_format((float) $service->price, 2, '.', ''),
+        ]);
+        $this->assertTrue(
+            app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator($renewal)
+        );
+    }
+
+    public function test_capacity_renewal_invoice_cannot_be_deleted_with_its_payment_evidence(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+        $transaction = ExtensionHelper::addProcessingPayment(
+            $renewal,
+            null,
+            $service->price,
+            transactionId: 'renewal-delete-guard'
+        );
+
+        try {
+            $renewal->delete();
+            $this->fail(
+                'Expected capacity renewal invoice deletion to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'durable fulfillment records',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertDatabaseHas('invoices', [
+            'id' => $renewal->id,
+            'status' => Invoice::STATUS_PENDING,
+        ]);
+        $this->assertDatabaseHas('invoice_transactions', [
+            'id' => $transaction->id,
+            'invoice_id' => $renewal->id,
+            'transaction_id' => 'renewal-delete-guard',
+            'status' => InvoiceTransactionStatus::Processing->value,
+        ]);
+    }
+
+    public function test_processing_capacity_renewal_cannot_be_cancelled_or_bypassed(): void
+    {
+        [$service, $commitmentId] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+        $transaction = ExtensionHelper::addProcessingPayment(
+            $renewal,
+            null,
+            $service->price,
+            transactionId: 'renewal-cancel-guard'
+        );
+
+        try {
+            $transaction->delete();
+            $this->fail(
+                'Expected processing capacity payment evidence deletion to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'payment evidence cannot be deleted',
+                $exception->getMessage()
+            );
+        }
+
+        try {
+            $transaction->status = InvoiceTransactionStatus::Failed;
+            $transaction->save();
+            $this->fail(
+                'Expected direct processing payment finalization to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'atomic payment coordinator',
+                $exception->getMessage()
+            );
+        }
+
+        try {
+            app(\App\Services\Invoice\CancelInvoiceService::class)
+                ->handle($renewal);
+            $this->fail(
+                'Expected processing capacity renewal cancellation to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'requires refund or credit reconciliation',
+                $exception->getMessage()
+            );
+        }
+
+        try {
+            $renewal->status = Invoice::STATUS_CANCELLED;
+            $renewal->save();
+            $this->fail(
+                'Expected direct capacity renewal cancellation to be rejected.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'fulfillment coordinator',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $renewal->fresh()->status
+        );
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+        $this->assertDatabaseHas('ptero_resource_reservations', [
+            'id' => $commitmentId,
+            'status' => 'confirmed',
+            'service_id' => $service->id,
+        ]);
+    }
+
+    public function test_unpaid_capacity_renewal_can_be_cancelled_without_releasing_service_capacity(): void
+    {
+        [$service, $commitmentId] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+
+        app(\App\Services\Invoice\CancelInvoiceService::class)
+            ->handle($renewal);
+
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $renewal->fresh()->status
+        );
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+        $this->assertDatabaseHas('ptero_resource_reservations', [
+            'id' => $commitmentId,
+            'status' => 'confirmed',
+            'service_id' => $service->id,
+        ]);
+    }
+
+    public function test_external_renewal_payment_survives_mutation_failure_as_attention(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $renewal = $this->renewalInvoice($service);
+        $originalExpiry = $service->expires_at->copy();
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class extends DurableFulfillmentService
+            {
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return true;
+                }
+
+                public function preflightPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): ?string {
+                    return null;
+                }
+
+                public function assertRenewalMutationAllowed(
+                    Service $service,
+                    ?Invoice $invoice
+                ): Service {
+                    throw new \RuntimeException(
+                        'Deterministic renewal mutation failure.'
+                    );
+                }
+            }
+        );
+
+        $transaction = ExtensionHelper::addPayment(
+            $renewal,
+            null,
+            $service->price,
+            transactionId: 'captured-renewal-failure'
+        );
+
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $transaction->fresh()->status
+        );
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $renewal->fresh()->status
+        );
+        $this->assertNotNull(
+            $renewal->fresh()->payment_attention_required_at
+        );
+        $this->assertStringContainsString(
+            'Deterministic renewal mutation failure',
+            (string) $renewal->fresh()->payment_attention_reason
+        );
+        $this->assertTrue(
+            $service->fresh()->expires_at->equalTo($originalExpiry)
+        );
+    }
+
+    public function test_nonrenewal_service_invoice_cannot_use_confirmed_commitment_bypass(): void
+    {
+        [$service] = $this->confirmedRenewalFixture(
+            Service::STATUS_ACTIVE
+        );
+        $originalExpiry = $service->expires_at->copy();
+        $forged = $this->renewalInvoice(
+            $service,
+            dueAt: $service->expires_at->copy()->addDay()
+        );
+
+        $failure = app(DurableFulfillmentService::class)
+            ->preflightPaidService($service, $forged);
+        $this->assertIsString($failure);
+        $this->assertStringContainsString(
+            'exact renewal obligation',
+            $failure
+        );
+        app(MarkInvoicePaidService::class)->handle($forged);
+
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $forged->fresh()->status
+        );
+        DB::table('invoices')
+            ->where('id', $forged->id)
+            ->update(['status' => Invoice::STATUS_PAID]);
+        try {
+            app(RenewServiceService::class)->handle(
+                $service->fresh(['product', 'plan']),
+                $forged->fresh()
+            );
+            $this->fail(
+                'Expected the mutation boundary to reject the forged renewal.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'exact renewal obligation',
+                $exception->getMessage()
+            );
+        }
+        $this->assertTrue(
+            $service->fresh()->expires_at->equalTo($originalExpiry)
+        );
+    }
+
+    public function test_corrupted_confirmed_commitment_cannot_authorize_renewal(): void
+    {
+        [$service, $reservationId] =
+            $this->confirmedRenewalFixture(Service::STATUS_ACTIVE);
+        DB::table('ptero_resource_reservations')
+            ->where('id', $reservationId)
+            ->update(['configuration_fingerprint' => str_repeat('0', 64)]);
+        $renewal = $this->renewalInvoice($service);
+
+        $failure = app(DurableFulfillmentService::class)
+            ->preflightPaidService($service, $renewal);
+        $this->assertIsString($failure);
+        $this->assertStringContainsString(
+            'corrupted confirmed checkout commitment',
+            $failure
+        );
+        app(MarkInvoicePaidService::class)->handle($renewal);
+
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $renewal->fresh()->status
+        );
+    }
+
+    public function test_renewal_is_blocked_by_every_committed_or_problem_upgrade_state(): void
+    {
+        foreach ([
+            ServiceUpgrade::STATUS_PAID_COMMITTED,
+            ServiceUpgrade::STATUS_PROVISIONING,
+            ServiceUpgrade::STATUS_RETRYABLE_FAILED,
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+        ] as $status) {
+            [$service] = $this->confirmedRenewalFixture(
+                Service::STATUS_ACTIVE
+            );
+            $originalExpiry = $service->expires_at->copy();
+            $upgrade = ServiceUpgrade::create([
+                'service_id' => $service->id,
+                'product_id' => $service->product_id,
+                'plan_id' => $service->plan_id,
+                'status' => $status,
+                'type' => 'product',
+                'active_service_guard_id' => $service->id,
+                'provisioning_attempts' =>
+                    $status === ServiceUpgrade::STATUS_PROVISIONING
+                        ? 1
+                        : 0,
+            ]);
+            $renewal = $this->renewalInvoice($service);
+
+            $failure = app(DurableFulfillmentService::class)
+                ->preflightPaidService($service, $renewal);
+            $this->assertIsString($failure);
+            $this->assertStringContainsString(
+                "upgrade {$upgrade->id} is {$status}",
+                $failure
+            );
+            app(MarkInvoicePaidService::class)->handle($renewal);
+
+            $this->assertSame(
+                Invoice::STATUS_PENDING,
+                $renewal->fresh()->status
+            );
+            DB::table('invoices')
+                ->where('id', $renewal->id)
+                ->update(['status' => Invoice::STATUS_PAID]);
+            try {
+                app(RenewServiceService::class)->handle(
+                    $service->fresh(['product', 'plan']),
+                    $renewal->fresh()
+                );
+                $this->fail(
+                    "Expected mutation to remain blocked by {$status}."
+                );
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString(
+                    "upgrade {$upgrade->id} is {$status}",
+                    $exception->getMessage()
+                );
+            }
+            $this->assertTrue(
+                $service->fresh()->expires_at->equalTo($originalExpiry)
+            );
+            $this->assertSame($status, $upgrade->fresh()->status);
+        }
+    }
+
+    public function test_dynamic_upgrade_without_reservation_history_still_requires_coordinator(): void
+    {
+        $fixture = $this->createProduct();
+        $server = Server::create([
+            'name' => 'Pterodactyl',
+            'extension' => 'Pterodactyl',
+            'type' => 'server',
+            'enabled' => true,
+        ]);
+        $fixture->product->server_id = $server->id;
+        $fixture->product->save();
+        $option = ConfigOption::create([
+            'name' => 'Memory',
+            'env_variable' => 'memory',
+            'type' => 'dynamic_slider',
+            'hidden' => false,
+            'metadata' => [
+                'resource_type' => 'memory',
+                'min' => 1024,
+                'max' => 32768,
+                'step' => 1024,
+                'default' => 4096,
+            ],
+        ]);
+        DB::table('config_option_products')->insert([
+            'config_option_id' => $option->id,
+            'product_id' => $fixture->product->id,
+        ]);
+        $service = CapacityServiceCreationCoordinator::run(
+            fn () => Service::factory()->create([
+                'user_id' => User::factory()->create()->id,
+                'product_id' => $fixture->product->id,
+                'plan_id' => $fixture->plan->id,
+                'quantity' => 1,
+                'currency_code' => 'USD',
+            ])
+        );
+        $upgrade = ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            'type' => 'product',
+            'active_service_guard_id' => $service->id,
+        ]);
+
+        $identity = app(CapacityUpgradeReservationIdentity::class);
+        $this->assertFalse($identity->exists((int) $upgrade->id));
+        $this->assertTrue(
+            $identity->requiresCoordinator($upgrade->fresh())
+        );
+    }
+
+    public function test_throwing_failure_coordinator_rolls_back_reservation_mutation_and_alerts_core(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $upgrade = $this->ordinaryUpgrade(
+            ServiceUpgrade::STATUS_PROVISIONING
+        );
+        $reservationId = $this->insertUpgradeReservation($upgrade, [
+            'status' => 'paid_committed',
+            'upgrade_guard_id' => $upgrade->id,
+            'provisioning_lease_id' => 'lease-savepoint',
+        ]);
+        $alert = Mockery::mock(UpgradeFailureAlertService::class);
+        $alert->shouldReceive('notify')
+            ->once()
+            ->with($upgrade->id);
+        $this->app->instance(UpgradeFailureAlertService::class, $alert);
+
+        $coordinator = new class($reservationId)
+        {
+            public function __construct(private int $reservationId) {}
+
+            public function failProvisioning(
+                ServiceUpgrade $upgrade,
+                \Throwable $exception,
+                ?string $reservationLeaseId
+            ): bool {
+                DB::table('ptero_resource_reservations')
+                    ->where('id', $this->reservationId)
+                    ->update([
+                        'status' => 'cancelled',
+                        'provisioning_lease_id' => null,
+                    ]);
+
+                throw new \RuntimeException(
+                    'Coordinator failed after a partial reservation update.'
+                );
+            }
+        };
+        $upgrades = new class($coordinator) extends ServiceUpgradeService
+        {
+            public function __construct(private object $coordinator) {}
+
+            protected function capacityService(): object
+            {
+                return $this->coordinator;
+            }
+        };
+        $upgrades->recordFailure(
+            $upgrade,
+            new \RuntimeException('Panel upgrade failed.'),
+            reservationLeaseId: 'lease-savepoint'
+        );
+
+        $reservation = DB::table('ptero_resource_reservations')
+            ->where('id', $reservationId)
+            ->firstOrFail();
+        $this->assertSame('paid_committed', $reservation->status);
+        $this->assertSame(
+            'lease-savepoint',
+            $reservation->provisioning_lease_id
+        );
+        $upgrade->refresh();
+        $this->assertSame(
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            $upgrade->status
+        );
+        $this->assertNotNull($upgrade->failure_alerted_at);
+        $this->assertStringContainsString(
+            'partial reservation update',
+            (string) $upgrade->last_error
         );
     }
 
@@ -307,6 +970,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                             'uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
                             'identifier' => 'existing',
                             'external_id' => (string) basename($url),
+                            'status' => null,
                             'user' => 44,
                             'egg' => 2,
                             'nest' => 1,
@@ -338,6 +1002,83 @@ class PterodactylReservationIntegrationTest extends TestCase
 
         $this->assertSame(72, $result['server']);
         $this->assertSame('https://panel.example.com/server/existing', $result['link']);
+    }
+
+    public function test_installing_external_server_retries_without_consuming_the_reservation(): void
+    {
+        $exception = $this->reservationServerStatusFailure(
+            'installing'
+        );
+
+        $this->assertNotInstanceOf(
+            PermanentProvisioningException::class,
+            $exception
+        );
+        $this->assertStringContainsString(
+            'provisioning will retry',
+            $exception->getMessage()
+        );
+    }
+
+    public function test_failed_install_states_are_permanent_and_never_consume_the_reservation(): void
+    {
+        foreach (['install_failed', 'reinstall_failed'] as $status) {
+            $exception = $this->reservationServerStatusFailure($status);
+
+            $this->assertInstanceOf(
+                PermanentProvisioningException::class,
+                $exception
+            );
+            $this->assertStringContainsString(
+                "terminal state {$status}",
+                $exception->getMessage()
+            );
+        }
+    }
+
+    public function test_reservation_activation_uses_the_exact_pterodactyl_status_contract(): void
+    {
+        $method = new \ReflectionMethod(
+            Pterodactyl::class,
+            'assertReservationServerInstallationReady'
+        );
+        $method->setAccessible(true);
+        $provisioner = new Pterodactyl([
+            'host' => 'https://panel.example.com',
+            'api_key' => 'secret',
+        ]);
+
+        $method->invoke(
+            $provisioner,
+            ['attributes' => ['status' => null]]
+        );
+        $this->addToAssertionCount(1);
+
+        try {
+            $method->invoke(
+                $provisioner,
+                ['attributes' => ['status' => 'restoring_backup']]
+            );
+            $this->fail('Expected transient restore state retry.');
+        } catch (\Exception $exception) {
+            $this->assertNotInstanceOf(
+                PermanentProvisioningException::class,
+                $exception
+            );
+        }
+
+        foreach ([
+            ['attributes' => ['status' => 'suspended']],
+            ['attributes' => ['status' => 'unknown']],
+            ['attributes' => []],
+        ] as $server) {
+            try {
+                $method->invoke($provisioner, $server);
+                $this->fail('Expected non-ready status rejection.');
+            } catch (PermanentProvisioningException $exception) {
+                $this->assertNotSame('', $exception->getMessage());
+            }
+        }
     }
 
     public function test_dynamic_resource_service_fails_closed_when_reservations_are_unavailable(): void
@@ -484,6 +1225,149 @@ class PterodactylReservationIntegrationTest extends TestCase
         $this->assertTrue($pterodactyl->terminateServer($service, [], []));
         $this->assertTrue($pterodactyl->deleted);
         $this->assertTrue($pterodactyl->terminateServer($service, [], []));
+    }
+
+    public function test_unpinned_cancellation_completes_when_external_service_id_is_absent(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_CANCELLATION_PENDING,
+        ]);
+        $context = $this->cancellationReconciliationContext($service);
+        $this->bindUnpinnedCancellationRuntime(
+            $service,
+            $context,
+            expectPin: false
+        );
+        $pterodactyl = $this->cancellationReconciliationProvisioner(
+            null,
+            $context['user_external_id']
+        );
+
+        $this->assertTrue(
+            $pterodactyl->terminateServer($service, [], [])
+        );
+        $this->assertSame(1, $pterodactyl->externalLookups);
+        $this->assertSame(0, $pterodactyl->userLookups);
+        $this->assertFalse($pterodactyl->deleteAttempted);
+    }
+
+    public function test_timed_out_create_is_proven_pinned_and_deleted_by_numeric_id(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_CANCELLATION_PENDING,
+        ]);
+        $context = $this->cancellationReconciliationContext($service);
+        $server = $this->cancellationCandidate($service);
+        $this->bindUnpinnedCancellationRuntime(
+            $service,
+            $context,
+            $server,
+            true
+        );
+        $pterodactyl = $this->cancellationReconciliationProvisioner(
+            $server,
+            $context['user_external_id']
+        );
+
+        $this->assertTrue(
+            $pterodactyl->terminateServer($service, [], [])
+        );
+        $this->assertTrue($pterodactyl->deleteAttempted);
+        $this->assertSame(71, $pterodactyl->deletedServerId);
+        $this->assertSame(1, $pterodactyl->externalLookups);
+        $this->assertSame(2, $pterodactyl->userLookups);
+        $this->assertSame(1, $pterodactyl->numericAbsenceChecks);
+    }
+
+    public function test_unpinned_cancellation_fails_closed_on_server_mismatch(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_CANCELLATION_PENDING,
+        ]);
+        $context = $this->cancellationReconciliationContext($service);
+        $server = $this->cancellationCandidate($service);
+        $server['attributes']['limits']['disk']++;
+        $this->bindUnpinnedCancellationRuntime(
+            $service,
+            $context,
+            expectPin: false
+        );
+        $pterodactyl = $this->cancellationReconciliationProvisioner(
+            $server,
+            $context['user_external_id']
+        );
+
+        try {
+            $pterodactyl->terminateServer($service, [], []);
+            $this->fail('Expected cancellation mismatch rejection.');
+        } catch (PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'reserved disk',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertFalse($pterodactyl->deleteAttempted);
+        $this->assertSame(1, $pterodactyl->externalLookups);
+        $this->assertSame(1, $pterodactyl->userLookups);
+    }
+
+    public function test_create_cancel_race_retries_without_external_lookup_or_delete(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_CANCELLATION_PENDING,
+        ]);
+        $context = $this->cancellationReconciliationContext(
+            $service,
+            provisioningInFlight: true
+        );
+        $this->bindUnpinnedCancellationRuntime(
+            $service,
+            $context,
+            expectPin: false
+        );
+        $pterodactyl = $this->cancellationReconciliationProvisioner(
+            $this->cancellationCandidate($service),
+            $context['user_external_id']
+        );
+
+        try {
+            $pterodactyl->terminateServer($service, [], []);
+            $this->fail('Expected active create retry.');
+        } catch (\Exception $exception) {
+            $this->assertNotInstanceOf(
+                PermanentProvisioningException::class,
+                $exception
+            );
+            $this->assertStringContainsString(
+                'still in flight',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(0, $pterodactyl->externalLookups);
+        $this->assertSame(0, $pterodactyl->userLookups);
+        $this->assertFalse($pterodactyl->deleteAttempted);
     }
 
     public function test_termination_never_deletes_a_replacement_with_the_same_external_id(): void
@@ -1265,6 +2149,715 @@ class PterodactylReservationIntegrationTest extends TestCase
         );
     }
 
+    public function test_duplicate_external_customer_identity_fails_before_email_fallback(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $externalId = "paymenter-user-{$service->user_id}";
+        $provisioner = new class(
+            [
+                'host' => 'https://panel.example.com',
+                'api_key' => 'secret',
+            ],
+            $externalId,
+            (string) $service->user->email
+        ) extends Pterodactyl
+        {
+            public int $externalIdReads = 0;
+
+            public int $emailReads = 0;
+
+            public int $postAttempts = 0;
+
+            public function __construct(
+                array $config,
+                private string $expectedExternalId,
+                private string $expectedEmail
+            ) {
+                parent::__construct($config);
+            }
+
+            public function request(
+                $url,
+                $method = 'get',
+                $data = []
+            ): array {
+                $method = strtolower($method);
+                if (
+                    $url === '/api/application/users'
+                    && $method === 'get'
+                    && data_get($data, 'filter.external_id') !== null
+                ) {
+                    $this->externalIdReads++;
+
+                    return [
+                        'data' => [
+                            $this->user(44),
+                            $this->user(45),
+                        ],
+                    ];
+                }
+                if (
+                    $url === '/api/application/users'
+                    && $method === 'get'
+                    && data_get($data, 'filter.email') !== null
+                ) {
+                    $this->emailReads++;
+
+                    return ['data' => [$this->user(44)]];
+                }
+                if (
+                    $url === '/api/application/users'
+                    && $method === 'post'
+                ) {
+                    $this->postAttempts++;
+
+                    return $this->user(44);
+                }
+
+                throw new \RuntimeException(
+                    "Unexpected request: {$method} {$url}"
+                );
+            }
+
+            /**
+             * @return array{attributes: array<string, mixed>}
+             */
+            private function user(int $id): array
+            {
+                return [
+                    'attributes' => [
+                        'id' => $id,
+                        'external_id' => $this->expectedExternalId,
+                        'email' => $this->expectedEmail,
+                    ],
+                ];
+            }
+        };
+        $method = new \ReflectionMethod(
+            Pterodactyl::class,
+            'resolvePterodactylUser'
+        );
+        $method->setAccessible(true);
+
+        try {
+            $method->invoke($provisioner, $service, $externalId);
+            $this->fail('Expected duplicate external identity rejection.');
+        } catch (PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'multiple customers for the immutable Paymenter external ID',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(1, $provisioner->externalIdReads);
+        $this->assertSame(0, $provisioner->emailReads);
+        $this->assertSame(0, $provisioner->postAttempts);
+    }
+
+    public function test_concurrent_first_customer_create_422_rereads_one_exact_identity(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $externalId = "paymenter-user-{$service->user_id}";
+        $provisioner = $this->userCreationConflictProvisioner(
+            $externalId,
+            strtoupper((string) $service->user->email),
+            true
+        );
+        $method = new \ReflectionMethod(
+            Pterodactyl::class,
+            'resolvePterodactylUser'
+        );
+        $method->setAccessible(true);
+
+        $this->assertSame(
+            44,
+            $method->invoke($provisioner, $service, $externalId)
+        );
+        $this->assertSame(1, $provisioner->postAttempts);
+        $this->assertSame(2, $provisioner->externalIdReads);
+        $this->assertSame(2, $provisioner->emailReads);
+    }
+
+    public function test_customer_create_422_with_different_email_fails_closed(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $externalId = "paymenter-user-{$service->user_id}";
+        $provisioner = $this->userCreationConflictProvisioner(
+            $externalId,
+            'different-customer@example.com',
+            true
+        );
+        $method = new \ReflectionMethod(
+            Pterodactyl::class,
+            'resolvePterodactylUser'
+        );
+        $method->setAccessible(true);
+
+        try {
+            $method->invoke($provisioner, $service, $externalId);
+            $this->fail('Expected conflicting customer rejection.');
+        } catch (PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'different email identity',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(1, $provisioner->postAttempts);
+        $this->assertSame(2, $provisioner->externalIdReads);
+        $this->assertSame(1, $provisioner->emailReads);
+    }
+
+    public function test_unrelated_customer_create_422_is_not_broadly_retried(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $externalId = "paymenter-user-{$service->user_id}";
+        $provisioner = $this->userCreationConflictProvisioner(
+            $externalId,
+            (string) $service->user->email,
+            false
+        );
+        $method = new \ReflectionMethod(
+            Pterodactyl::class,
+            'resolvePterodactylUser'
+        );
+        $method->setAccessible(true);
+
+        try {
+            $method->invoke($provisioner, $service, $externalId);
+            $this->fail('Expected unproven 422 rejection.');
+        } catch (PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'exact external identity could not be proven',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(1, $provisioner->postAttempts);
+        $this->assertSame(2, $provisioner->externalIdReads);
+        $this->assertSame(1, $provisioner->emailReads);
+    }
+
+    /**
+     * @return array{0: Service, 1: int}
+     */
+    private function confirmedRenewalFixture(string $status): array
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $fixture = $this->createProduct();
+        $user = User::factory()->create();
+        $service = Service::factory()->create([
+            'user_id' => $user->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => $status,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'price' => 10,
+            'expires_at' => now()->addMonth()->startOfDay(),
+        ]);
+        $checkoutInvoice = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'currency_code' => 'USD',
+            'status' => Invoice::STATUS_PAID,
+            'due_at' => now()->subMonth()->startOfDay(),
+        ]);
+        $checkoutInvoice->items()->create([
+            'reference_id' => $service->id,
+            'reference_type' => Service::class,
+            'description' => 'Original dynamic checkout',
+            'quantity' => 1,
+            'price' => 10,
+        ]);
+
+        $panelIdentity = hash(
+            'sha256',
+            'https://panel.example.com'
+        );
+        $payload = [
+            'customer_id' => $user->id,
+            'cart_id' => 1,
+            'server_extension_id' => 1,
+            'panel_identity' => $panelIdentity,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'location_id' => 3,
+            'node_id' => 7,
+            'resources' => [
+                'memory' => 8192,
+                'cpu' => 300,
+                'disk' => 61440,
+            ],
+            'calculated_price' => '10.00',
+            'pricing_version' => hash('sha256', 'renewal-fixture'),
+            'formula_version' => 'dynamic-pterodactyl-v1',
+            'config_options' => [],
+            'allocation_requirements' => [
+                'required_count' => 1,
+                'mappings' => [],
+                'allowed_port_ranges' => [],
+                'dedicated_ip' => false,
+            ],
+            'provisioning_identity' => [
+                'nest_id' => 1,
+                'egg_id' => 2,
+                'user_external_id' => "paymenter-user-{$user->id}",
+                'user_email' => strtolower((string) $user->email),
+            ],
+        ];
+        $reservationId = (int) DB::table(
+            'ptero_resource_reservations'
+        )->insertGetId([
+            'token' => hash(
+                'sha256',
+                "confirmed-renewal-{$service->id}"
+            ),
+            'purpose' => 'checkout',
+            'service_id' => $service->id,
+            'service_guard_id' => $service->id,
+            'invoice_id' => $checkoutInvoice->id,
+            'user_id' => $user->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'server_extension_id' => 1,
+            'panel_identity' => $panelIdentity,
+            'node_id' => 7,
+            'location_id' => 3,
+            'memory' => 8192,
+            'cpu' => 300,
+            'disk' => 61440,
+            'calculated_price' => 10,
+            'pricing_breakdown' => json_encode(
+                [],
+                JSON_THROW_ON_ERROR
+            ),
+            'configuration_payload' => json_encode(
+                $payload,
+                JSON_THROW_ON_ERROR
+            ),
+            'configuration_fingerprint' => app(
+                ReservationConfigurationService::class
+            )->fingerprint($payload),
+            'pricing_version' => $payload['pricing_version'],
+            'formula_version' => $payload['formula_version'],
+            'status' => 'confirmed',
+            'expires_at' => now()->subDay(),
+            'guaranteed_until' => now()->subDay(),
+            'paid_committed_at' => now()->subMonth(),
+            'consumed_at' => now()->subMonth()->addMinute(),
+            'external_server_id' => 72,
+            'external_user_id' => 44,
+            'external_server_uuid' =>
+                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+            'external_server_identifier' => 'renewal-fixture',
+            'created_at' => now()->subMonth(),
+            'updated_at' => now()->subMonth(),
+        ]);
+
+        return [$service->fresh(['product', 'plan']), $reservationId];
+    }
+
+    private function renewalInvoice(
+        Service $service,
+        mixed $dueAt = null,
+        mixed $price = null
+    ): Invoice {
+        $invoice = Invoice::factory()->create([
+            'user_id' => $service->user_id,
+            'currency_code' => $service->currency_code,
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => $dueAt ?? $service->expires_at,
+        ]);
+        $invoice->items()->create([
+            'reference_id' => $service->id,
+            'reference_type' => Service::class,
+            'description' => 'Service renewal',
+            'quantity' => $service->quantity,
+            'price' => $price ?? $service->price,
+        ]);
+
+        return $invoice->fresh();
+    }
+
+    private function ordinaryUpgrade(string $status): ServiceUpgrade
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_ACTIVE,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'price' => 10,
+        ]);
+
+        return ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => $status,
+            'type' => 'product',
+            'active_service_guard_id' => in_array($status, [
+                ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+                ServiceUpgrade::STATUS_PAID_COMMITTED,
+                ServiceUpgrade::STATUS_PROVISIONING,
+                ServiceUpgrade::STATUS_RETRYABLE_FAILED,
+                ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            ], true)
+                ? $service->id
+                : null,
+            'provisioning_attempts' =>
+                $status === ServiceUpgrade::STATUS_PROVISIONING ? 1 : 0,
+            'quoted_amount' => 10,
+            'currency_code' => 'USD',
+        ]);
+    }
+
+    private function insertUpgradeReservation(
+        ServiceUpgrade $upgrade,
+        array $overrides = []
+    ): int {
+        $status = (string) ($overrides['status'] ?? 'pending');
+
+        return (int) DB::table('ptero_resource_reservations')
+            ->insertGetId(array_merge([
+                'token' => hash(
+                    'sha256',
+                    "upgrade-reservation-{$upgrade->id}-{$status}"
+                ),
+                'purpose' => 'upgrade',
+                'service_id' => $upgrade->service_id,
+                'service_upgrade_id' => $upgrade->id,
+                'upgrade_guard_id' => in_array(
+                    $status,
+                    ['pending', 'paid_committed'],
+                    true
+                )
+                    ? $upgrade->id
+                    : null,
+                'user_id' => $upgrade->service->user_id,
+                'product_id' => $upgrade->product_id,
+                'plan_id' => $upgrade->plan_id,
+                'node_id' => 7,
+                'location_id' => 3,
+                'memory' => 8192,
+                'reserved_memory' => 4096,
+                'cpu' => 200,
+                'reserved_cpu' => 100,
+                'disk' => 30720,
+                'reserved_disk' => 10240,
+                'calculated_price' => 10,
+                'pricing_breakdown' => json_encode(
+                    [],
+                    JSON_THROW_ON_ERROR
+                ),
+                'status' => $status,
+                'expires_at' => now()->addDays(7),
+                'guaranteed_until' => now()->addDays(7),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ], $overrides));
+    }
+
+    private function reservationServerStatusFailure(
+        string $status
+    ): \Throwable {
+        $this->requireDynamicPterodactylRuntime();
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+        ]);
+        $reservation = [
+            'reservation_id' => 94,
+            'panel_identity' => hash(
+                'sha256',
+                'https://panel.example.com'
+            ),
+            'node_id' => 7,
+            'location_id' => 3,
+            'memory' => 8192,
+            'cpu' => 300,
+            'disk' => 61440,
+            'nest_id' => 1,
+            'egg_id' => 2,
+            'user_external_id' =>
+                "paymenter-user-{$service->user_id}",
+            'provisioning_lease_id' => 'lease-status',
+            'already_consumed' => false,
+            'allocations' => [[
+                'allocation_id' => 7001,
+                'ip' => '192.0.2.10',
+                'port' => 25565,
+                'environment_key' => 'SERVER_PORT',
+                'is_primary' => true,
+            ]],
+        ];
+        $recordedFailure = null;
+        $reservationService = Mockery::mock(ReservationService::class);
+        $reservationService->shouldReceive('beginProvisioning')
+            ->once()
+            ->andReturn($reservation);
+        $reservationService->shouldNotReceive('completeProvisioning');
+        $reservationService->shouldNotReceive(
+            'provisioningMayContinue'
+        );
+        $reservationService->shouldReceive('failProvisioning')
+            ->once()
+            ->with(
+                $service->id,
+                'lease-status',
+                Mockery::on(function (\Throwable $exception) use (
+                    &$recordedFailure
+                ): bool {
+                    $recordedFailure = $exception;
+
+                    return true;
+                })
+            );
+        $this->app->instance(
+            ReservationService::class,
+            $reservationService
+        );
+        if (! Extension::query()
+            ->where('extension', 'DynamicPterodactyl')
+            ->where('enabled', true)
+            ->exists()
+        ) {
+            $this->enableReservationExtension();
+        }
+
+        $provisioner = new class(
+            [
+                'host' => 'https://panel.example.com',
+                'api_key' => 'secret',
+            ],
+            $status,
+            (string) $service->user->email
+        ) extends Pterodactyl
+        {
+            public function __construct(
+                array $config,
+                private string $serverStatus,
+                private string $expectedEmail
+            ) {
+                parent::__construct($config);
+            }
+
+            public function request(
+                $url,
+                $method = 'get',
+                $data = []
+            ): array {
+                if (
+                    $url === '/api/application/users'
+                    && strtolower($method) === 'get'
+                ) {
+                    $externalId = (string) data_get(
+                        $data,
+                        'filter.external_id',
+                        ''
+                    );
+
+                    return [
+                        'data' => $externalId !== '' ? [[
+                            'attributes' => [
+                                'id' => 44,
+                                'external_id' => $externalId,
+                                'email' => $this->expectedEmail,
+                            ],
+                        ]] : [],
+                    ];
+                }
+                if (
+                    str_starts_with(
+                        $url,
+                        '/api/application/servers/external/'
+                    )
+                ) {
+                    return [
+                        'attributes' => [
+                            'id' => 72,
+                            'uuid' =>
+                                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+                            'identifier' => 'existing',
+                            'external_id' =>
+                                (string) basename($url),
+                            'status' => $this->serverStatus,
+                            'user' => 44,
+                            'egg' => 2,
+                            'nest' => 1,
+                            'node' => 7,
+                            'allocation' => 7001,
+                            'feature_limits' => [
+                                'allocations' => 0,
+                            ],
+                            'limits' => [
+                                'memory' => 8192,
+                                'cpu' => 300,
+                                'disk' => 61440,
+                            ],
+                            'relationships' => [
+                                'allocations' => [
+                                    'data' => [[
+                                        'attributes' => [
+                                            'id' => 7001,
+                                        ],
+                                    ]],
+                                ],
+                            ],
+                        ],
+                    ];
+                }
+
+                throw new \RuntimeException(
+                    "Unexpected request: {$method} {$url}"
+                );
+            }
+        };
+
+        try {
+            $provisioner->createServer(
+                $service,
+                $this->baseSettings(),
+                []
+            );
+        } catch (\Throwable $exception) {
+            $this->assertSame($exception, $recordedFailure);
+
+            return $exception;
+        }
+
+        $this->fail(
+            "Expected reservation activation to reject status {$status}."
+        );
+    }
+
+    private function userCreationConflictProvisioner(
+        string $expectedExternalId,
+        string $resolvedEmail,
+        bool $exposeExactIdentity
+    ): Pterodactyl {
+        return new class(
+            [
+                'host' => 'https://panel.example.com',
+                'api_key' => 'secret',
+            ],
+            $expectedExternalId,
+            $resolvedEmail,
+            $exposeExactIdentity
+        ) extends Pterodactyl
+        {
+            public int $postAttempts = 0;
+
+            public int $externalIdReads = 0;
+
+            public int $emailReads = 0;
+
+            private bool $postFailed = false;
+
+            public function __construct(
+                array $config,
+                private string $expectedExternalId,
+                private string $resolvedEmail,
+                private bool $exposeExactIdentity
+            ) {
+                parent::__construct($config);
+            }
+
+            public function request(
+                $url,
+                $method = 'get',
+                $data = []
+            ): array {
+                $method = strtolower($method);
+                if (
+                    $url === '/api/application/users'
+                    && $method === 'get'
+                ) {
+                    if (
+                        data_get($data, 'filter.external_id') !== null
+                    ) {
+                        $this->externalIdReads++;
+
+                        return [
+                            'data' => $this->postFailed
+                                && $this->exposeExactIdentity
+                                    ? [$this->resolvedUser()]
+                                    : [],
+                        ];
+                    }
+                    if (data_get($data, 'filter.email') !== null) {
+                        $this->emailReads++;
+
+                        return [
+                            'data' => $this->postFailed
+                                && $this->exposeExactIdentity
+                                    ? [$this->resolvedUser()]
+                                    : [],
+                        ];
+                    }
+                }
+                if (
+                    $url === '/api/application/users'
+                    && $method === 'post'
+                ) {
+                    $this->postAttempts++;
+                    $this->postFailed = true;
+
+                    throw new PermanentProvisioningException(
+                        'The external ID or email has already been taken.',
+                        422
+                    );
+                }
+
+                throw new \RuntimeException(
+                    "Unexpected request: {$method} {$url}"
+                );
+            }
+
+            /**
+             * @return array<string, mixed>
+             */
+            private function resolvedUser(): array
+            {
+                return [
+                    'attributes' => [
+                        'id' => 44,
+                        'external_id' => $this->expectedExternalId,
+                        'email' => $this->resolvedEmail,
+                    ],
+                ];
+            }
+        };
+    }
+
     private function fakeProvisioner(string $expectedEmail = ''): Pterodactyl
     {
         $provisioner = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret']) extends Pterodactyl
@@ -1292,6 +2885,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                             'uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
                             'identifier' => 'created',
                             'external_id' => (string) basename($url),
+                            'status' => null,
                             'user' => 44,
                             'egg' => 2,
                             'nest' => 1,
@@ -1512,6 +3106,253 @@ class PterodactylReservationIntegrationTest extends TestCase
         ];
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function unpinnedCancellationIdentity(Service $service): array
+    {
+        return [
+            'reservation_id' => 93,
+            'status' => 'paid_committed',
+            'panel_identity' => hash(
+                'sha256',
+                'https://panel.example.com'
+            ),
+            'node_id' => 7,
+            'external_server_id' => null,
+            'external_user_id' => null,
+            'external_server_uuid' => null,
+            'external_server_identifier' => null,
+            'external_server_external_id' => (string) $service->id,
+            'user_external_id' =>
+                "paymenter-user-{$service->user_id}",
+            'user_email' => strtolower((string) $service->user->email),
+            'nest_id' => 1,
+            'egg_id' => 2,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function cancellationReconciliationContext(
+        Service $service,
+        bool $provisioningInFlight = false
+    ): array {
+        return [
+            ...$this->unpinnedCancellationIdentity($service),
+            'configuration_fingerprint' => str_repeat('a', 64),
+            'location_id' => 3,
+            'memory' => 8192,
+            'cpu' => 300,
+            'disk' => 61440,
+            'client_allocation_limit' => 0,
+            'allocations' => [[
+                'allocation_id' => 7001,
+                'ip' => '192.0.2.10',
+                'port' => 25565,
+                'environment_key' => 'SERVER_PORT',
+                'is_primary' => true,
+            ]],
+            'provisioning_in_flight' => $provisioningInFlight,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function cancellationCandidate(Service $service): array
+    {
+        return [
+            'attributes' => [
+                'id' => 71,
+                'uuid' =>
+                    '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+                'identifier' => 'created',
+                'external_id' => (string) $service->id,
+                'user' => 44,
+                'node' => 7,
+                'nest' => 1,
+                'egg' => 2,
+                'allocation' => 7001,
+                'limits' => [
+                    'memory' => 8192,
+                    'cpu' => 300,
+                    'disk' => 61440,
+                ],
+                'feature_limits' => [
+                    'allocations' => 0,
+                ],
+                'relationships' => [
+                    'allocations' => [
+                        'data' => [[
+                            'attributes' => ['id' => 7001],
+                        ]],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     * @param  array<string, mixed>|null  $server
+     */
+    private function bindUnpinnedCancellationRuntime(
+        Service $service,
+        array $context,
+        ?array $server = null,
+        bool $expectPin = false
+    ): void {
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class extends DurableFulfillmentService
+            {
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return true;
+                }
+            }
+        );
+
+        $runtime = Mockery::mock(ReservationService::class);
+        $runtime->shouldReceive('serverLifecycleIdentity')
+            ->once()
+            ->with(Mockery::on(
+                fn (Service $candidate): bool =>
+                    (int) $candidate->id === (int) $service->id
+            ))
+            ->andReturn($this->unpinnedCancellationIdentity($service));
+        $runtime->shouldReceive('cancellationReconciliationContext')
+            ->once()
+            ->with(Mockery::type(Service::class))
+            ->andReturn($context);
+        if ($expectPin) {
+            $attributes = $server['attributes'] ?? [];
+            $runtime->shouldReceive('pinCancellationServerIdentity')
+                ->once()
+                ->with(
+                    Mockery::type(Service::class),
+                    Mockery::on(
+                        fn (array $candidate): bool =>
+                            ($candidate['attributes']['id'] ?? null) === 71
+                    ),
+                    44
+                )
+                ->andReturn([
+                    ...$context,
+                    'external_server_id' => 71,
+                    'external_user_id' => 44,
+                    'external_server_uuid' => $attributes['uuid'],
+                    'external_server_identifier' =>
+                        $attributes['identifier'],
+                ]);
+        } else {
+            $runtime->shouldNotReceive(
+                'pinCancellationServerIdentity'
+            );
+        }
+        $this->app->instance(ReservationService::class, $runtime);
+        $this->enableReservationExtension();
+    }
+
+    private function cancellationReconciliationProvisioner(
+        ?array $server,
+        string $expectedUserExternalId
+    ): Pterodactyl {
+        return new class(
+            [
+                'host' => 'https://panel.example.com',
+                'api_key' => 'secret',
+            ],
+            $server,
+            $expectedUserExternalId
+        ) extends Pterodactyl
+        {
+            public int $externalLookups = 0;
+
+            public int $userLookups = 0;
+
+            public int $numericAbsenceChecks = 0;
+
+            public bool $deleteAttempted = false;
+
+            public ?int $deletedServerId = null;
+
+            public function __construct(
+                array $config,
+                private ?array $candidate,
+                private string $expectedUserExternalId
+            ) {
+                parent::__construct($config);
+            }
+
+            public function request(
+                $url,
+                $method = 'get',
+                $data = []
+            ): array {
+                $method = strtolower($method);
+                if (
+                    str_starts_with(
+                        $url,
+                        '/api/application/servers/external/'
+                    )
+                    && $method === 'get'
+                ) {
+                    $this->externalLookups++;
+                    if ($this->candidate === null) {
+                        throw new \Exception('Server not found', 404);
+                    }
+
+                    return $this->candidate;
+                }
+                if (
+                    $url === '/api/application/users'
+                    && $method === 'get'
+                ) {
+                    $this->userLookups++;
+
+                    return [
+                        'data' => [[
+                            'attributes' => [
+                                'id' => 44,
+                                'external_id' =>
+                                    $this->expectedUserExternalId,
+                            ],
+                        ]],
+                    ];
+                }
+                if (
+                    $url === '/api/application/servers/71'
+                    && $method === 'delete'
+                ) {
+                    $this->deleteAttempted = true;
+                    $this->deletedServerId = 71;
+                    $this->candidate = null;
+
+                    return [];
+                }
+                if (
+                    $url === '/api/application/servers/71'
+                    && $method === 'get'
+                ) {
+                    $this->numericAbsenceChecks++;
+                    if ($this->candidate === null) {
+                        throw new \Exception('Server not found', 404);
+                    }
+
+                    return $this->candidate;
+                }
+
+                throw new \RuntimeException(
+                    "Unexpected request: {$method} {$url}"
+                );
+            }
+        };
+    }
+
     private function enableReservationExtension(): void
     {
         Extension::create([
@@ -1522,17 +3363,33 @@ class PterodactylReservationIntegrationTest extends TestCase
         ]);
     }
 
+    protected function migrateDatabases(): void
+    {
+        // Dynamic Pterodactyl's oldest migration predates Paymenter's cart
+        // tables but references them by foreign key. Production installs run
+        // core migrations first and extension migrations second; preserve that
+        // same ordering when RefreshDatabase rebuilds a MariaDB test schema.
+        $this->artisan('migrate:fresh', $this->migrateFreshUsing());
+
+        if ($this->dynamicPterodactylMigrationsAreAvailable()) {
+            $this->migrateDynamicPterodactyl();
+        }
+    }
+
     protected function beforeRefreshingDatabase(): void
     {
-        $migrationPath = base_path(
-            'extensions/Others/DynamicPterodactyl/database/migrations'
-        );
         if (
-            class_exists(ReservationService::class)
-            && is_dir($migrationPath)
+            ! RefreshDatabaseState::$migrated
+            || ! $this->dynamicPterodactylMigrationsAreAvailable()
+            || $this->dynamicPterodactylMigrationsAreCurrent()
         ) {
-            $this->app->make('migrator')->path($migrationPath);
+            return;
         }
+
+        // RefreshDatabase's migrated flag is shared by the whole PHPUnit
+        // process. If another test migrated only Paymenter first, install the
+        // extension schema now, before this test opens its transaction.
+        $this->migrateDynamicPterodactyl();
     }
 
     private function requireDynamicPterodactylRuntime(): void
@@ -1547,5 +3404,34 @@ class PterodactylReservationIntegrationTest extends TestCase
             Schema::hasTable('ptero_resource_reservations'),
             'The DynamicPterodactyl migration set was not loaded.'
         );
+    }
+
+    private function dynamicPterodactylMigrationsAreAvailable(): bool
+    {
+        return class_exists(ReservationService::class)
+            && is_dir(base_path(
+                'extensions/Others/DynamicPterodactyl/database/migrations'
+            ));
+    }
+
+    private function dynamicPterodactylMigrationsAreCurrent(): bool
+    {
+        return Schema::hasTable('ptero_resource_reservations')
+            && Schema::hasTable('migrations')
+            && DB::table('migrations')
+                ->where(
+                    'migration',
+                    '2026_07_26_000030_enforce_one_checkout_commitment_per_service'
+                )
+                ->exists();
+    }
+
+    private function migrateDynamicPterodactyl(): void
+    {
+        $this->artisan('migrate', [
+            '--path' =>
+                'extensions/Others/DynamicPterodactyl/database/migrations',
+            '--force' => true,
+        ]);
     }
 }

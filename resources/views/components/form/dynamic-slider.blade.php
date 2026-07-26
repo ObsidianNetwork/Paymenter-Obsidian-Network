@@ -11,7 +11,6 @@
     $pricing = $metadata['pricing'] ?? [];
     $pricingModel = $pricing['model'] ?? 'linear';
     $ratePerUnit = $pricing['rate_per_unit'] ?? 0;
-    $basePrice = $pricing['base_price'] ?? 0;
     $tiers = $pricing['tiers'] ?? [];
     $includedUnits = $pricing['included_units'] ?? 0;
     $overageRate = $pricing['overage_rate'] ?? 0;
@@ -19,6 +18,11 @@
     $billingUnit = $plan->billing_unit ?? 'month';
     $currencySymbol = config('settings.currency_sign', '$');
     $billingSuffix = '/ ' . ($billingPeriod > 1 ? $billingPeriod . ' ' : '') . $billingUnit . ($billingPeriod > 1 ? 's' : '');
+    $sliderErrorId = 'slider-error-' . $config->id;
+    $sliderDescribedBy = 'slider-price-' . $config->id . ' slider-hint-' . $config->id;
+    if ($errors->has($name)) {
+        $sliderDescribedBy .= ' ' . $sliderErrorId;
+    }
 @endphp
 <div x-data="{
     value: $wire.entangle('{{ $name }}').live,
@@ -33,7 +37,9 @@
     resourceType: @js($resourceType),
     pricingModel: @js($pricingModel),
     ratePerUnit: {{ $ratePerUnit }},
-    basePrice: {{ $basePrice }},
+    // Slider badges show this option's marginal charge. The one shared base
+    // is rendered from Plan::dynamicSliderBasePrice() in the order summary.
+    basePrice: 0,
     tiers: @js($tiers),
     includedUnits: {{ $includedUnits }},
     overageRate: {{ $overageRate }},
@@ -160,6 +166,21 @@
         this.updateProgress();
     },
 
+    applyKeyboardValue(nextValue) {
+        const clamped = Math.min(this.max, Math.max(this.min, nextValue));
+
+        if (this.numericValue === clamped) {
+            return;
+        }
+
+        this.value = clamped;
+        this.handleInput();
+        this.$dispatch('slider-change', {
+            resourceType: this.resourceType,
+            value: this.numericValue,
+        });
+    },
+
     applyCapacityQuote(quote) {
         const bounds = Object.values(quote?.bounds || {});
         const bound = bounds.find((candidate) => Number(candidate?.config_option_id) === this.optionId);
@@ -202,9 +223,9 @@
         this.updateProgress();
     }
 }"
-    x-on:dynamic-capacity-loading.window="if (stockManaged) stockDisabled = true"
+    x-on:dynamic-capacity-loading.window="if (stockManaged) stockDisabled = false"
     x-on:dynamic-capacity-updated.window="applyCapacityQuote($event.detail)"
-    x-on:dynamic-capacity-failed.window="if (stockManaged) stockDisabled = true"
+    x-on:dynamic-capacity-failed.window="if (stockManaged) stockDisabled = false"
     class="flex flex-col gap-1 relative"
 >
     <label id="slider-label-{{ $config->id }}" for="{{ $name }}" class="mb-1 text-sm text-primary-100">
@@ -230,22 +251,29 @@
             :disabled="stockDisabled"
             x-model="value"
             @input="handleInput(); $dispatch('slider-change', { resourceType, value: numericValue })"
-            x-on:keydown.page-up.prevent="value = Math.min(max, numericValue + step * 10)"
-            x-on:keydown.page-down.prevent="value = Math.max(min, numericValue - step * 10)"
-            x-on:keydown.home.prevent="value = min"
-            x-on:keydown.end.prevent="value = max"
+            x-on:keydown.page-up.prevent="applyKeyboardValue(numericValue + step * 10)"
+            x-on:keydown.page-down.prevent="applyKeyboardValue(numericValue - step * 10)"
+            x-on:keydown.home.prevent="applyKeyboardValue(min)"
+            x-on:keydown.end.prevent="applyKeyboardValue(max)"
             role="slider"
             :aria-valuemin="min"
             :aria-valuemax="max"
             :aria-valuenow="value"
             :aria-valuetext="formattedValue"
+            aria-invalid="{{ $errors->has($name) ? 'true' : 'false' }}"
+            @if ($errors->has($name))
+                aria-errormessage="{{ $sliderErrorId }}"
+            @endif
             aria-labelledby="slider-label-{{ $config->id }}"
-            aria-describedby="slider-price-{{ $config->id }} slider-hint-{{ $config->id }}"
+            aria-describedby="{{ $sliderDescribedBy }}"
             name="{{ $name }}"
             id="{{ $name }}" />
     </div>
     <output id="slider-price-{{ $config->id }}" role="status" aria-live="polite" aria-atomic="true" class="sr-only" x-text="formattedPrice" wire:ignore></output>
     <span id="slider-hint-{{ $config->id }}" class="sr-only" wire:ignore>Use arrow keys to adjust, Page Up/Down for larger steps, Home and End for minimum and maximum.</span>
+    @error($name)
+        <p id="{{ $sliderErrorId }}" role="alert" class="text-xs text-red-500">{{ $message }}</p>
+    @enderror
     <!-- Value and Price Display -->
     <div class="flex justify-between items-center mt-2 px-2.5">
         <div class="flex items-center gap-2">

@@ -81,6 +81,15 @@ class DynamicSliderValueRuleTest extends TestCase
             'max' => StrictInteger::MAX_STORED_SLIDER_VALUE + 1,
         ]));
         $this->assertSame([], $this->metadataErrors($base));
+        $this->assertNotEmpty($this->metadataErrors([
+            ...$base,
+            'resource_type' => 'memory',
+        ]));
+        $this->assertSame([], $this->metadataErrors([
+            ...$base,
+            'resource_type' => 'memory',
+            'min' => 1024,
+        ]));
     }
 
     public function test_metadata_rule_accepts_only_lossless_whole_form_floats(): void

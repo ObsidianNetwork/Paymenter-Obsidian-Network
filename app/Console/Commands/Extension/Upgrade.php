@@ -28,8 +28,9 @@ class Upgrade extends Command
      */
     public function handle()
     {
-        app(ExtensionLifecycleGuard::class)
-            ->assertCanUpgrade((string) $this->argument('name'));
+        $lifecycle = app(ExtensionLifecycleGuard::class);
+        $lifecycle->assertCanUpgrade((string) $this->argument('name'));
+        $lifecycle->assertCanActivate((string) $this->argument('name'));
 
         $extensionClass = 'Paymenter\\Extensions\\' . ucfirst($this->argument('type')) . 's\\' . ucfirst($this->argument('name')) . '\\' . ucfirst($this->argument('name'));
         if (!class_exists($extensionClass)) {

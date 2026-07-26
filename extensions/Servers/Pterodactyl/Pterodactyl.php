@@ -386,6 +386,9 @@ class Pterodactyl extends Server
                         (int) $settings['egg_id'],
                         (int) $settings['nest_id']
                     );
+                    $this->assertReservationServerInstallationReady(
+                        $existingServer
+                    );
                     $activated = $reservationService->completeProvisioning(
                         $service,
                         $reservation['provisioning_lease_id'],
@@ -502,6 +505,7 @@ class Pterodactyl extends Server
                     (int) $settings['egg_id'],
                     (int) $settings['nest_id']
                 );
+                $this->assertReservationServerInstallationReady($server);
                 $activated = $reservationService->completeProvisioning(
                     $service,
                     $reservation['provisioning_lease_id'],
@@ -834,6 +838,57 @@ class Pterodactyl extends Server
     }
 
     /**
+     * Pterodactyl 1.12.3 exposes the server installation state as `status`.
+     * A successfully installed server has a null status. Never consume a paid
+     * reservation while installation is unfinished or failed.
+     *
+     * @param  array<string, mixed>  $server
+     */
+    private function assertReservationServerInstallationReady(
+        array $server
+    ): void {
+        $attributes = $server['attributes'] ?? null;
+        if (
+            ! is_array($attributes)
+            || ! array_key_exists('status', $attributes)
+        ) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl did not return a verifiable server installation status.'
+            );
+        }
+
+        $status = $attributes['status'];
+        if ($status === null) {
+            return;
+        }
+        if (! is_string($status)) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl returned an invalid server installation status.'
+            );
+        }
+        if (in_array($status, [
+            'installing',
+            'restoring_backup',
+        ], true)) {
+            throw new Exception(
+                "Pterodactyl server is {$status}; provisioning will retry."
+            );
+        }
+        if (in_array($status, [
+            'install_failed',
+            'reinstall_failed',
+        ], true)) {
+            throw new PermanentProvisioningException(
+                "Pterodactyl server installation is in terminal state {$status}; operator reconciliation is required."
+            );
+        }
+
+        throw new PermanentProvisioningException(
+            "Pterodactyl server is not ready for activation (status: {$status})."
+        );
+    }
+
+    /**
      * A Paymenter external ID is a lookup key, not proof of ownership. Every
      * lifecycle action for a reservation-backed service must also match the
      * immutable panel, numeric ID, UUID, identifier, owner, node, nest, and
@@ -992,6 +1047,250 @@ class Pterodactyl extends Server
     }
 
     /**
+     * Distinguish the one legitimate unpinned state from a corrupted partial
+     * identity. A paid create that timed out may have no external fields at
+     * all; any partial set must stop rather than broadening reconciliation.
+     *
+     * @param  array<string, mixed>  $identity
+     */
+    private function lifecycleIdentityIsUnpinned(array $identity): bool
+    {
+        $values = [
+            $identity['external_server_id'] ?? null,
+            $identity['external_user_id'] ?? null,
+            $identity['external_server_uuid'] ?? null,
+            $identity['external_server_identifier'] ?? null,
+        ];
+        $present = collect($values)
+            ->filter(fn ($value): bool => $value !== null)
+            ->count();
+        if ($present === 0) {
+            return true;
+        }
+        if ($present !== count($values)) {
+            throw new PermanentProvisioningException(
+                'The durable Pterodactyl server identity is partial; cancellation reconciliation was stopped.'
+            );
+        }
+
+        return false;
+    }
+
+    /**
+     * Reconcile only the immutable Paymenter service external ID, then prove
+     * the complete signed checkout contract before pinning a numeric target.
+     * This method performs no customer creation or adoption.
+     *
+     * @param  array<string, mixed>  $identity
+     * @return array<string, mixed>|false
+     */
+    private function reconcileUnpinnedCancellationServer(
+        Service $service,
+        array $identity
+    ): array|false {
+        $reservationServiceClass =
+            'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
+        $reservationService = app($reservationServiceClass);
+        if (
+            ! method_exists(
+                $reservationService,
+                'cancellationReconciliationContext'
+            )
+            || ! method_exists(
+                $reservationService,
+                'pinCancellationServerIdentity'
+            )
+        ) {
+            throw new PermanentProvisioningException(
+                'The durable cancellation reconciliation runtime is unavailable.'
+            );
+        }
+
+        $context = $reservationService
+            ->cancellationReconciliationContext($service);
+        if (! is_array($context)) {
+            throw new PermanentProvisioningException(
+                'The reservation-backed cancellation has no signed checkout context.'
+            );
+        }
+        $this->assertCancellationReconciliationContext(
+            $service,
+            $identity,
+            $context
+        );
+        if ($context['provisioning_in_flight']) {
+            throw new Exception(
+                'Provisioning is still in flight; cancellation will retry.'
+            );
+        }
+
+        $server = $this->getServer(
+            $service->id,
+            failIfNotFound: false,
+            raw: true
+        );
+        if ($server === false) {
+            return false;
+        }
+
+        $users = $this->matchingPterodactylUsers(
+            ['external_id' => $context['user_external_id']],
+            'external_id',
+            $context['user_external_id']
+        );
+        if (count($users) !== 1) {
+            throw new PermanentProvisioningException(
+                'The cancellation candidate customer cannot be proven from its immutable external ID.'
+            );
+        }
+        $externalUserId = $this->pterodactylUserId($users[0]);
+        $this->assertServerMatchesReservation(
+            $server,
+            $context,
+            (int) $service->id,
+            $externalUserId,
+            (int) $context['egg_id'],
+            (int) $context['nest_id']
+        );
+
+        $pinnedIdentity = $reservationService
+            ->pinCancellationServerIdentity(
+                $service,
+                $server,
+                $externalUserId
+            );
+        if (! is_array($pinnedIdentity)) {
+            throw new PermanentProvisioningException(
+                'The cancellation candidate could not be pinned durably.'
+            );
+        }
+        $this->assertDurableLifecycleServer(
+            $service,
+            $server,
+            $pinnedIdentity
+        );
+
+        return $server;
+    }
+
+    /**
+     * @param  array<string, mixed>  $identity
+     * @param  array<string, mixed>  $context
+     */
+    private function assertCancellationReconciliationContext(
+        Service $service,
+        array $identity,
+        array $context
+    ): void {
+        $expectedUserExternalId =
+            "paymenter-user-{$service->user_id}";
+        $fingerprint = $context['configuration_fingerprint'] ?? null;
+        if (
+            ! is_string($fingerprint)
+            || preg_match('/^[a-f0-9]{64}$/D', $fingerprint) !== 1
+            || ($context['status'] ?? null) !== 'paid_committed'
+            || ! is_bool($context['provisioning_in_flight'] ?? null)
+            || ! is_string($context['panel_identity'] ?? null)
+            || ! hash_equals(
+                $this->panelIdentity(),
+                $context['panel_identity']
+            )
+            || ! is_string(
+                $context['external_server_external_id'] ?? null
+            )
+            || ! hash_equals(
+                (string) $service->id,
+                $context['external_server_external_id']
+            )
+            || ! is_string($context['user_external_id'] ?? null)
+            || ! hash_equals(
+                $expectedUserExternalId,
+                $context['user_external_id']
+            )
+            || ! is_numeric($context['reservation_id'] ?? null)
+            || (int) $context['reservation_id']
+                !== (int) ($identity['reservation_id'] ?? 0)
+            || ! is_string($identity['panel_identity'] ?? null)
+            || ! hash_equals(
+                $context['panel_identity'],
+                $identity['panel_identity']
+            )
+            || ! is_string($identity['user_external_id'] ?? null)
+            || ! hash_equals(
+                $context['user_external_id'],
+                $identity['user_external_id']
+            )
+        ) {
+            throw new PermanentProvisioningException(
+                'The signed cancellation reconciliation context is invalid.'
+            );
+        }
+
+        foreach (['node_id', 'nest_id', 'egg_id'] as $field) {
+            if (
+                ! is_numeric($context[$field] ?? null)
+                || (int) $context[$field] <= 0
+                || ! is_numeric($identity[$field] ?? null)
+                || (int) $context[$field]
+                    !== (int) $identity[$field]
+            ) {
+                throw new PermanentProvisioningException(
+                    "The signed cancellation context has an invalid {$field}."
+                );
+            }
+        }
+        foreach (['memory', 'cpu', 'disk'] as $resource) {
+            if (
+                ! is_numeric($context[$resource] ?? null)
+                || (int) $context[$resource] <= 0
+            ) {
+                throw new PermanentProvisioningException(
+                    "The signed cancellation context has an invalid {$resource}."
+                );
+            }
+        }
+        if (
+            ! is_numeric($context['client_allocation_limit'] ?? null)
+            || (int) $context['client_allocation_limit'] !== 0
+            || ! is_array($context['allocations'] ?? null)
+            || $context['allocations'] === []
+        ) {
+            throw new PermanentProvisioningException(
+                'The signed cancellation context has an invalid allocation contract.'
+            );
+        }
+
+        $allocationIds = [];
+        $primaryCount = 0;
+        foreach ($context['allocations'] as $allocation) {
+            $allocationId = is_array($allocation)
+                ? StrictInteger::parse(
+                    $allocation['allocation_id'] ?? null
+                )
+                : null;
+            if (
+                $allocationId === null
+                || $allocationId <= 0
+                || ! is_bool($allocation['is_primary'] ?? null)
+            ) {
+                throw new PermanentProvisioningException(
+                    'The signed cancellation context contains an invalid allocation.'
+                );
+            }
+            $allocationIds[] = $allocationId;
+            $primaryCount += $allocation['is_primary'] ? 1 : 0;
+        }
+        if (
+            count(array_unique($allocationIds)) !== count($allocationIds)
+            || $primaryCount !== 1
+        ) {
+            throw new PermanentProvisioningException(
+                'The signed cancellation context does not contain one exact primary allocation.'
+            );
+        }
+    }
+
+    /**
      * Resolve a lifecycle target by its immutable numeric server ID. Static
      * services retain the legacy external-ID lookup.
      *
@@ -1084,11 +1383,16 @@ class Pterodactyl extends Server
         }
 
         if ($expectedExternalId !== null) {
-            $byExternalId = $this->matchingPterodactylUsers(
+            $byExternalId = $this->pterodactylUserMatches(
                 ['external_id' => $expectedExternalId],
                 'external_id',
                 $expectedExternalId
             );
+            if (count($byExternalId) > 1) {
+                throw new PermanentProvisioningException(
+                    'Pterodactyl returned multiple customers for the immutable Paymenter external ID.'
+                );
+            }
             if (count($byExternalId) === 1) {
                 $attributes = $byExternalId[0];
                 $userId = $this->pterodactylUserId($attributes);
@@ -1229,17 +1533,43 @@ class Pterodactyl extends Server
         if ($expectedExternalId !== null) {
             $create['external_id'] = $expectedExternalId;
         }
-        $createdAttributes = (array) (
-            $this->request('/api/application/users', 'post', $create)['attributes']
-                ?? []
-        );
+        try {
+            $createdAttributes = (array) (
+                $this->request(
+                    '/api/application/users',
+                    'post',
+                    $create
+                )['attributes'] ?? []
+            );
+        } catch (PermanentProvisioningException $exception) {
+            if (
+                $exception->getCode() !== 422
+                || $expectedExternalId === null
+            ) {
+                throw $exception;
+            }
+
+            $createdAttributes =
+                $this->reconcileConcurrentPterodactylUserCreate(
+                    $expectedExternalId,
+                    (string) $orderUser->email,
+                    $exception
+                );
+        }
         $userId = $this->pterodactylUserId($createdAttributes);
         if (
-            $expectedExternalId !== null
-            && ! hash_equals(
-                $expectedExternalId,
-                (string) ($createdAttributes['external_id'] ?? '')
+            (
+                $expectedExternalId !== null
+                && ! hash_equals(
+                    $expectedExternalId,
+                    (string) (
+                        $createdAttributes['external_id'] ?? ''
+                    )
+                )
             )
+            || $this->normalizeEmail(
+                (string) ($createdAttributes['email'] ?? '')
+            ) !== $this->normalizeEmail((string) $orderUser->email)
         ) {
             throw new PermanentProvisioningException(
                 'Pterodactyl did not create the expected customer identity.'
@@ -1247,6 +1577,67 @@ class Pterodactyl extends Server
         }
 
         return $userId;
+    }
+
+    /**
+     * A 422 from user creation is recoverable only when a concurrent worker
+     * created the exact same immutable customer. Re-read by external ID and
+     * independently by email; never retry the POST or adopt a merely similar
+     * account.
+     *
+     * @return array<string, mixed>
+     */
+    private function reconcileConcurrentPterodactylUserCreate(
+        string $expectedExternalId,
+        string $expectedEmail,
+        PermanentProvisioningException $createFailure
+    ): array {
+        $byExternalId = $this->matchingPterodactylUsers(
+            ['external_id' => $expectedExternalId],
+            'external_id',
+            $expectedExternalId
+        );
+        if (count($byExternalId) !== 1) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl rejected customer creation, and the exact external identity could not be proven.',
+                previous: $createFailure
+            );
+        }
+
+        $attributes = $byExternalId[0];
+        $userId = $this->pterodactylUserId($attributes);
+        if (
+            $this->normalizeEmail(
+                (string) ($attributes['email'] ?? '')
+            ) !== $this->normalizeEmail($expectedEmail)
+        ) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl customer creation conflicted with a different email identity.',
+                previous: $createFailure
+            );
+        }
+
+        $byEmail = $this->matchingPterodactylUsers(
+            ['email' => $expectedEmail],
+            'email',
+            $expectedEmail,
+            caseInsensitive: true
+        );
+        if (
+            count($byEmail) !== 1
+            || $this->pterodactylUserId($byEmail[0]) !== $userId
+            || ! hash_equals(
+                $expectedExternalId,
+                (string) ($byEmail[0]['external_id'] ?? '')
+            )
+        ) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl customer creation conflict did not resolve to one exact external ID and email.',
+                previous: $createFailure
+            );
+        }
+
+        return $attributes;
     }
 
     /**
@@ -1287,6 +1678,31 @@ class Pterodactyl extends Server
         string $expected,
         bool $caseInsensitive = false
     ): array {
+        $matches = $this->pterodactylUserMatches(
+            $filter,
+            $field,
+            $expected,
+            $caseInsensitive
+        );
+        if (count($matches) > 1) {
+            throw new PermanentProvisioningException(
+                "Pterodactyl returned multiple customers for the same {$field}."
+            );
+        }
+
+        return $matches;
+    }
+
+    /**
+     * @param  array<string, string>  $filter
+     * @return list<array<string, mixed>>
+     */
+    private function pterodactylUserMatches(
+        array $filter,
+        string $field,
+        string $expected,
+        bool $caseInsensitive = false
+    ): array {
         $response = $this->request(
             '/api/application/users',
             'get',
@@ -1315,11 +1731,6 @@ class Pterodactyl extends Server
             })
             ->values()
             ->all();
-        if (count($matches) > 1) {
-            throw new PermanentProvisioningException(
-                "Pterodactyl returned multiple customers for the same {$field}."
-            );
-        }
 
         return $matches;
     }
@@ -1634,10 +2045,32 @@ class Pterodactyl extends Server
 
     public function terminateServer(Service $service, $settings, $properties)
     {
-        $server = $this->getLifecycleServer(
-            $service,
-            failIfNotFound: false
-        );
+        $identity = $this->durableLifecycleIdentity($service);
+        if ($identity === null) {
+            $server = $this->getServer(
+                $service->id,
+                failIfNotFound: false,
+                raw: true
+            );
+        } elseif ($this->lifecycleIdentityIsUnpinned($identity)) {
+            $server = $this->reconcileUnpinnedCancellationServer(
+                $service,
+                $identity
+            );
+        } else {
+            $this->assertDurableLifecycleIdentity($service, $identity);
+            $server = $this->getServerById(
+                (int) $identity['external_server_id'],
+                false
+            );
+            if ($server !== false) {
+                $this->assertDurableLifecycleServer(
+                    $service,
+                    $server,
+                    $identity
+                );
+            }
+        }
         if (! $server) {
             return true;
         }
@@ -1650,7 +2083,14 @@ class Pterodactyl extends Server
         }
 
         $this->request('/api/application/servers/' . (int) $serverId, 'delete');
-        if ($this->getLifecycleServer($service, failIfNotFound: false)) {
+        $stillPresent = $identity === null
+            ? $this->getServer(
+                $service->id,
+                failIfNotFound: false,
+                raw: true
+            )
+            : $this->getServerById((int) $serverId, false);
+        if ($stillPresent) {
             throw new Exception(
                 'Pterodactyl still reports the pinned server after the delete request.'
             );

@@ -26,14 +26,26 @@ class Extension extends Model implements Auditable
 
     protected static function booted(): void
     {
-        static::updating(function (Extension $extension): void {
-            if ($extension->isDirty('enabled') && ! (bool) $extension->enabled) {
-                if ($extension->type === 'server') {
-                    app(DurableFulfillmentService::class)
-                        ->assertServerHostMutable((int) $extension->id);
-                }
+        static::creating(function (Extension $extension): void {
+            if ((bool) $extension->enabled) {
                 app(ExtensionLifecycleGuard::class)
-                    ->assertCanDeactivate($extension);
+                    ->assertCanActivate($extension);
+            }
+        });
+
+        static::updating(function (Extension $extension): void {
+            if ($extension->isDirty('enabled')) {
+                if ((bool) $extension->enabled) {
+                    app(ExtensionLifecycleGuard::class)
+                        ->assertCanActivate($extension);
+                } else {
+                    if ($extension->type === 'server') {
+                        app(DurableFulfillmentService::class)
+                            ->assertServerHostMutable((int) $extension->id);
+                    }
+                    app(ExtensionLifecycleGuard::class)
+                        ->assertCanDeactivate($extension);
+                }
             }
         });
 

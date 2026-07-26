@@ -1,18 +1,37 @@
 @php
     $usesDynamicStock = $this->hasDynamicSliderOptions();
+    $dynamicStockOptionIds = $usesDynamicStock
+        ? $product->configOptions
+            ->filter(fn ($option) => $option->isDynamicSlider()
+                && in_array(
+                    strtolower((string) $option->getMetadata('resource_type', '')),
+                    ['memory', 'cpu', 'disk'],
+                    true
+                ))
+            ->map(fn ($option) => (int) $option->id)
+            ->values()
+            ->all()
+        : [];
     $dynamicStockConfig = [
         'enabled' => $usesDynamicStock,
         'endpoint' => $usesDynamicStock
             ? url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote')
             : null,
         'cartItemId' => $cartProductKey,
+        'expectedBoundIds' => $dynamicStockOptionIds,
     ];
+    $hasDynamicSliderPricing = $product->configOptions
+        ->contains(fn ($option) => $option->isDynamicSlider());
+    $sharedDynamicSliderBasePrice = $hasDynamicSliderPricing
+        ? $plan->dynamicSliderBasePrice()
+        : 0.0;
 @endphp
 <div
     class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
     x-data="dynamicResourceStock(@js($dynamicStockConfig))"
     x-on:slider-change="queueQuote()"
     x-on:change="queueQuote()"
+    x-on:dynamic-stock-refresh-required.window="retryQuote()"
 >
     <div class="flex flex-col gap-4 w-full col-span-3">
         <h1 class="text-3xl font-bold">{{ $product->name }}</h1>
@@ -93,24 +112,46 @@
         @if ($this->hasDynamicSliderOptions())
             <div
                 x-show="quoteState === 'loading'"
+                id="dynamic-resource-stock-status"
                 role="status"
                 aria-live="polite"
+                aria-atomic="true"
                 class="text-sm text-primary-500"
             >
                 Checking live resource availability…
             </div>
             <div
                 x-show="quoteState === 'error'"
-                x-text="quoteError"
                 role="alert"
-                class="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
-            ></div>
+                aria-atomic="true"
+                class="flex flex-col items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
+            >
+                <span x-text="quoteError"></span>
+                <button
+                    type="button"
+                    x-ref="retryResourceQuote"
+                    x-on:click="
+                        retryQuote();
+                        $nextTick(() => $root.querySelector('.dynamic-slider-input')?.focus());
+                    "
+                    aria-controls="dynamic-resource-stock-status"
+                    class="rounded underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
+                >
+                    Retry availability check
+                </button>
+            </div>
         @endif
     </div>
     <div class="flex flex-col gap-2 w-full col-span-1 bg-background-secondary p-3 rounded-md h-fit">
         <h2 class="text-2xl font-semibold  mb-2">
             {{ __('product.order_summary') }}
         </h2>
+        @if ($sharedDynamicSliderBasePrice > 0)
+            <div class="font-semibold flex justify-between">
+                <h4>Dynamic resource base:</h4>
+                {{ $total->format($sharedDynamicSliderBasePrice) }}
+            </div>
+        @endif
         @if ($total->total_tax > 0)
             <div class="font-semibold flex justify-between">
                 <h4>{{ __('invoices.subtotal') }}:</h4> {{ $total->format($total->subtotal) }}

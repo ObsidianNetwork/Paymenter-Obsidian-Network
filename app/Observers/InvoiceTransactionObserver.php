@@ -58,13 +58,32 @@ class InvoiceTransactionObserver
             $invoice->isDirty([
                 'invoice_id',
                 'amount',
-                'status',
                 'is_credit_transaction',
             ])
+            && $this->wasInFlightOrSucceededCapacityEvidence($invoice)
+        ) {
+            throw new \RuntimeException(
+                'Processing and succeeded capacity payment evidence identity and amount are immutable.'
+            );
+        }
+        if (
+            $invoice->isDirty('status')
             && $this->wasSucceededCapacityEvidence($invoice)
         ) {
             throw new \RuntimeException(
                 'Succeeded capacity payment evidence is immutable.'
+            );
+        }
+        if (
+            $invoice->isDirty('status')
+            && $this->wasProcessingCapacityEvidence($invoice)
+            && ! app(CapacityInvoicePaymentService::class)
+                ->isRecordingPaymentEvidence(
+                    (int) $invoice->getRawOriginal('invoice_id')
+                )
+        ) {
+            throw new \RuntimeException(
+                'Processing capacity payment evidence must be finalized through the atomic payment coordinator.'
             );
         }
         $evidenceFields = [
@@ -106,9 +125,9 @@ class InvoiceTransactionObserver
     {
         app(CapacityInvoicePaymentService::class)
             ->assertPaymentAttemptAllowed((int) $invoice->invoice_id);
-        if ($this->isSucceededCapacityEvidence($invoice)) {
+        if ($this->isInFlightOrSucceededCapacityEvidence($invoice)) {
             throw new \RuntimeException(
-                'Succeeded capacity payment evidence cannot be deleted.'
+                'Processing or succeeded capacity payment evidence cannot be deleted.'
             );
         }
     }
@@ -122,7 +141,9 @@ class InvoiceTransactionObserver
         if (
             $status === InvoiceTransactionStatus::Succeeded
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked((int) $transaction->invoice_id)
+                ->requiresFulfillmentCoordinator(
+                    (int) $transaction->invoice_id
+                )
             && (
                 DB::transactionLevel() === 0
                 || ! app(CapacityInvoicePaymentService::class)
@@ -137,7 +158,7 @@ class InvoiceTransactionObserver
         }
     }
 
-    private function isSucceededCapacityEvidence(
+    private function isInFlightOrSucceededCapacityEvidence(
         InvoiceTransaction $transaction
     ): bool {
         $status = $transaction->status instanceof InvoiceTransactionStatus
@@ -146,21 +167,52 @@ class InvoiceTransactionObserver
                 (string) $transaction->status
             );
 
-        return $status === InvoiceTransactionStatus::Succeeded
+        return in_array($status, [
+            InvoiceTransactionStatus::Processing,
+            InvoiceTransactionStatus::Succeeded,
+        ], true)
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked((int) $transaction->invoice_id);
+                ->requiresFulfillmentCoordinator(
+                    (int) $transaction->invoice_id
+                );
     }
 
     private function wasSucceededCapacityEvidence(
         InvoiceTransaction $transaction
     ): bool {
+        return $this->originalCapacityEvidenceHasStatus(
+            $transaction,
+            InvoiceTransactionStatus::Succeeded
+        );
+    }
+
+    private function wasProcessingCapacityEvidence(
+        InvoiceTransaction $transaction
+    ): bool {
+        return $this->originalCapacityEvidenceHasStatus(
+            $transaction,
+            InvoiceTransactionStatus::Processing
+        );
+    }
+
+    private function wasInFlightOrSucceededCapacityEvidence(
+        InvoiceTransaction $transaction
+    ): bool {
+        return $this->wasProcessingCapacityEvidence($transaction)
+            || $this->wasSucceededCapacityEvidence($transaction);
+    }
+
+    private function originalCapacityEvidenceHasStatus(
+        InvoiceTransaction $transaction,
+        InvoiceTransactionStatus $expected
+    ): bool {
         $status = InvoiceTransactionStatus::tryFrom(
             (string) $transaction->getRawOriginal('status')
         );
 
-        return $status === InvoiceTransactionStatus::Succeeded
+        return $status === $expected
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked(
+                ->requiresFulfillmentCoordinator(
                     (int) $transaction->getRawOriginal('invoice_id')
                 );
     }

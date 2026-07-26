@@ -27,9 +27,12 @@ class CancelInvoiceService
 
     public function assertCanDelete(Invoice $invoice): void
     {
-        if (app(CapacityInvoicePaymentService::class)->isCapacityBacked($invoice)) {
+        if (
+            app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator($invoice)
+        ) {
             throw new \RuntimeException(
-                'Capacity-backed invoices are durable fulfillment records and cannot be deleted. Cancel the invoice through the fulfillment coordinator instead.'
+                'Capacity-backed and capacity-renewal invoices are durable fulfillment records and cannot be deleted. Cancel the invoice through the fulfillment coordinator instead.'
             );
         }
     }
@@ -57,6 +60,14 @@ class CancelInvoiceService
 
                 $payments = app(CapacityInvoicePaymentService::class);
                 if (! $payments->isCapacityBacked($invoice)) {
+                    if (
+                        $payments->requiresFulfillmentCoordinator($invoice)
+                        && $payments->hasInFlightOrSucceededPayment($invoice)
+                    ) {
+                        throw new \RuntimeException(
+                            'This capacity-backed renewal invoice has a partial, processing, or succeeded payment and requires refund or credit reconciliation before cancellation.'
+                        );
+                    }
                     $invoice->status = Invoice::STATUS_CANCELLED;
                     $invoice->save();
 

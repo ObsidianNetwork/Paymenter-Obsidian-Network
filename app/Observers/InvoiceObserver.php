@@ -4,9 +4,9 @@ namespace App\Observers;
 
 use App\Events\Invoice as InvoiceEvent;
 use App\Models\Invoice;
-use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Invoice\CancelInvoiceService;
 use App\Services\Invoice\CapacityInvoicePaymentService;
+use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Invoice\ProcessPaidInvoiceService;
 
 class InvoiceObserver
@@ -41,10 +41,10 @@ class InvoiceObserver
         if (
             $invoice->isDirty(['user_id', 'currency_code', 'due_at'])
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked($invoice)
+                ->requiresFulfillmentCoordinator($invoice)
         ) {
             throw new \RuntimeException(
-                'Capacity-backed invoice ownership, currency, and deadline are immutable.'
+                'Durable-fulfillment invoice ownership, currency, and deadline are immutable.'
             );
         }
 
@@ -52,7 +52,7 @@ class InvoiceObserver
             $invoice->isDirty('status')
             && $invoice->status === Invoice::STATUS_PAID
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked($invoice)
+                ->requiresFulfillmentCoordinator($invoice)
             && ! MarkInvoicePaidService::isCoordinating($invoice)
         ) {
             throw new \RuntimeException(
@@ -63,11 +63,11 @@ class InvoiceObserver
             $invoice->isDirty('status')
             && $invoice->status === Invoice::STATUS_CANCELLED
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked($invoice)
+                ->requiresFulfillmentCoordinator($invoice)
             && ! CancelInvoiceService::isCoordinating($invoice)
         ) {
             throw new \RuntimeException(
-                'Capacity-backed invoices must be cancelled through the fulfillment coordinator.'
+                'Capacity-backed and capacity-renewal invoices must be cancelled through the fulfillment coordinator.'
             );
         }
 

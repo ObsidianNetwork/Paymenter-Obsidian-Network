@@ -1,9 +1,29 @@
+@php
+    $usesDynamicStock = $this->hasDynamicSliderOptions();
+    $dynamicStockOptionIds = $usesDynamicStock
+        ? $this->upgradeConfigOptions()
+            ->filter(fn ($option) => $option->isDynamicSlider()
+                && in_array(
+                    strtolower((string) $option->getMetadata('resource_type', '')),
+                    ['memory', 'cpu', 'disk'],
+                    true
+                ))
+            ->map(fn ($option) => (int) $option->id)
+            ->values()
+            ->all()
+        : [];
+    $dynamicStockConfig = [
+        'endpoint' => $usesDynamicStock
+            ? url('/api/dynamic-pterodactyl/services/' . $service->id . '/upgrade-quote')
+            : null,
+        'enabled' => $usesDynamicStock,
+        'expectedBoundIds' => $dynamicStockOptionIds,
+    ];
+@endphp
 <div
     class="container mt-14"
-    @if ($this->hasDynamicSliderOptions())
-        x-data="dynamicResourceStock({
-            endpoint: @js(url('/api/dynamic-pterodactyl/services/' . $service->id . '/upgrade-quote')),
-        })"
+    @if ($usesDynamicStock)
+        x-data="dynamicResourceStock(@js($dynamicStockConfig))"
         x-on:slider-change="queueQuote()"
         x-on:change="queueQuote()"
     @endif
@@ -56,7 +76,7 @@
                             'period' => $service->plan->billing_period > 1 ? $service->plan->billing_period : '',
                             'unit' => strtolower(trans_choice(__('services.billing_cycles.' . $service->plan->billing_unit), $service->plan->billing_period))
                         ]) }}
-                        @else 
+                        @else
                         {{ __('services.price_one_time', [
                             'price' => $service->product->price(null, null, null, $service->currency_code),
                         ]) }}
@@ -99,7 +119,7 @@
                             'period' => $service->plan->billing_period > 1 ? $service->plan->billing_period : '',
                             'unit' => trans_choice(__('services.billing_cycles.' . $service->plan->billing_unit), $service->plan->billing_period)
                         ]) }}
-                        @else 
+                        @else
                         {{ __('services.price_one_time', [
                             'price' => $product->price(null, null, null, $service->currency_code),
                         ]) }}
@@ -142,18 +162,33 @@
                 @if ($this->hasDynamicSliderOptions())
                     <div
                         x-show="quoteState === 'loading'"
+                        id="dynamic-upgrade-stock-status"
                         role="status"
                         aria-live="polite"
+                        aria-atomic="true"
                         class="text-sm text-primary-500"
                     >
                         Checking the current server node’s upgrade capacity…
                     </div>
                     <div
                         x-show="quoteState === 'error'"
-                        x-text="quoteError"
                         role="alert"
-                        class="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
-                    ></div>
+                        aria-atomic="true"
+                        class="flex flex-col items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
+                    >
+                        <span x-text="quoteError"></span>
+                        <button
+                            type="button"
+                            x-on:click="
+                                retryQuote();
+                                $nextTick(() => $root.querySelector('.dynamic-slider-input')?.focus());
+                            "
+                            aria-controls="dynamic-upgrade-stock-status"
+                            class="rounded underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
+                        >
+                            Retry upgrade availability check
+                        </button>
+                    </div>
                 @endif
             </div>
             @endif
@@ -184,6 +219,7 @@
                     :wire:click="($this->upgradeConfigOptions()->count() > 0 && $step == 1)? 'nextStep' : 'doUpgrade'"
                     @if ($this->hasDynamicSliderOptions() && $step > 1)
                         x-bind:disabled="!canCheckout"
+                        x-bind:aria-disabled="(!canCheckout).toString()"
                     @endif
                 >
                     {{-- If the next upgradeProduct supports config upgrades, show those --}}

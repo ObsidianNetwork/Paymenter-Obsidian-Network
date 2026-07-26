@@ -589,8 +589,10 @@ class ExtensionHelper
         }
         if (
             $existingEvidence !== null
-            && $status === InvoiceTransactionStatus::Failed
-            && $capacityPayments->isCapacityBacked($invoiceState)
+            && in_array($status, [
+                InvoiceTransactionStatus::Succeeded,
+                InvoiceTransactionStatus::Failed,
+            ], true)
             && $capacityPayments->requiresAttention($invoiceState)
         ) {
             $attentionReason = trim(
@@ -641,7 +643,11 @@ class ExtensionHelper
             if ($capacityPayments->requiresAttention($invoiceId)) {
                 throw $exception;
             }
-            if (! $capacityPayments->isCapacityBacked($invoiceId)) {
+            if (
+                ! $capacityPayments->requiresFulfillmentCoordinator(
+                    $invoiceId
+                )
+            ) {
                 throw $exception;
             }
 

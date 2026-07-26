@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import dynamicResourceStock, {
+    isCompleteResourceQuote,
     snapToStep,
 } from '../../themes/default/js/dynamic-resource-stock.js'
 
@@ -25,6 +26,7 @@ function controller(overrides = {}) {
         dynamicResourceStock({
             endpoint: '/api/dynamic-pterodactyl/products/7/resource-quote',
             cartItemId: 11,
+            expectedBoundIds: [12, 13, 14],
         }),
         {
             $wire: {
@@ -39,6 +41,45 @@ function controller(overrides = {}) {
         },
         overrides,
     )
+}
+
+function completeQuote({
+    adjusted = false,
+    memory = 23552,
+    memoryMax = 23552,
+} = {}) {
+    return {
+        available: true,
+        adjusted,
+        selection: {
+            memory,
+            cpu: 300,
+            disk: 20480,
+        },
+        bounds: {
+            memory: {
+                config_option_id: 12,
+                min: 1024,
+                max: memoryMax,
+                configured_max: 32768,
+                step: 1024,
+            },
+            cpu: {
+                config_option_id: 13,
+                min: 100,
+                max: 400,
+                configured_max: 400,
+                step: 100,
+            },
+            disk: {
+                config_option_id: 14,
+                min: 10240,
+                max: 51200,
+                configured_max: 51200,
+                step: 1024,
+            },
+        },
+    }
 }
 
 test('disabled stock mode leaves ordinary checkout enabled without quoting', async () => {
@@ -79,20 +120,7 @@ test('a quote sends the complete resource vector and unlocks checkout', async ()
             ok: true,
             status: 200,
             json: async () => ({
-                data: {
-                    available: true,
-                    adjusted: false,
-                    selection: { memory: 23552, cpu: 300, disk: 20480 },
-                    bounds: {
-                        memory: {
-                            config_option_id: 12,
-                            min: 1024,
-                            max: 23552,
-                            configured_max: 32768,
-                            step: 1024,
-                        },
-                    },
-                },
+                data: completeQuote(),
             }),
         }
     }
@@ -113,6 +141,54 @@ test('a quote sends the complete resource vector and unlocks checkout', async ()
         cart_item_id: 11,
     })
     assert.equal(events.at(-1).type, 'dynamic-capacity-updated')
+})
+
+test('a quote must contain valid bounds for the exact managed slider IDs', () => {
+    const valid = completeQuote()
+    assert.equal(isCompleteResourceQuote(valid, [12, 13, 14]), true)
+
+    const missing = structuredClone(valid)
+    delete missing.bounds.disk
+    assert.equal(isCompleteResourceQuote(missing, [12, 13, 14]), false)
+
+    const unexpected = structuredClone(valid)
+    unexpected.bounds.disk.config_option_id = 99
+    assert.equal(isCompleteResourceQuote(unexpected, [12, 13, 14]), false)
+
+    const duplicate = structuredClone(valid)
+    duplicate.bounds.disk.config_option_id = 13
+    assert.equal(isCompleteResourceQuote(duplicate, [12, 13, 14]), false)
+
+    const malformed = structuredClone(valid)
+    malformed.bounds.memory.max = 23000
+    assert.equal(isCompleteResourceQuote(malformed, [12, 13, 14]), false)
+
+    const invalidSelection = structuredClone(valid)
+    invalidSelection.selection.memory = 23000
+    assert.equal(isCompleteResourceQuote(invalidSelection, [12, 13, 14]), false)
+})
+
+test('a partial successful response fails closed instead of unlocking checkout', async () => {
+    const events = installBrowserGlobals()
+    const partial = completeQuote()
+    delete partial.bounds.cpu
+    globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: partial }),
+    })
+
+    const stock = controller()
+    await stock.requestQuote()
+
+    assert.equal(stock.quoteState, 'error')
+    assert.equal(stock.canCheckout, false)
+    assert.equal(stock.latestQuote, null)
+    assert.equal(
+        stock.quoteError,
+        'Live resource availability is temporarily unavailable. Please try again.',
+    )
+    assert.equal(events.at(-1).type, 'dynamic-capacity-failed')
 })
 
 test('inventory failures keep checkout locked and expose only a safe message', async () => {
@@ -152,18 +228,31 @@ test('changing a selection locks checkout before the debounced quote starts', ()
     window.clearTimeout(stock._quoteTimer)
 })
 
+test('retry resets adjustment history and requests the current selection immediately', () => {
+    installBrowserGlobals()
+    let queuedDelay = null
+    const stock = controller({
+        quoteState: 'error',
+        quoteError: 'Temporary failure',
+        _adjustmentPasses: 2,
+        queueQuote: (delay) => {
+            queuedDelay = delay
+        },
+    })
+
+    stock.retryQuote()
+
+    assert.equal(stock._adjustmentPasses, 0)
+    assert.equal(queuedDelay, 0)
+})
+
 test('an adjusted quote stays locked until its clamped selection is requoted', async () => {
     installBrowserGlobals()
     globalThis.fetch = async () => ({
         ok: true,
         status: 200,
         json: async () => ({
-            data: {
-                available: true,
-                adjusted: true,
-                selection: { memory: 23552, cpu: 300, disk: 20480 },
-                bounds: {},
-            },
+            data: completeQuote({ adjusted: true }),
         }),
     })
 
@@ -193,12 +282,7 @@ test('a slower superseded response cannot overwrite the newest quote', async () 
                 ok: true,
                 status: 200,
                 json: async () => ({
-                    data: {
-                        available: true,
-                        adjusted: false,
-                        selection: { memory: 8192 },
-                        bounds: {},
-                    },
+                    data: completeQuote({ memory: 8192 }),
                 }),
             }
         }
@@ -207,12 +291,7 @@ test('a slower superseded response cannot overwrite the newest quote', async () 
             ok: true,
             status: 200,
             json: async () => ({
-                data: {
-                    available: true,
-                    adjusted: false,
-                    selection: { memory: 16384 },
-                    bounds: {},
-                },
+                data: completeQuote({ memory: 16384 }),
             }),
         }
     }
@@ -225,4 +304,69 @@ test('a slower superseded response cannot overwrite the newest quote', async () 
     await first
 
     assert.equal(stock.latestQuote.selection.memory, 16384)
+})
+
+test('a queued selection invalidates an active quote before the debounce expires', async () => {
+    const events = installBrowserGlobals()
+    let releaseResponse
+    let requestSignal
+    globalThis.fetch = async (_endpoint, options) => {
+        requestSignal = options.signal
+        await new Promise((resolve) => {
+            releaseResponse = resolve
+        })
+
+        return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+                data: completeQuote({ memory: 8192 }),
+            }),
+        }
+    }
+
+    const stock = controller()
+    const activeQuote = stock.requestQuote()
+    stock.queueQuote(60000)
+
+    assert.equal(requestSignal.aborted, true)
+    assert.equal(stock.quoteState, 'loading')
+    assert.equal(stock.canCheckout, false)
+
+    // Even a transport that ignores AbortController must not allow the old
+    // response to overwrite the locked state while the replacement is queued.
+    releaseResponse()
+    await activeQuote
+
+    assert.equal(stock.quoteState, 'loading')
+    assert.equal(stock.canCheckout, false)
+    assert.equal(stock.latestQuote, null)
+    assert.equal(
+        events.filter((event) => event.type === 'dynamic-capacity-updated').length,
+        0,
+    )
+    window.clearTimeout(stock._quoteTimer)
+})
+
+test('an error from a quote invalidated during debounce stays suppressed', async () => {
+    const events = installBrowserGlobals()
+    let rejectRequest
+    globalThis.fetch = async () => new Promise((_resolve, reject) => {
+        rejectRequest = reject
+    })
+
+    const stock = controller()
+    const activeQuote = stock.requestQuote()
+    stock.queueQuote(60000)
+    rejectRequest(new Error('stale upstream failure'))
+    await activeQuote
+
+    assert.equal(stock.quoteState, 'loading')
+    assert.equal(stock.quoteError, '')
+    assert.equal(stock.canCheckout, false)
+    assert.equal(
+        events.filter((event) => event.type === 'dynamic-capacity-failed').length,
+        0,
+    )
+    window.clearTimeout(stock._quoteTimer)
 })

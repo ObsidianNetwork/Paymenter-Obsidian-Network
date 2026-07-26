@@ -5,6 +5,7 @@ namespace Tests\Feature\Invoices;
 use App\Enums\InvoiceTransactionStatus;
 use App\Helpers\ExtensionHelper;
 use App\Jobs\Server\CreateJob;
+use App\Jobs\Server\UpgradeJob;
 use App\Livewire\Invoices\Show;
 use App\Models\Gateway;
 use App\Models\Invoice;
@@ -732,6 +733,9 @@ class InvoicePaymentProcessingTest extends TestCase
 
     public function test_paid_and_cancelled_capacity_invoices_share_the_same_lock_order(): void
     {
+        $coordinator = file_get_contents(
+            app_path('Services/Invoice/MarkInvoicePaidService.php')
+        );
         $paid = file_get_contents(
             app_path('Services/Invoice/ProcessPaidInvoiceService.php')
         );
@@ -751,6 +755,10 @@ class InvoicePaymentProcessingTest extends TestCase
             '$reservations = DB::table(',
             '$items = $invoice->items()',
         ]);
+        $this->assertStringContainsString(
+            '$processor->lockFulfillmentObligations(',
+            $coordinator
+        );
     }
 
     public function test_payment_attention_invoice_hides_pay_and_rejects_modal_open(): void
@@ -1207,13 +1215,12 @@ class InvoicePaymentProcessingTest extends TestCase
             'description' => 'Missing service',
         ]);
 
-        try {
-            app(MarkInvoicePaidService::class)->handle($invoice);
-            $this->fail('Expected the missing service reference to abort payment.');
-        } catch (\RuntimeException $exception) {
-            $this->assertStringContainsString('references missing service', $exception->getMessage());
-        }
+        $result = DB::transaction(
+            fn (): Invoice => app(MarkInvoicePaidService::class)
+                ->handle($invoice)
+        );
 
+        $this->assertSame(Invoice::STATUS_PENDING, $result->status);
         $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
     }
 
@@ -1235,60 +1242,258 @@ class InvoicePaymentProcessingTest extends TestCase
             }
         );
 
-        try {
-            app(MarkInvoicePaidService::class)->handle($invoice);
-            $this->fail(
-                'Expected a row-backed upgrade to require its coordinator.'
-            );
-        } catch (\RuntimeException $exception) {
-            $this->assertStringContainsString(
-                'reservation coordinator is unavailable',
-                $exception->getMessage()
-            );
-        }
+        $result = app(MarkInvoicePaidService::class)->handle($invoice);
 
+        $this->assertSame(Invoice::STATUS_PENDING, $result->status);
         $this->assertSame(
             Invoice::STATUS_PENDING,
             $invoice->fresh()->status
         );
+        $this->assertSame(
+            ServiceUpgrade::STATUS_CANCELLED,
+            $upgrade->fresh()->status
+        );
+        $this->assertStringContainsString(
+            'reservation coordinator was unavailable',
+            (string) $upgrade->fresh()->last_error
+        );
     }
 
-    public function test_non_capacity_upgrade_is_not_blocked_by_missing_coordinator(): void
+    public function test_non_capacity_upgrade_with_invalid_lifecycle_is_rejected_before_payment(): void
     {
         [$invoice, $upgrade] = $this->upgradeInvoice(
             ServiceUpgrade::STATUS_CANCELLED
         );
-        $this->mock(
-            CapacityUpgradeReservationIdentity::class,
-            function (MockInterface $mock) use ($upgrade): void {
-                $mock->shouldReceive('requiresCoordinator')
-                    ->twice()
-                    ->with(\Mockery::on(
-                        fn (ServiceUpgrade $candidate): bool =>
-                            $candidate->is($upgrade)
-                    ))
-                    ->andReturnFalse();
-            }
+
+        $result = app(MarkInvoicePaidService::class)->handle($invoice);
+
+        $this->assertSame(Invoice::STATUS_CANCELLED, $result->status);
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
         );
-
-        app(MarkInvoicePaidService::class)->handle($invoice);
-
-        $this->assertSame(Invoice::STATUS_PAID, $invoice->fresh()->status);
         $this->assertSame(
             ServiceUpgrade::STATUS_CANCELLED,
             $upgrade->fresh()->status
+        );
+        $this->assertStringContainsString(
+            'cancelled lifecycle state',
+            (string) $upgrade->fresh()->last_error
+        );
+    }
+
+    public function test_non_capacity_source_drift_is_cancelled_before_payment_transaction(): void
+    {
+        Queue::fake();
+        [$invoice, $upgrade] = $this->upgradeInvoice(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+        $upgrade->service->price = 11;
+        $upgrade->service->save();
+
+        $result = DB::transaction(
+            fn (): Invoice => app(MarkInvoicePaidService::class)
+                ->handle($invoice)
+        );
+
+        $upgrade->refresh();
+        $this->assertSame(Invoice::STATUS_CANCELLED, $result->status);
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
+        );
+        $this->assertSame(
+            ServiceUpgrade::STATUS_CANCELLED,
+            $upgrade->status
+        );
+        $this->assertNull($upgrade->active_service_guard_id);
+        $this->assertNotNull($upgrade->failed_at);
+        $this->assertStringContainsString(
+            'service changed after the upgrade was quoted',
+            strtolower((string) $upgrade->last_error)
+        );
+        Queue::assertNotPushed(UpgradeJob::class);
+    }
+
+    public function test_gateway_payment_commits_evidence_and_attention_for_non_capacity_source_drift(): void
+    {
+        Queue::fake();
+        [$invoice, $upgrade] = $this->upgradeInvoice(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+        $upgrade->service->price = 11;
+        $upgrade->service->save();
+
+        $transaction = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            10,
+            transactionId: 'ordinary-upgrade-source-drift'
+        );
+
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $transaction->fresh()->status
+        );
+        $this->assertSame(1, $invoice->transactions()->count());
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $invoice->fresh()->status
+        );
+        $this->assertNotNull(
+            $invoice->fresh()->payment_attention_required_at
+        );
+        $this->assertStringContainsString(
+            'service changed after the upgrade was quoted',
+            strtolower((string) $invoice->fresh()->payment_attention_reason)
+        );
+        $upgrade->refresh();
+        $this->assertSame(
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            $upgrade->status
+        );
+        $this->assertSame(
+            (int) $upgrade->service_id,
+            (int) $upgrade->active_service_guard_id
+        );
+        $this->assertStringContainsString(
+            'external payment evidence exists',
+            strtolower((string) $upgrade->last_error)
+        );
+        Queue::assertNotPushed(UpgradeJob::class);
+    }
+
+    public function test_post_preflight_source_drift_rolls_back_paid_savepoint_and_persists_cancellation(): void
+    {
+        Queue::fake();
+        [$invoice, $upgrade] = $this->upgradeInvoice(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+        $serviceId = (int) $upgrade->service_id;
+        $coordinator = new class($serviceId) extends MarkInvoicePaidService
+        {
+            public function __construct(private int $serviceId) {}
+
+            protected function beforePaidTransition(
+                Invoice $invoice
+            ): void {
+                Service::query()
+                    ->whereKey($this->serviceId)
+                    ->firstOrFail()
+                    ->forceFill(['price' => 11])
+                    ->save();
+            }
+        };
+
+        $result = DB::transaction(
+            fn (): Invoice => $coordinator->handle($invoice)
+        );
+
+        $this->assertSame(Invoice::STATUS_CANCELLED, $result->status);
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
+        );
+        $upgrade->refresh();
+        $this->assertSame(
+            ServiceUpgrade::STATUS_CANCELLED,
+            $upgrade->status
+        );
+        $this->assertNull($upgrade->active_service_guard_id);
+        $this->assertStringContainsString(
+            'service changed after the upgrade was quoted',
+            strtolower((string) $upgrade->last_error)
+        );
+        Queue::assertNotPushed(UpgradeJob::class);
+    }
+
+    public function test_attention_invoice_records_existing_processing_payment_as_succeeded(): void
+    {
+        $invoice = $this->createInvoiceWithItem(100);
+        $processing = ExtensionHelper::addProcessingPayment(
+            $invoice->id,
+            null,
+            100,
+            transactionId: 'attention-processing-transition'
+        );
+        app(CapacityInvoicePaymentService::class)->requireAttention(
+            $invoice,
+            'Existing processing payment requires review.'
+        );
+        $attentionAt = $invoice->fresh()
+            ->payment_attention_required_at?->toJSON();
+
+        $succeeded = ExtensionHelper::addPayment(
+            $invoice->id,
+            null,
+            100,
+            transactionId: 'attention-processing-transition'
+        );
+
+        $this->assertTrue($succeeded->is($processing));
+        $this->assertSame(
+            InvoiceTransactionStatus::Succeeded,
+            $succeeded->fresh()->status
+        );
+        $this->assertSame(1, $invoice->transactions()->count());
+        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+        $this->assertSame(
+            $attentionAt,
+            $invoice->fresh()->payment_attention_required_at?->toJSON()
+        );
+    }
+
+    public function test_paid_non_capacity_awaiting_payment_upgrade_is_committed(): void
+    {
+        Queue::fake();
+        [$invoice, $upgrade] = $this->upgradeInvoice(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+        $this->assertNotSame(
+            $upgrade->service->product_id,
+            $upgrade->product_id
+        );
+        $this->assertNotNull($upgrade->source_fingerprint);
+        $this->assertNotNull($upgrade->target_fingerprint);
+        $this->assertTrue($upgrade->sourceStillMatches());
+
+        app(MarkInvoicePaidService::class)->handle($invoice);
+
+        $upgrade->refresh();
+        $this->assertSame(
+            Invoice::STATUS_PAID,
+            $invoice->fresh()->status
+        );
+        $this->assertSame(
+            ServiceUpgrade::STATUS_PAID_COMMITTED,
+            $upgrade->status
+        );
+        $this->assertSame(
+            (int) $upgrade->service_id,
+            (int) $upgrade->active_service_guard_id
+        );
+        $this->assertNotNull($upgrade->paid_at);
+        $this->assertNull($upgrade->last_error);
+        Queue::assertPushed(
+            UpgradeJob::class,
+            fn (UpgradeJob $job): bool =>
+                $job->serviceUpgrade->is($upgrade)
         );
     }
 
     private function upgradeInvoice(string $upgradeStatus): array
     {
         $user = User::factory()->create();
-        $fixture = $this->createProduct();
+        $source = $this->createProduct();
+        $target = $this->createProduct();
         $service = Service::factory()->create([
             'user_id' => $user->id,
-            'product_id' => $fixture->product->id,
-            'plan_id' => $fixture->plan->id,
-            'status' => Service::STATUS_PENDING,
+            'product_id' => $source->product->id,
+            'plan_id' => $source->plan->id,
+            'status' => Service::STATUS_ACTIVE,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'price' => 10,
         ]);
         $invoice = Invoice::factory()->create([
             'user_id' => $user->id,
@@ -1298,12 +1503,22 @@ class InvoicePaymentProcessingTest extends TestCase
         ]);
         $upgrade = ServiceUpgrade::create([
             'service_id' => $service->id,
-            'product_id' => $fixture->product->id,
-            'plan_id' => $fixture->plan->id,
+            'product_id' => $target->product->id,
+            'plan_id' => $target->plan->id,
             'invoice_id' => $invoice->id,
             'status' => $upgradeStatus,
             'type' => 'product',
+            'active_service_guard_id' => in_array($upgradeStatus, [
+                ServiceUpgrade::STATUS_PENDING,
+                ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            ], true)
+                ? $service->id
+                : null,
+            'quoted_amount' => 10,
+            'currency_code' => 'USD',
         ]);
+        $upgrade->captureSnapshots();
+        $upgrade->save();
         $invoice->items()->create([
             'reference_type' => ServiceUpgrade::class,
             'reference_id' => $upgrade->id,

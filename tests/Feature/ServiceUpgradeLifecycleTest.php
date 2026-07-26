@@ -343,6 +343,271 @@ class ServiceUpgradeLifecycleTest extends TestCase
         );
     }
 
+    public function test_needs_attention_failure_is_a_noop_before_retry_budget_is_exhausted(): void
+    {
+        $alert = \Mockery::mock(UpgradeFailureAlertService::class);
+        $alert->shouldNotReceive('notify');
+        $this->app->instance(UpgradeFailureAlertService::class, $alert);
+
+        foreach ([0, 1] as $attempts) {
+            $fixture = $this->createProduct();
+            $service = Service::factory()->create([
+                'user_id' => User::factory()->create()->id,
+                'product_id' => $fixture->product->id,
+                'plan_id' => $fixture->plan->id,
+                'status' => Service::STATUS_ACTIVE,
+            ]);
+            $invoice = Invoice::factory()->create([
+                'user_id' => $service->user_id,
+                'currency_code' => 'USD',
+                'status' => Invoice::STATUS_PAID,
+            ]);
+            $failedAt = now()->subMinute()->startOfSecond();
+            $alertedAt = now()->subSeconds(30)->startOfSecond();
+            $upgrade = ServiceUpgrade::create([
+                'service_id' => $service->id,
+                'product_id' => $fixture->product->id,
+                'plan_id' => $fixture->plan->id,
+                'invoice_id' => $invoice->id,
+                'status' => ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+                'type' => 'product',
+                'active_service_guard_id' => $service->id,
+                'provisioning_attempts' => $attempts,
+                'last_error' => 'Original permanent failure.',
+                'failed_at' => $failedAt,
+                'failure_alerted_at' => $alertedAt,
+            ]);
+            $coordinator = new class
+            {
+                public int $calls = 0;
+
+                public function failProvisioning(
+                    ServiceUpgrade $upgrade,
+                    \Throwable $exception,
+                    ?string $reservationLeaseId
+                ): bool {
+                    $this->calls++;
+
+                    return true;
+                }
+            };
+            $upgrades = new class($coordinator) extends ServiceUpgradeService
+            {
+                public function __construct(
+                    private object $coordinator
+                ) {}
+
+                protected function usesDynamicCapacity(
+                    ServiceUpgrade $upgrade
+                ): bool {
+                    return true;
+                }
+
+                protected function capacityService(): object
+                {
+                    return $this->coordinator;
+                }
+            };
+
+            $upgrades->recordFailure(
+                $upgrade,
+                new \RuntimeException('Duplicate queue delivery.')
+            );
+
+            $upgrade->refresh();
+            $this->assertSame(0, $coordinator->calls);
+            $this->assertSame(
+                ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+                $upgrade->status
+            );
+            $this->assertSame(
+                'Original permanent failure.',
+                $upgrade->last_error
+            );
+            $this->assertSame(
+                $attempts,
+                (int) $upgrade->provisioning_attempts
+            );
+            $this->assertTrue($failedAt->equalTo($upgrade->failed_at));
+            $this->assertTrue(
+                $alertedAt->equalTo($upgrade->failure_alerted_at)
+            );
+        }
+    }
+
+    public function test_upgrade_completion_rechecks_billing_anchor_before_local_commit(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_ACTIVE,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'price' => 10,
+            'expires_at' => now()->addMonth()->startOfDay(),
+        ]);
+        $upgrade = ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => ServiceUpgrade::STATUS_PROVISIONING,
+            'type' => 'product',
+            'active_service_guard_id' => $service->id,
+            'provisioning_attempts' => 1,
+            'quoted_amount' => 0,
+            'currency_code' => 'USD',
+        ]);
+        $upgrade->load([
+            'service.product.server.settings',
+            'service.product.settings',
+            'service.plan.prices',
+            'service.configs.configOption',
+            'service.configs.configValue',
+            'product.server.settings',
+            'product.settings',
+            'plan.prices',
+            'configs.configOption',
+            'configs.configValue',
+        ]);
+        $upgrade->captureSnapshots();
+        $upgrade->save();
+        $originalPrice = (string) $service->price;
+
+        $service->expires_at = $service->expires_at->copy()->addDay();
+        $service->save();
+
+        try {
+            app(ServiceUpgradeService::class)->complete($upgrade);
+            $this->fail(
+                'Expected the final billing-anchor proof to reject drift.'
+            );
+        } catch (\App\Exceptions\PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'changed after remote upgrade provisioning',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            ServiceUpgrade::STATUS_PROVISIONING,
+            $upgrade->fresh()->status
+        );
+        $this->assertSame(
+            $fixture->product->id,
+            $service->fresh()->product_id
+        );
+        $this->assertSame($originalPrice, (string) $service->fresh()->price);
+    }
+
+    public function test_upgrade_completion_keeps_service_upgrade_reservation_lock_order(): void
+    {
+        $method = new \ReflectionMethod(
+            ServiceUpgradeService::class,
+            'complete'
+        );
+        $lines = file($method->getFileName());
+        $source = implode('', array_slice(
+            $lines,
+            $method->getStartLine() - 1,
+            $method->getEndLine() - $method->getStartLine() + 1
+        ));
+        $serviceLock = strpos(
+            $source,
+            '$service = Service::query()'
+        );
+        $upgradeLock = strpos(
+            $source,
+            '$upgrade = $this->lockedUpgrade($upgradeId)'
+        );
+        $reservationLock = strpos(
+            $source,
+            '$this->capacityService()->completeProvisioning'
+        );
+
+        $this->assertIsInt($serviceLock);
+        $this->assertIsInt($upgradeLock);
+        $this->assertIsInt($reservationLock);
+        $this->assertTrue($serviceLock < $upgradeLock);
+        $this->assertTrue($upgradeLock < $reservationLock);
+    }
+
+    public function test_coordinator_resolution_loss_after_provisioning_requires_attention(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_ACTIVE,
+        ]);
+        $invoice = Invoice::factory()->create([
+            'user_id' => $service->user_id,
+            'currency_code' => 'USD',
+            'status' => Invoice::STATUS_PAID,
+        ]);
+        $upgrade = ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'invoice_id' => $invoice->id,
+            'status' => ServiceUpgrade::STATUS_PROVISIONING,
+            'type' => 'product',
+            'active_service_guard_id' => $service->id,
+            'provisioning_attempts' => 1,
+        ]);
+        $this->mock(
+            UpgradeFailureAlertService::class,
+            function (MockInterface $mock) use ($upgrade): void {
+                $mock->shouldReceive('notify')
+                    ->once()
+                    ->with($upgrade->id);
+            }
+        );
+
+        $upgrades = new class extends ServiceUpgradeService
+        {
+            protected function usesDynamicCapacity(
+                ServiceUpgrade $upgrade
+            ): bool {
+                return true;
+            }
+
+            protected function capacityService(): object
+            {
+                throw new \RuntimeException(
+                    'The extension container binding disappeared.'
+                );
+            }
+        };
+        $upgrades->recordFailure(
+            $upgrade,
+            new \RuntimeException('Pterodactyl request timed out.'),
+            reservationLeaseId: 'lease-lost-runtime'
+        );
+
+        $upgrade->refresh();
+        $this->assertSame(
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            $upgrade->status
+        );
+        $this->assertSame(
+            $service->id,
+            $upgrade->active_service_guard_id
+        );
+        $this->assertNotNull($upgrade->failed_at);
+        $this->assertNotNull($upgrade->failure_alerted_at);
+        $this->assertStringContainsString(
+            'Pterodactyl request timed out.',
+            (string) $upgrade->last_error
+        );
+        $this->assertStringContainsString(
+            'extension container binding disappeared',
+            (string) $upgrade->last_error
+        );
+    }
+
     private function legacyDynamicUpgrade(
         string $serverExtension = 'Pterodactyl',
         string $extensionType = 'server',

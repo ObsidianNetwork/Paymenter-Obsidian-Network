@@ -4,6 +4,7 @@ namespace App\Livewire\Products;
 
 use App\Classes\Cart;
 use App\Classes\Price;
+use App\Exceptions\DisplayException;
 use App\Helpers\ExtensionHelper;
 use App\Livewire\Component;
 use App\Models\Category;
@@ -373,7 +374,25 @@ class Checkout extends Component
             $checkoutConfig[$config['name']] = $this->checkoutConfig[$config['name']] ?? null;
         }
 
-        Cart::add($this->product, $this->plan, $configOptions, $checkoutConfig, key: $this->cartProductKey);
+        try {
+            Cart::add(
+                $this->product,
+                $this->plan,
+                $configOptions,
+                $checkoutConfig,
+                key: $this->cartProductKey
+            );
+        } catch (DisplayException $exception) {
+            if ($this->hasDynamicSliderOptions()) {
+                // A quote is advisory until the cart mutation acquires the
+                // authoritative capacity lock. Invalidate it after any
+                // customer-safe cart rejection so a race cannot leave the
+                // checkout button enabled with stale bounds.
+                $this->dispatch('dynamic-stock-refresh-required');
+            }
+
+            throw $exception;
+        }
 
         $this->dispatch('cartUpdated');
 

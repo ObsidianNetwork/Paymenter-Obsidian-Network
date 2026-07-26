@@ -111,7 +111,7 @@ class CapacityInvoicePaymentService
                 InvoiceTransactionStatus::Processing,
                 InvoiceTransactionStatus::Succeeded,
             ], true)
-            || ! $this->isCapacityBacked($invoice)
+            || ! $this->requiresFulfillmentCoordinator($invoice)
         ) {
             return null;
         }
@@ -133,9 +133,12 @@ class CapacityInvoicePaymentService
         $invoiceId = $invoice instanceof Invoice
             ? (int) $invoice->id
             : $invoice;
-        if (! $this->isCapacityBacked($invoiceId)) {
+        if (
+            ! $this->requiresFulfillmentCoordinator($invoiceId)
+            && ! $this->requiresAttention($invoiceId)
+        ) {
             throw new \RuntimeException(
-                'Payment-evidence recovery is limited to capacity-backed invoices.'
+                'Payment-evidence recovery is limited to capacity-backed or already-attentioned invoices.'
             );
         }
         self::$paymentEvidenceRecoveryReasons[$invoiceId] = $reason;
@@ -174,6 +177,58 @@ class CapacityInvoicePaymentService
         return DB::table('ptero_resource_reservations')
             ->where('invoice_id', $invoiceId)
             ->exists();
+    }
+
+    /**
+     * Payment coordination also covers renewal invoices for services whose
+     * durable checkout commitment belongs to an older invoice. Keep this
+     * separate from isCapacityBacked(): renewal cancellation must not release
+     * the already-provisioned service or reuse the original checkout deadline.
+     */
+    public function requiresFulfillmentCoordinator(
+        Invoice|int $invoice
+    ): bool {
+        if ($this->isCapacityBacked($invoice)) {
+            return true;
+        }
+        if (
+            ! Schema::hasTable('invoice_items')
+            || ! Schema::hasTable('ptero_resource_reservations')
+            || ! Schema::hasColumn(
+                'ptero_resource_reservations',
+                'service_id'
+            )
+        ) {
+            return false;
+        }
+
+        $invoiceId = $invoice instanceof Invoice
+            ? (int) $invoice->id
+            : $invoice;
+        if ($invoiceId <= 0) {
+            return false;
+        }
+
+        $query = DB::table('invoice_items as item')
+            ->where('item.invoice_id', $invoiceId)
+            ->where('item.reference_type', Service::class)
+            ->whereNotNull('item.reference_id')
+            ->whereExists(function ($query): void {
+                $query->selectRaw('1')
+                    ->from('ptero_resource_reservations as reservation')
+                    ->whereColumn(
+                        'reservation.service_id',
+                        'item.reference_id'
+                    );
+                if (Schema::hasColumn(
+                    'ptero_resource_reservations',
+                    'purpose'
+                )) {
+                    $query->where('reservation.purpose', 'checkout');
+                }
+            });
+
+        return $query->exists();
     }
 
     public function deadlineExpired(Invoice $invoice): bool
@@ -215,7 +270,8 @@ class CapacityInvoicePaymentService
     /**
      * Persist an externally observable payment fact for operator
      * refund/credit review. This deliberately leaves the invoice unpaid so an
-     * expired capacity promise can never be consumed.
+     * expired capacity promise or failed immutable upgrade proof can never be
+     * consumed.
      */
     public function requireAttention(Invoice $invoice, string $reason): Invoice
     {

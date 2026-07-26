@@ -14,6 +14,79 @@ function normalizeInteger(value) {
     return Number.isSafeInteger(parsed) ? parsed : null
 }
 
+function isRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+export function isCompleteResourceQuote(quote, expectedBoundIds) {
+    if (
+        !isRecord(quote)
+        || quote.available !== true
+        || typeof quote.adjusted !== 'boolean'
+        || !isRecord(quote.selection)
+        || !isRecord(quote.bounds)
+        || !Array.isArray(expectedBoundIds)
+        || expectedBoundIds.length === 0
+    ) {
+        return false
+    }
+
+    const expectedIds = expectedBoundIds.map(normalizeInteger)
+    if (
+        expectedIds.some((id) => id === null || id <= 0)
+        || new Set(expectedIds).size !== expectedIds.length
+    ) {
+        return false
+    }
+
+    const bounds = Object.entries(quote.bounds)
+    if (bounds.length !== expectedIds.length) {
+        return false
+    }
+
+    const expectedIdSet = new Set(expectedIds)
+    const seenIds = new Set()
+    for (const [resource, bound] of bounds) {
+        if (
+            !['memory', 'cpu', 'disk'].includes(resource)
+            || !isRecord(bound)
+        ) {
+            return false
+        }
+
+        const optionId = normalizeInteger(bound.config_option_id)
+        const min = normalizeInteger(bound.min)
+        const max = normalizeInteger(bound.max)
+        const configuredMax = normalizeInteger(bound.configured_max)
+        const step = normalizeInteger(bound.step)
+        const selected = normalizeInteger(quote.selection[resource])
+
+        if (
+            optionId === null
+            || !expectedIdSet.has(optionId)
+            || seenIds.has(optionId)
+            || min === null
+            || max === null
+            || configuredMax === null
+            || step === null
+            || selected === null
+            || step <= 0
+            || max < min
+            || configuredMax < max
+            || (max - min) % step !== 0
+            || selected < min
+            || selected > max
+            || (selected - min) % step !== 0
+        ) {
+            return false
+        }
+
+        seenIds.add(optionId)
+    }
+
+    return seenIds.size === expectedIdSet.size
+}
+
 export function snapToStep(value, min, max, step) {
     const numericValue = normalizeInteger(value)
     const numericMin = normalizeInteger(min)
@@ -52,11 +125,13 @@ export default function dynamicResourceStock({
     endpoint,
     cartItemId = null,
     enabled = true,
+    expectedBoundIds = [],
 }) {
     return {
         endpoint,
         cartItemId,
         enabled,
+        expectedBoundIds,
         quoteState: enabled ? 'loading' : 'disabled',
         quoteError: '',
         latestQuote: null,
@@ -78,12 +153,22 @@ export default function dynamicResourceStock({
                 || (this.quoteState === 'ready' && this.latestQuote?.available === true)
         },
 
+        retryQuote() {
+            this._adjustmentPasses = 0
+            this.queueQuote(0)
+        },
+
         queueQuote(delay = 250) {
             if (!this.enabled) {
                 return
             }
 
             window.clearTimeout(this._quoteTimer)
+            // Invalidate the in-flight quote immediately. Waiting until the
+            // debounced replacement starts leaves a window where the previous
+            // selection can resolve and re-enable checkout with stale bounds.
+            this._requestId++
+            this._controller?.abort()
             this.quoteState = 'loading'
             this.quoteError = ''
             window.dispatchEvent(new CustomEvent('dynamic-capacity-loading'))
@@ -141,6 +226,10 @@ export default function dynamicResourceStock({
                 }
 
                 const quote = payload.data
+                if (!isCompleteResourceQuote(quote, this.expectedBoundIds)) {
+                    throw new Error(safeMessage)
+                }
+
                 this.latestQuote = quote
                 this.quoteError = ''
                 window.dispatchEvent(new CustomEvent('dynamic-capacity-updated', {

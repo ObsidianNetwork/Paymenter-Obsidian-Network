@@ -16,10 +16,12 @@ class InvoiceItemObserver
         if (
             $invoice->invoice_id !== null
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked((int) $invoice->invoice_id)
+                ->requiresFulfillmentCoordinator(
+                    (int) $invoice->invoice_id
+                )
         ) {
             throw new \RuntimeException(
-                'Capacity-backed invoice fulfillment lines are immutable.'
+                'Durable-fulfillment invoice lines are immutable.'
             );
         }
         event(new InvoiceItemEvent\Creating($invoice));
@@ -52,20 +54,20 @@ class InvoiceItemObserver
             && (
                 (
                     $sourceInvoiceId !== null
-                    && $payments->isCapacityBacked(
+                    && $payments->requiresFulfillmentCoordinator(
                         (int) $sourceInvoiceId
                     )
                 )
                 || (
                     $destinationInvoiceId !== null
-                    && $payments->isCapacityBacked(
+                    && $payments->requiresFulfillmentCoordinator(
                         (int) $destinationInvoiceId
                     )
                 )
             )
         ) {
             throw new \RuntimeException(
-                'Capacity-backed invoice fulfillment lines are immutable.'
+                'Durable-fulfillment invoice lines are immutable.'
             );
         }
 
@@ -77,10 +79,10 @@ class InvoiceItemObserver
         if (
             $invoice->invoice !== null
             && app(CapacityInvoicePaymentService::class)
-                ->isCapacityBacked($invoice->invoice)
+                ->requiresFulfillmentCoordinator($invoice->invoice)
         ) {
             throw new \RuntimeException(
-                'Capacity-backed invoice fulfillment lines cannot be deleted.'
+                'Durable-fulfillment invoice lines cannot be deleted.'
             );
         }
     }
