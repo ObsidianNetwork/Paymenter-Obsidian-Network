@@ -319,7 +319,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             );
         } catch (\RuntimeException $exception) {
             $this->assertStringContainsString(
-                'invoice lines are immutable',
+                'fulfillment lines are immutable',
                 $exception->getMessage()
             );
         }
@@ -825,6 +825,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'quantity' => 1,
             'currency_code' => 'USD',
         ]);
+        $this->markServiceReservationBacked($service);
 
         $reservationService = Mockery::mock(ReservationService::class);
         $reservationService->shouldReceive('beginProvisioning')
@@ -931,6 +932,18 @@ class PterodactylReservationIntegrationTest extends TestCase
             $this->assertIsScalar($value);
         }
         $this->assertSame(0, $serverRequest['data']['feature_limits']['allocations']);
+        $userLookup = collect($pterodactyl->requests)
+            ->first(fn (array $request) => $request['url'] === '/api/application/users'
+                && strtolower($request['method']) === 'get');
+        $this->assertSame(
+            "paymenter-user-{$service->user_id}",
+            data_get($userLookup, 'data.filter.external_id')
+        );
+        $this->assertNull(
+            collect($pterodactyl->requests)
+                ->first(fn (array $request) => $request['url'] === '/api/application/users'
+                    && strtolower($request['method']) === 'post')
+        );
         $this->assertNull(
             collect($pterodactyl->requests)
                 ->first(fn (array $request) => $request['url'] === '/api/application/nodes/deployable')
@@ -988,29 +1001,33 @@ class PterodactylReservationIntegrationTest extends TestCase
             'product_id' => $fixture->product->id,
             'plan_id' => $fixture->plan->id,
         ]);
+        $this->markServiceReservationBacked($service);
 
         $reservationService = Mockery::mock(ReservationService::class);
-        $reservationService->shouldReceive('beginProvisioning')->once()->andReturn([
-            'reservation_id' => 92,
-            'panel_identity' => hash('sha256', 'https://panel.example.com'),
-            'node_id' => 7,
-            'location_id' => 3,
-            'memory' => 8192,
-            'cpu' => 300,
-            'disk' => 61440,
-            'nest_id' => 1,
-            'egg_id' => 2,
-            'user_external_id' => "paymenter-user-{$service->user_id}",
-            'provisioning_lease_id' => 'lease-92',
-            'already_consumed' => false,
-            'allocations' => [[
-                'allocation_id' => 7001,
-                'ip' => '192.0.2.10',
-                'port' => 25565,
-                'environment_key' => 'SERVER_PORT',
-                'is_primary' => true,
-            ]],
-        ]);
+        $reservationService->shouldReceive('beginProvisioning')
+            ->once()
+            ->with(Mockery::on(fn (Service $candidate) => $candidate->is($service)))
+            ->andReturn([
+                'reservation_id' => 92,
+                'panel_identity' => hash('sha256', 'https://panel.example.com'),
+                'node_id' => 7,
+                'location_id' => 3,
+                'memory' => 8192,
+                'cpu' => 300,
+                'disk' => 61440,
+                'nest_id' => 1,
+                'egg_id' => 2,
+                'user_external_id' => "paymenter-user-{$service->user_id}",
+                'provisioning_lease_id' => 'lease-92',
+                'already_consumed' => false,
+                'allocations' => [[
+                    'allocation_id' => 7001,
+                    'ip' => '192.0.2.10',
+                    'port' => 25565,
+                    'environment_key' => 'SERVER_PORT',
+                    'is_primary' => true,
+                ]],
+            ]);
         $reservationService->shouldReceive('completeProvisioning')
             ->once()
             ->with(
@@ -1024,10 +1041,14 @@ class PterodactylReservationIntegrationTest extends TestCase
 
         $pterodactyl = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret']) extends Pterodactyl
         {
+            public array $requests = [];
+
             public string $expectedEmail = '';
 
             public function request($url, $method = 'get', $data = []): array
             {
+                $this->requests[] = compact('url', 'method', 'data');
+
                 if ($url === '/api/application/users' && strtolower($method) === 'get') {
                     $externalId = (string) data_get($data, 'filter.external_id', '');
 
@@ -1080,6 +1101,17 @@ class PterodactylReservationIntegrationTest extends TestCase
 
         $this->assertSame(72, $result['server']);
         $this->assertSame('https://panel.example.com/server/existing', $result['link']);
+        $userLookup = collect($pterodactyl->requests)
+            ->first(fn (array $request) => $request['url'] === '/api/application/users'
+                && strtolower($request['method']) === 'get');
+        $this->assertSame(
+            "paymenter-user-{$service->user_id}",
+            data_get($userLookup, 'data.filter.external_id')
+        );
+        $this->assertNull(
+            collect($pterodactyl->requests)
+                ->first(fn (array $request) => strtolower($request['method']) === 'post')
+        );
     }
 
     public function test_installing_external_server_retries_without_consuming_the_reservation(): void
@@ -1236,6 +1268,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'product_id' => $fixture->product->id,
             'plan_id' => $fixture->plan->id,
         ]);
+        $this->markServiceReservationBacked($service);
 
         $reservationService = Mockery::mock(ReservationService::class);
         $reservationService->shouldReceive('beginProvisioning')->once()->andReturn([
@@ -2672,6 +2705,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'product_id' => $fixture->product->id,
             'plan_id' => $fixture->plan->id,
         ]);
+        $this->markServiceReservationBacked($service);
         $reservation = [
             'reservation_id' => 94,
             'panel_identity' => hash(
@@ -3439,6 +3473,25 @@ class PterodactylReservationIntegrationTest extends TestCase
             'type' => 'other',
             'enabled' => true,
         ]);
+    }
+
+    private function markServiceReservationBacked(Service $service): void
+    {
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class((int) $service->id) extends DurableFulfillmentService
+            {
+                public function __construct(
+                    private readonly int $serviceId
+                ) {}
+
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return (int) $service->id === $this->serviceId;
+                }
+            }
+        );
     }
 
     protected function migrateDatabases(): void
