@@ -567,10 +567,25 @@ class ExtensionHelper
                             'transaction_id' => $transactionId,
                         ];
 
-                    return $invoice->transactions()->updateOrCreate(
-                        $identity,
-                        $updateData
-                    );
+                    $existing = $invoice->transactions()
+                        ->where($identity)
+                        ->lockForUpdate()
+                        ->first();
+                    if ($existing !== null) {
+                        // The immutable identity, amount, and credit flag were
+                        // already proven by existingPaymentEvidence(). Do not
+                        // reassign their equivalent-but-differently-cast
+                        // values while finalizing a processing record.
+                        $existing->status = $status;
+                        if ($fee !== null) {
+                            $existing->fee = $fee;
+                        }
+                        $existing->save();
+
+                        return $existing;
+                    }
+
+                    return $invoice->transactions()->create($updateData);
                 }
             );
 

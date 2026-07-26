@@ -21,7 +21,7 @@ class InvoiceItemObserver
                 )
         ) {
             throw new \RuntimeException(
-                'Durable-fulfillment invoice lines are immutable.'
+                'Durable fulfillment lines are immutable.'
             );
         }
         event(new InvoiceItemEvent\Creating($invoice));
@@ -67,7 +67,7 @@ class InvoiceItemObserver
             )
         ) {
             throw new \RuntimeException(
-                'Durable-fulfillment invoice lines are immutable.'
+                'Durable fulfillment lines are immutable.'
             );
         }
 

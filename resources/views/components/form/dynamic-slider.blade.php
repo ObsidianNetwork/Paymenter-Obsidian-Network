@@ -1,4 +1,5 @@
 @php
+    $errors = $errors ?? new \Illuminate\Support\ViewErrorBag;
     $metadata = $config->metadata ?? [];
     $min = $metadata['min'] ?? 1024;
     $max = $metadata['max'] ?? 65536;
