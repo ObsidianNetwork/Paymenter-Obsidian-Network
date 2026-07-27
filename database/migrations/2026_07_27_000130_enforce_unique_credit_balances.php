@@ -19,7 +19,13 @@ return new class extends Migration
             return;
         }
 
-        if (DB::connection()->getDriverName() === 'mysql') {
+        if (
+            in_array(
+                DB::connection()->getDriverName(),
+                ['mysql', 'mariadb'],
+                true
+            )
+        ) {
             // MariaDB/MySQL DDL commits transactions implicitly. Hold a table
             // write lock from consolidation until ALTER TABLE has acquired its
             // metadata lock, so live credit writes cannot recreate a duplicate
