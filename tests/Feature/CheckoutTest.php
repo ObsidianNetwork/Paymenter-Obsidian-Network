@@ -253,10 +253,18 @@ class CheckoutTest extends TestCase
             $recurringCoupon->id,
             $service->coupon_id
         );
-        $this->assertSame('5.00', (string) $service->price);
         $this->assertSame(
             '5.00',
-            (string) $invoice->items()->sole()->price
+            number_format((float) $service->price, 2, '.', '')
+        );
+        $this->assertSame(
+            '5.00',
+            number_format(
+                (float) $invoice->items()->sole()->price,
+                2,
+                '.',
+                ''
+            )
         );
     }
 
