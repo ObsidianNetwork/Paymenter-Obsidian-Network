@@ -11,6 +11,7 @@ use App\Http\Requests\Api\Admin\Services\UpdateServiceRequest;
 use App\Http\Resources\ServiceResource;
 use App\Models\Service;
 use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use Dedoc\Scramble\Attributes\Group;
 use Dedoc\Scramble\Attributes\QueryParameter;
 use Illuminate\Http\Response;
@@ -76,8 +77,9 @@ class ServiceController extends ApiController
      */
     public function update(UpdateServiceRequest $request, Service $service)
     {
-        // Validate and update the service
-        $service->update($request->validated());
+        $service = app(
+            ServiceBillingAnchorMutationCoordinator::class
+        )->update($service, $request->validated());
 
         // Return the updated service as a JSON response
         return new ServiceResource($service);

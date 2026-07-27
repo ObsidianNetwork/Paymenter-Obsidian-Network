@@ -3,6 +3,7 @@
 namespace App\Classes;
 
 use App\Exceptions\DisplayException;
+use App\Models\Cart as CartModel;
 use App\Models\Coupon;
 use App\Models\Plan;
 use App\Models\Product;
@@ -10,14 +11,13 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\RateLimiter;
-use Illuminate\Support\Facades\Session;
 
 class Cart
 {
     public static function getOnce()
     {
-        if (!Cookie::has('cart') || !$cart = \App\Models\Cart::where('ulid', Cookie::get('cart'))->first()) {
-            return new \App\Models\Cart;
+        if (!Cookie::has('cart') || !$cart = CartModel::where('ulid', Cookie::get('cart'))->first()) {
+            return new CartModel;
         }
 
         return $cart->load('items.plan', 'items.product', 'items.product.configOptions.children.plans.prices');
@@ -31,7 +31,7 @@ class Cart
     public static function clear()
     {
         if (Cookie::has('cart')) {
-            \App\Models\Cart::where('ulid', Cookie::get('cart'))->delete();
+            CartModel::where('ulid', Cookie::get('cart'))->delete();
             Cookie::queue(Cookie::forget('cart'));
         }
     }
@@ -49,7 +49,7 @@ class Cart
             $cart->currency_code = session('currency', session('currency', config('settings.default_currency')));
             $cart->save();
             Cookie::queue('cart', $cart->ulid, 60 * 24 * 30); // 30 days
-            $cart = \App\Models\Cart::find($cart->id);
+            $cart = CartModel::find($cart->id);
         }
 
         return $cart;
@@ -175,11 +175,11 @@ class Cart
 
     private static function ensureDynamicQuantity($cart, Product $product, mixed $quantity, mixed $key): void
     {
-        if (! $product->usesDynamicResources()) {
+        if (!$product->usesDynamicResources()) {
             return;
         }
 
-        if ((int) $quantity !== 1 || ! is_numeric($quantity) || (float) $quantity !== 1.0) {
+        if ((int) $quantity !== 1 || !is_numeric($quantity) || (float) $quantity !== 1.0) {
             throw new DisplayException('Dynamic resource products require a quantity of one.');
         }
 
@@ -203,45 +203,55 @@ class Cart
      *
      * @throws DisplayException
      */
-    public static function validateCoupon($coupon_code)
-    {
-        $coupon = Coupon::where('code', $coupon_code)->first();
+    public static function validateCoupon(
+        $coupon_code,
+        ?CartModel $cart = null
+    ) {
+        return DB::transaction(function () use ($coupon_code, $cart) {
+            $coupon = Coupon::where('code', $coupon_code)->lockForUpdate()->first();
 
-        if (!$coupon) {
-            throw new DisplayException('Coupon code not found');
-        }
+            if (!$coupon) {
+                throw new DisplayException('Coupon code not found');
+            }
 
-        if ($coupon->expires_at && $coupon->expires_at->isPast()) {
-            throw new DisplayException('Coupon code has expired');
-        }
-        if ($coupon->starts_at && $coupon->starts_at->isFuture()) {
-            throw new DisplayException('Coupon code is not active yet');
-        }
-        if ($coupon->max_uses && $coupon->services->count() >= $coupon->max_uses) {
-            throw new DisplayException('Coupon code has reached its maximum uses');
-        }
-        if (Auth::check() && $coupon->hasExceededMaxUsesPerUser(Auth::id())) {
-            throw new DisplayException('You have already used this coupon the maximum number of times allowed');
-        }
-        if ($coupon->products->isNotEmpty()) {
-            $cart = self::get();
-            $applicable = false;
-            foreach ($cart->items as $item) {
-                if ($coupon->products->contains($item->product_id)) {
-                    $applicable = true;
-                    break;
+            if ($coupon->expires_at && $coupon->expires_at->isPast()) {
+                throw new DisplayException('Coupon code has expired');
+            }
+            if ($coupon->starts_at && $coupon->starts_at->isFuture()) {
+                throw new DisplayException('Coupon code is not active yet');
+            }
+            if ($coupon->max_uses && $coupon->services()->count() >= $coupon->max_uses) {
+                throw new DisplayException('Coupon code has reached its maximum uses');
+            }
+            if (Auth::check() && $coupon->hasExceededMaxUsesPerUser(Auth::id())) {
+                throw new DisplayException('You have already used this coupon the maximum number of times allowed');
+            }
+            if ($coupon->products->isNotEmpty()) {
+                $cart ??= self::get();
+                $applicable = false;
+                foreach ($cart->items as $item) {
+                    if ($coupon->products->contains($item->product_id)) {
+                        $applicable = true;
+                        break;
+                    }
+                }
+                if (!$applicable) {
+                    throw new DisplayException('Coupon code is not valid for any items in your cart');
                 }
             }
-            if (!$applicable) {
-                throw new DisplayException('Coupon code is not valid for any items in your cart');
-            }
-        }
 
-        return $coupon;
+            return $coupon;
+        });
     }
 
     public static function applyCoupon($code)
     {
+        if (RateLimiter::tooManyAttempts('apply_coupon_' . request()->ip(), 5)) {
+            throw new DisplayException('Too many attempts. Please try again later.');
+        }
+
+        RateLimiter::hit('apply_coupon_' . request()->ip());
+
         $coupon = self::validateCoupon($code);
 
         $wasSuccessful = false;
@@ -272,28 +282,49 @@ class Cart
      *
      * @return bool True if coupon is valid, false otherwise
      */
-    public static function validateAndRefreshCoupon()
-    {
-        if (!self::get()->coupon_id || !self::get()->coupon) {
+    public static function validateAndRefreshCoupon(
+        ?CartModel $cart = null,
+        bool $removeWhenInvalid = true
+    ) {
+        $cart ??= self::get();
+        if (!$cart->coupon_id || !$cart->coupon) {
             return true;
         }
 
         try {
-            $coupon = self::get()->coupon;
-            self::validateCoupon($coupon->code);
+            $coupon = self::validateCoupon(
+                $cart->coupon->code,
+                $cart
+            );
+            // validateCoupon() acquires the authoritative coupon row lock.
+            // Keep pricing on that exact model instead of the relation that
+            // may have been loaded before the lock was acquired.
+            $cart->setRelation('coupon', $coupon);
 
             return true;
         } catch (DisplayException $e) {
-            // Coupon is invalid, remove it
-            self::removeCoupon();
+            if ($removeWhenInvalid) {
+                self::removeCoupon($cart);
+            }
 
             return false;
         }
     }
 
-    public static function removeCoupon()
-    {
-        self::get()->update(['coupon_id' => null]);
-        self::get()->load('coupon');
+    public static function removeCoupon(
+        ?CartModel $cart = null,
+        ?int $expectedCouponId = null
+    ): bool {
+        $cart ??= self::get();
+        $query = CartModel::query()->whereKey($cart->getKey());
+        if ($expectedCouponId !== null) {
+            $query->where('coupon_id', $expectedCouponId);
+        }
+        $removed = $query->update(['coupon_id' => null]) === 1;
+        if ($cart->exists) {
+            $cart->refresh()->load('coupon');
+        }
+
+        return $removed;
     }
 }

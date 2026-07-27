@@ -11,7 +11,7 @@ class DynamicSliderMetadataRule implements ValidationRule
 {
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
-        if (! is_array($value)) {
+        if (!is_array($value)) {
             $fail('The dynamic slider metadata must be an array.');
 
             return;
@@ -132,8 +132,8 @@ class DynamicSliderMetadataRule implements ValidationRule
     private function normalizeFormInteger(mixed $value): mixed
     {
         if (
-            ! is_float($value)
-            || ! is_finite($value)
+            !is_float($value)
+            || !is_finite($value)
             || floor($value) !== $value
             || abs($value) > StrictInteger::MAX_STORED_SLIDER_VALUE
         ) {

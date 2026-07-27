@@ -3,7 +3,10 @@
 namespace App\Models;
 
 use App\Helpers\ExtensionHelper;
+use App\Models\Concerns\SerializesCapacityConfigurationMutations;
 use App\Services\Extensions\ExtensionLifecycleGuard;
+use App\Services\Invoice\BillingChargeAttemptService;
+use App\Services\Invoice\InvoicePaymentInitiationService;
 use App\Services\Service\DurableFulfillmentService;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -12,7 +15,10 @@ use OwenIt\Auditing\Contracts\Auditable;
 
 class Extension extends Model implements Auditable
 {
-    use HasFactory, SoftDeletes, Traits\Auditable;
+    use HasFactory;
+    use SerializesCapacityConfigurationMutations;
+    use SoftDeletes;
+    use Traits\Auditable;
 
     protected $fillable = [
         'name',
@@ -34,11 +40,52 @@ class Extension extends Model implements Auditable
         });
 
         static::updating(function (Extension $extension): void {
+            if (
+                $extension->isDirty([
+                    'enabled',
+                    'extension',
+                    'type',
+                ])
+            ) {
+                self::lockGatewayRowForMutation($extension);
+            }
+            if (
+                $extension->isDirty(['extension', 'type'])
+            ) {
+                if (
+                    $extension->type === 'gateway'
+                    || $extension->getRawOriginal('type') === 'gateway'
+                ) {
+                    app(BillingChargeAttemptService::class)
+                        ->assertGatewayMutable((int) $extension->id);
+                    app(InvoicePaymentInitiationService::class)
+                        ->assertGatewayMutable((int) $extension->id);
+                }
+                if (
+                    $extension->type === 'server'
+                    || $extension->getRawOriginal('type') === 'server'
+                ) {
+                    app(DurableFulfillmentService::class)
+                        ->assertServerHostMutable(
+                            (int) $extension->id
+                        );
+                }
+            }
             if ($extension->isDirty('enabled')) {
                 if ((bool) $extension->enabled) {
                     app(ExtensionLifecycleGuard::class)
                         ->assertCanActivate($extension);
                 } else {
+                    if ($extension->type === 'gateway') {
+                        app(BillingChargeAttemptService::class)
+                            ->assertGatewayMutable(
+                                (int) $extension->id
+                            );
+                        app(InvoicePaymentInitiationService::class)
+                            ->assertGatewayMutable(
+                                (int) $extension->id
+                            );
+                    }
                     if ($extension->type === 'server') {
                         app(DurableFulfillmentService::class)
                             ->assertServerHostMutable((int) $extension->id);
@@ -50,6 +97,13 @@ class Extension extends Model implements Auditable
         });
 
         static::deleting(function (Extension $extension): void {
+            self::lockGatewayRowForMutation($extension);
+            if ($extension->type === 'gateway') {
+                app(BillingChargeAttemptService::class)
+                    ->assertGatewayMutable((int) $extension->id);
+                app(InvoicePaymentInitiationService::class)
+                    ->assertGatewayMutable((int) $extension->id);
+            }
             if ($extension->type === 'server') {
                 app(DurableFulfillmentService::class)
                     ->assertServerHostMutable((int) $extension->id);
@@ -57,6 +111,31 @@ class Extension extends Model implements Auditable
             app(ExtensionLifecycleGuard::class)
                 ->assertCanDeactivate($extension);
         });
+    }
+
+    private static function lockGatewayRowForMutation(
+        Extension $extension
+    ): void {
+        if (
+            !$extension->exists
+            || (int) $extension->id <= 0
+            || !in_array(
+                'gateway',
+                [
+                    (string) $extension->getRawOriginal('type'),
+                    (string) $extension->type,
+                ],
+                true
+            )
+        ) {
+            return;
+        }
+
+        Extension::withTrashed()
+            ->whereKey((int) $extension->id)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->firstOrFail(['id']);
     }
 
     /**

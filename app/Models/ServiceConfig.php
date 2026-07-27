@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\SerializesCapacityConfigurationMutations;
 use App\Observers\ServiceConfigObserver;
 use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -10,7 +11,7 @@ use OwenIt\Auditing\Contracts\Auditable;
 #[ObservedBy([ServiceConfigObserver::class])]
 class ServiceConfig extends Model implements Auditable
 {
-    use HasFactory, Traits\Auditable;
+    use HasFactory, SerializesCapacityConfigurationMutations, Traits\Auditable;
 
     protected $fillable = [
         'service_id',

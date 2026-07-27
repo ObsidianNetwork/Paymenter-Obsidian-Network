@@ -20,17 +20,15 @@ class Price extends Model implements Auditable
     protected static function booted(): void
     {
         static::saving(
-            fn (Price $price) =>
-                app(CapacityConfigurationMutationGuard::class)
-                    ->assertPriceMutable(
-                        $price,
-                        $price->exists && $price->isDirty('plan_id')
-                    )
+            fn (Price $price) => app(CapacityConfigurationMutationGuard::class)
+                ->assertPriceMutable(
+                    $price,
+                    $price->exists && $price->isDirty('plan_id')
+                )
         );
         static::deleting(
-            fn (Price $price) =>
-                app(CapacityConfigurationMutationGuard::class)
-                    ->assertPriceMutable($price)
+            fn (Price $price) => app(CapacityConfigurationMutationGuard::class)
+                ->assertPriceMutable($price)
         );
     }
 

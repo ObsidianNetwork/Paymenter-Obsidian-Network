@@ -24,14 +24,14 @@ final class PanelEndpointIdentity
                 previous: $exception
             );
         }
-        if (! is_array($parts)) {
+        if (!is_array($parts)) {
             throw new \InvalidArgumentException('The panel URL is invalid.');
         }
 
         $scheme = strtolower((string) ($parts['scheme'] ?? ''));
         $host = strtolower((string) ($parts['host'] ?? ''));
         if (
-            ! in_array($scheme, ['http', 'https'], true)
+            !in_array($scheme, ['http', 'https'], true)
             || $host === ''
         ) {
             throw new \InvalidArgumentException(
@@ -68,7 +68,7 @@ final class PanelEndpointIdentity
             $port = null;
         }
 
-        if (str_contains($host, ':') && ! str_starts_with($host, '[')) {
+        if (str_contains($host, ':') && !str_starts_with($host, '[')) {
             $host = "[{$host}]";
         }
         $path = (string) ($parts['path'] ?? '');
@@ -94,10 +94,10 @@ final class PanelEndpointIdentity
         $path = $trimmedPath;
 
         return $scheme
-            .'://'
-            .$host
-            .($port !== null ? ":{$port}" : '')
-            .$path;
+            . '://'
+            . $host
+            . ($port !== null ? ":{$port}" : '')
+            . $path;
     }
 
     public static function hash(string $url): string

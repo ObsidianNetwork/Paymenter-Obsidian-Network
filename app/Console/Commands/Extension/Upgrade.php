@@ -55,7 +55,7 @@ class Upgrade extends Command
         if (Artisan::call('queue:restart') !== 0) {
             $this->error(
                 'Extension upgraded, but queue workers could not be signalled '
-                .'to restart. Keep Paymenter in maintenance and restart them manually.'
+                . 'to restart. Keep Paymenter in maintenance and restart them manually.'
             );
 
             return Command::FAILURE;

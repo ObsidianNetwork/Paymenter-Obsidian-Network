@@ -6,16 +6,19 @@ use App\Classes\Cart as ClassesCart;
 use App\Classes\Price;
 use App\Exceptions\DisplayException;
 use App\Helpers\ExtensionHelper;
-use App\Jobs\Server\CreateJob;
+use App\Models\Cart as CartModel;
+use App\Models\ConfigOption;
+use App\Models\Extension;
 use App\Models\Invoice;
 use App\Models\Order;
 use App\Models\Service;
 use App\Models\User;
 use App\Services\Service\CapacityConfigurationLockService;
 use App\Services\Service\CapacityServiceCreationCoordinator;
+use App\Services\Service\FulfillmentStatusTransitionService;
+use App\Services\Service\ServiceJobDispatchService;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\RateLimiter;
 use Livewire\Attributes\Locked;
 use Throwable;
 
@@ -59,12 +62,6 @@ class Cart extends Component
         if ($this->coupon && ClassesCart::get()->coupon_id) {
             return $this->notify('Coupon code already applied', 'error');
         }
-        // Rate limit to prevent abuse
-        if (RateLimiter::tooManyAttempts('apply_coupon_' . request()->ip(), 5)) {
-            return $this->notify('Too many attempts. Please try again later.', 'error');
-        }
-
-        RateLimiter::hit('apply_coupon_' . request()->ip());
 
         try {
             $cart = ClassesCart::applyCoupon($this->coupon);
@@ -118,20 +115,62 @@ class Cart extends Component
             return $this->notify('You must accept the terms of service', 'error');
         }
 
-        // Re-validate coupon if one exists
-        if (ClassesCart::get()->coupon && !ClassesCart::validateAndRefreshCoupon()) {
-            $this->coupon = null;
-            $this->updateTotal();
-
-            return $this->notify('This coupon can no longer be used', 'error');
+        $cartId = ClassesCart::get()->getKey();
+        if ($cartId === null) {
+            return $this->notify('Your cart is empty', 'error');
         }
 
         // Start database transaction
         DB::beginTransaction();
         try {
-            $cart = ClassesCart::get();
-
             $user = User::where('id', Auth::id())->lockForUpdate()->first();
+            $cart = CartModel::query()
+                ->whereKey($cartId)
+                ->lockForUpdate()
+                ->first();
+            if ($cart === null) {
+                throw new DisplayException(
+                    'This cart was already checked out. Refresh to view the created order.'
+                );
+            }
+            if (
+                $cart->user_id !== null
+                && (int) $cart->user_id !== (int) $user->id
+            ) {
+                throw new DisplayException(
+                    'This cart belongs to a different customer.'
+                );
+            }
+            if ($cart->user_id === null) {
+                $cart->user_id = $user->id;
+                $cart->save();
+            }
+            $cart->load([
+                'coupon',
+                'items.plan',
+                'items.product',
+                'items.product.configOptions.children.plans.prices',
+            ]);
+            if ($cart->items->isEmpty()) {
+                throw new DisplayException('Your cart is empty.');
+            }
+
+            if (
+                $cart->coupon
+                && !ClassesCart::validateAndRefreshCoupon($cart, false)
+            ) {
+                $invalidCouponId = (int) $cart->coupon_id;
+                DB::rollBack();
+                ClassesCart::removeCoupon($cart, $invalidCouponId);
+                $this->coupon = null;
+                $this->updateTotal();
+
+                return $this->notify(
+                    'This coupon can no longer be used',
+                    'error'
+                );
+            }
+
             // Lock the orderproducts
             foreach ($cart->items->sortBy([
                 ['product_id', 'asc'],
@@ -161,25 +200,38 @@ class Cart extends Component
                 }
                 $this->refreshCapacityReservation($item);
 
-                if (
-                    $item->product->per_user_limit > 0 && ($user->services->where('product_id', $item->product->id)->count() >= $item->product->per_user_limit ||
-                        $cart->items->filter(fn ($it) => $it->product->id == $item->product->id)->sum(fn ($it) => $it->quantity) + $user->services->where('product_id', $item->product->id)->count() > $item->product->per_user_limit
-                    )
-                ) {
-                    throw new DisplayException(__('product.user_limit', ['product' => $item->product->name]));
+                if ($lockedProduct->per_user_limit > 0) {
+                    $existingServiceCount = $user->services()
+                        ->where('product_id', $lockedProduct->id)
+                        ->count();
+                    $cartQuantityForProduct = $cart->items
+                        ->where('product_id', $lockedProduct->id)
+                        ->sum('quantity');
+
+                    if (
+                        $existingServiceCount
+                            >= $lockedProduct->per_user_limit
+                        || ($cartQuantityForProduct + $existingServiceCount)
+                            > $lockedProduct->per_user_limit
+                    ) {
+                        throw new DisplayException(__('product.user_limit', [
+                            'product' => $lockedProduct->name,
+                        ]));
+                    }
                 }
-                if ($item->product->stock !== null) {
-                    if ($item->product->stock < $item->quantity) {
-                        throw new DisplayException(__('product.out_of_stock', ['product' => $item->product->name]));
+                if ($lockedProduct->stock !== null) {
+                    if ($lockedProduct->stock < $item->quantity) {
+                        throw new DisplayException(__('product.out_of_stock', [
+                            'product' => $lockedProduct->name,
+                        ]));
                     }
 
-                    $item->product->stock -= $item->quantity;
-                    $item->product->save();
+                    $lockedProduct->stock -= $item->quantity;
+                    $lockedProduct->save();
                 }
             }
             $requiresPayment = $cart->items->contains(
-                fn ($item): bool =>
-                    ((float) $item->price->total * (int) $item->quantity) > 0
+                fn ($item): bool => ((float) $item->price->total * (int) $item->quantity) > 0
             );
             // Create the order
             $order = new Order([
@@ -208,7 +260,7 @@ class Cart extends Component
             // Create the services
             foreach ($cart->items as $item) {
                 // Is it a lifetime coupon, then we can adjust the price of the service
-                if (is_object($this->coupon) && ($this->coupon->recurring === null || (int) $this->coupon->recurring == 1)) {
+                if (is_object($cart->coupon) && ($cart->coupon->recurring === null || (int) $cart->coupon->recurring == 1)) {
                     // Apply coupon only to first billing cycle (use original price for recurring)
                     $price = $item->price->original_price;
                 } else {
@@ -223,6 +275,15 @@ class Cart extends Component
                         'product_id' => $item->product->id,
                         'plan_id' => $item->plan->id,
                         'price' => $price,
+                        // Price::price is recurring-only and already reflects
+                        // the current-cycle coupon and exclusive tax. Never
+                        // seed refundable period value from total, which also
+                        // contains the one-time setup fee.
+                        'period_base_price' => $item->price->price,
+                        'current_period_price' => $item->price->price,
+                        'pricing_ledger_started_at' => now(),
+                        'pricing_ledger_verified_at' => $invoice === null ? now() : null,
+                        'billing_cycles_completed' => 1,
                         'quantity' => $item->quantity,
                         'coupon_id' => $cart->coupon_id,
                     ])
@@ -310,23 +371,31 @@ class Cart extends Component
                 if ($invoice === null) {
                     if ($reservationService !== null) {
                         $reservationService->commitFreeService($service);
-                        DB::afterCommit(fn () => CreateJob::dispatch($service));
+                        app(ServiceJobDispatchService::class)
+                            ->requestCreate($service);
                     } else {
                         // Preserve the existing behavior for non-dynamic products.
+                        FulfillmentStatusTransitionService::run(
+                            $service,
+                            function () use ($service): void {
+                                $service->status =
+                                    Service::STATUS_ACTIVE;
+                                $service->expires_at =
+                                    $service->calculateNextDueDate();
+                                $service->save();
+                            }
+                        );
                         if ($service->product->server) {
-                            DB::afterCommit(fn () => CreateJob::dispatch($service));
+                            app(ServiceJobDispatchService::class)
+                                ->requestCreate($service);
                         }
-                        $service->status = Service::STATUS_ACTIVE;
-                        $service->expires_at = $service->calculateNextDueDate();
-                        $service->save();
                     }
                 }
             }
 
             usort(
                 $capacityBindings,
-                fn (array $left, array $right): int =>
-                    $left['service']->id <=> $right['service']->id
+                fn (array $left, array $right): int => $left['service']->id <=> $right['service']->id
             );
             foreach ($capacityBindings as $binding) {
                 $binding['reservation_service']->bindCartItemToService(
@@ -338,13 +407,18 @@ class Cart extends Component
                 );
             }
 
+            // Consume the cart before releasing the user/cart locks. A second
+            // request with the same cookie must observe a missing cart instead
+            // of replaying the stale item collection into duplicate services.
+            CartModel::query()->whereKey($cart->id)->delete();
+
             // Commit the transaction
             DB::commit();
 
             // Clear the cart
             ClassesCart::clear();
 
-            if (! $requiresPayment) {
+            if (!$requiresPayment) {
                 // Is it only one item? Then redirect to the service page
                 if ($order->services->count() == 1) {
                     return $this->redirect(route('services.show', $order->services->first()), true);
@@ -385,7 +459,7 @@ class Cart extends Component
     private function capacityReservationService($item): mixed
     {
         $usesPterodactyl = $item->product->server?->extension === 'Pterodactyl';
-        $hasDynamicSlider = $usesPterodactyl && \App\Models\ConfigOption::query()
+        $hasDynamicSlider = $usesPterodactyl && ConfigOption::query()
             ->whereHas('products', fn ($query) => $query->whereKey($item->product_id))
             ->where('type', 'dynamic_slider')
             ->where('hidden', false)
@@ -397,17 +471,17 @@ class Cart extends Component
                 true
             ));
 
-        if (! $hasDynamicSlider) {
+        if (!$hasDynamicSlider) {
             return null;
         }
 
         $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
-        $reservationExtensionEnabled = \App\Models\Extension::query()
+        $reservationExtensionEnabled = Extension::query()
             ->where('extension', 'DynamicPterodactyl')
             ->where('enabled', true)
             ->exists();
 
-        if (! $reservationExtensionEnabled || ! class_exists($reservationServiceClass)) {
+        if (!$reservationExtensionEnabled || !class_exists($reservationServiceClass)) {
             throw new DisplayException('Dynamic capacity reservations are unavailable. Please contact support.');
         }
 

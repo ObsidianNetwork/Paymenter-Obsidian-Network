@@ -71,14 +71,36 @@ class PaymentMethods extends Component
         }
 
         // Call the gateway to cancel the billing agreement if supported
-        $succeeded = ExtensionHelper::cancelBillingAgreement($billingAgreement);
+        try {
+            $succeeded = ExtensionHelper::cancelBillingAgreement(
+                $billingAgreement
+            );
+        } catch (\Throwable $exception) {
+            report($exception);
+            $succeeded = false;
+        }
 
         if ($succeeded) {
             $this->notify('Payment method removed successfully', 'success');
-            $billingAgreement->delete();
-        } else {
-            $this->notify('Failed to remove payment method', 'error');
+
+            return;
         }
+        $revokedLocally = Auth::user()
+            ->billingAgreements()
+            ->withTrashed()
+            ->whereKey($billingAgreement->id)
+            ->whereNotNull('deleted_at')
+            ->exists();
+        if ($revokedLocally) {
+            $this->notify(
+                'Payment method disabled locally, but provider removal could not be confirmed. Contact support if it remains visible at the provider.',
+                'warning'
+            );
+
+            return;
+        }
+
+        $this->notify('Failed to remove payment method', 'error');
     }
 
     public function cancelSetup()

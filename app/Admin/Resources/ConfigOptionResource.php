@@ -128,7 +128,7 @@ class ConfigOptionResource extends Resource
                             ->schema([
                                 // Hidden field for server-side pricing validation
                                 Hidden::make('metadata.pricing')
-                                    ->rules([new DynamicSliderPricingRule()])
+                                    ->rules([new DynamicSliderPricingRule])
                                     ->dehydrated(true),
                                 Select::make('metadata.resource_type')
                                     ->label('Resource Type')

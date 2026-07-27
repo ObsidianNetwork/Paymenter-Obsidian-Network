@@ -16,8 +16,8 @@ class CapacityUpgradeReservationIdentity
     {
         if (
             $serviceUpgradeId <= 0
-            || ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumns('ptero_resource_reservations', [
+            || !Schema::hasTable('ptero_resource_reservations')
+            || !Schema::hasColumns('ptero_resource_reservations', [
                 'purpose',
                 'service_upgrade_id',
             ])
@@ -33,8 +33,41 @@ class CapacityUpgradeReservationIdentity
 
     public function requiresCoordinator(ServiceUpgrade $upgrade): bool
     {
-        if ($this->exists((int) $upgrade->id)) {
+        $hasDynamicReservation = $this->exists((int) $upgrade->id);
+        if (
+            $upgrade->capacity_mode
+                === ServiceUpgrade::CAPACITY_MODE_DYNAMIC
+        ) {
+            if ($upgrade->target_stock_reserved_at !== null) {
+                throw new \RuntimeException(
+                    'The upgrade has conflicting dynamic and static capacity ownership.'
+                );
+            }
+
             return true;
+        }
+        if (
+            $upgrade->capacity_mode
+                === ServiceUpgrade::CAPACITY_MODE_STATIC
+        ) {
+            if ($hasDynamicReservation) {
+                throw new \RuntimeException(
+                    'The upgrade has conflicting static and dynamic capacity ownership.'
+                );
+            }
+
+            return false;
+        }
+        if ($upgrade->capacity_mode !== null) {
+            throw new \RuntimeException(
+                'The upgrade has an invalid durable capacity mode.'
+            );
+        }
+        if ($hasDynamicReservation) {
+            return true;
+        }
+        if ($upgrade->target_stock_reserved_at !== null) {
+            return false;
         }
 
         $upgrade->loadMissing(['service.product', 'product']);

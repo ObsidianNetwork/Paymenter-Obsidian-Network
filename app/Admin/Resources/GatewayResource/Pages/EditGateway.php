@@ -8,6 +8,7 @@ use Filament\Actions\DeleteAction;
 use Filament\Resources\Pages\EditRecord;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
 
 class EditGateway extends EditRecord
 {
@@ -31,29 +32,47 @@ class EditGateway extends EditRecord
 
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
-        $record->update(Arr::except($data, ['settings']));
+        // Extension update hooks may mutate a remote gateway. A database
+        // deadlock must not replay those calls automatically.
+        return DB::transaction(function () use ($record, $data): Model {
+            $record->update(Arr::except($data, ['settings']));
 
-        if (!isset($data['settings'])) {
-            return $record;
-        }
+            if (!isset($data['settings'])) {
+                return $record;
+            }
 
-        $config = ExtensionHelper::getConfig($record->type, $record->extension);
+            $config = ExtensionHelper::getConfig(
+                $record->type,
+                $record->extension
+            );
 
-        foreach ($config as $option) {
-            $record->settings()->updateOrCreate([
-                'key' => $option['name'],
-                'settingable_id' => $record->id,
-                'settingable_type' => $record->getMorphClass(),
-            ], [
-                'type' => $option['database_type'] ?? 'string',
-                'value' => isset($data['settings'][$option['name']]) ? (is_array($data['settings'][$option['name']]) ? json_encode($data['settings'][$option['name']]) : $data['settings'][$option['name']]) : null,
-                'encrypted' => $option['encrypted'] ?? false,
-            ]);
-        }
+            foreach ($config as $option) {
+                $value = $data['settings'][$option['name']] ?? null;
+                $record->settings()->updateOrCreate([
+                    'key' => $option['name'],
+                    'settingable_id' => $record->id,
+                    'settingable_type' => $record->getMorphClass(),
+                ], [
+                    'type' => $option['database_type'] ?? 'string',
+                    'value' => is_array($value)
+                        ? json_encode($value)
+                        : $value,
+                    'encrypted' => $option['encrypted'] ?? false,
+                ]);
+            }
 
-        ExtensionHelper::call($record, 'updated', [$record], mayFail: true);
+            // mutateFormDataBeforeFill() normally loads and caches this
+            // relation. Hooks must see the values just written above, not the
+            // settings that were present when the edit form was opened.
+            $record->unsetRelation('settings');
 
-        // Maybe the extension changed the record, so we need to refresh it
-        return $record->refresh();
+            if (ExtensionHelper::hasFunction($record, 'updated')) {
+                ExtensionHelper::call($record, 'updated', [$record]);
+            }
+
+            // Maybe the extension changed the record, so refresh it while the
+            // validated settings transaction is still open.
+            return $record->refresh();
+        });
     }
 }

@@ -9,18 +9,22 @@ use App\Models\ConfigOption;
 use App\Models\Extension;
 use App\Models\Invoice;
 use App\Models\InvoiceTransaction;
+use App\Models\Server;
 use App\Models\Service;
 use App\Models\ServiceUpgrade;
-use App\Models\Server;
 use App\Models\User;
+use App\Services\Invoice\CancelInvoiceService;
 use App\Services\Invoice\CapacityInvoicePaymentService;
 use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Service\CapacityServiceCreationCoordinator;
 use App\Services\Service\DurableFulfillmentService;
 use App\Services\Service\RenewServiceService;
 use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
+use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
+use App\Services\ServiceUpgrade\ServiceUpgradeReconciliationService;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
 use App\Services\ServiceUpgrade\UpgradeFailureAlertService;
+use App\Support\LegacyServiceUpgradeMigration;
 use App\Support\PanelEndpointIdentity;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Foundation\Testing\RefreshDatabaseState;
@@ -51,6 +55,458 @@ class PterodactylReservationIntegrationTest extends TestCase
             $source
         );
         $this->assertStringNotContainsString('->retry(', $source);
+    }
+
+    public function test_product_configuration_loads_every_option_page_in_order(): void
+    {
+        $pages = [
+            '/api/application/nodes' => PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/nodes',
+                ['id' => 1, 'name' => 'Node One'],
+                ['id' => 2, 'name' => 'Node Two']
+            ),
+            '/api/application/locations' => PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/locations',
+                ['id' => 11, 'short' => 'SYD'],
+                ['id' => 12, 'short' => 'MEL']
+            ),
+            '/api/application/nests' => PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/nests',
+                ['id' => 21, 'name' => 'Games'],
+                ['id' => 22, 'name' => 'Applications']
+            ),
+            '/api/application/nests/21/eggs' => PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/nests/21/eggs',
+                ['id' => 31, 'name' => 'Minecraft'],
+                ['id' => 32, 'name' => 'Terraria']
+            ),
+        ];
+        $provisioner = new PterodactylConfigurationCollectionStub($pages);
+
+        $config = collect($provisioner->getProductConfig([
+            'nest_id' => 21,
+        ]))->keyBy('name');
+
+        $this->assertSame(
+            [1 => 'Node One', 2 => 'Node Two'],
+            $config['node']['options']
+        );
+        $this->assertSame(
+            [11 => 'SYD', 12 => 'MEL'],
+            $config['location_ids']['options']
+        );
+        $this->assertSame(
+            [21 => 'Games', 22 => 'Applications'],
+            $config['nest_id']['options']
+        );
+        $this->assertSame(
+            [31 => 'Minecraft', 32 => 'Terraria'],
+            $config['egg_id']['options']
+        );
+        $this->assertSame([
+            ['/api/application/nodes', 1],
+            ['/api/application/nodes', 2],
+            ['/api/application/locations', 1],
+            ['/api/application/locations', 2],
+            ['/api/application/nests', 1],
+            ['/api/application/nests', 2],
+            ['/api/application/nests/21/eggs', 1],
+            ['/api/application/nests/21/eggs', 2],
+        ], $provisioner->requests);
+    }
+
+    public function test_product_configuration_rejects_malformed_pagination(): void
+    {
+        $nodes =
+            PterodactylConfigurationCollectionResponse::singlePage(
+                '/api/application/nodes',
+                [['id' => 1, 'name' => 'Node One']]
+            );
+        $nodes[1]['meta']['pagination']['current_page'] = 2;
+        $provisioner = new PterodactylConfigurationCollectionStub([
+            '/api/application/nodes' => $nodes,
+        ]);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'node configuration lookup returned invalid pagination metadata'
+        );
+
+        $provisioner->getProductConfig();
+    }
+
+    public function test_product_configuration_rejects_pagination_that_changes_between_pages(): void
+    {
+        $nodes =
+            PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/nodes',
+                ['id' => 1, 'name' => 'Node One'],
+                ['id' => 2, 'name' => 'Node Two']
+            );
+        $nodes[2]['meta']['pagination']['total'] = 3;
+        $nodes[2]['meta']['pagination']['per_page'] = 2;
+        $provisioner = new PterodactylConfigurationCollectionStub([
+            '/api/application/nodes' => $nodes,
+        ]);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'node configuration pagination changed during traversal'
+        );
+
+        $provisioner->getProductConfig();
+    }
+
+    public function test_product_configuration_rejects_non_monotonic_pagination_links(): void
+    {
+        $nodes =
+            PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/nodes',
+                ['id' => 1, 'name' => 'Node One'],
+                ['id' => 2, 'name' => 'Node Two']
+            );
+        $nodes[1]['meta']['pagination']['links']['next'] =
+            'https://panel.example.com/api/application/nodes?page=3';
+        $provisioner = new PterodactylConfigurationCollectionStub([
+            '/api/application/nodes' => $nodes,
+        ]);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'node configuration lookup returned non-monotonic pagination metadata'
+        );
+
+        $provisioner->getProductConfig();
+    }
+
+    public function test_product_configuration_rejects_a_truncated_page(): void
+    {
+        $provisioner = new PterodactylConfigurationCollectionStub([
+            '/api/application/nodes' => [
+                1 => PterodactylUserCollectionResponse::page(
+                    [[
+                        'attributes' => [
+                            'id' => 1,
+                            'name' => 'Node One',
+                        ],
+                    ]],
+                    total: 2,
+                    perPage: 1,
+                    currentPage: 1,
+                    totalPages: 2,
+                    endpoint: '/api/application/nodes'
+                ),
+                2 => PterodactylUserCollectionResponse::page(
+                    [],
+                    total: 2,
+                    perPage: 1,
+                    currentPage: 2,
+                    totalPages: 2,
+                    endpoint: '/api/application/nodes'
+                ),
+            ],
+        ]);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'node configuration lookup returned invalid pagination metadata'
+        );
+
+        $provisioner->getProductConfig();
+    }
+
+    public function test_product_configuration_rejects_duplicate_ids_across_pages(): void
+    {
+        $provisioner = new PterodactylConfigurationCollectionStub([
+            '/api/application/nodes' => PterodactylConfigurationCollectionResponse::twoPages(
+                '/api/application/nodes',
+                ['id' => 1, 'name' => 'Node One'],
+                ['id' => 1, 'name' => 'Node One Again']
+            ),
+        ]);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'node configuration lookup returned a duplicate option identity'
+        );
+
+        $provisioner->getProductConfig();
+    }
+
+    public function test_product_configuration_surfaces_egg_lookup_failures(): void
+    {
+        $provisioner = new PterodactylConfigurationCollectionStub(
+            [
+                '/api/application/nodes' => PterodactylConfigurationCollectionResponse::singlePage(
+                    '/api/application/nodes',
+                    [['id' => 1, 'name' => 'Node One']]
+                ),
+                '/api/application/locations' => PterodactylConfigurationCollectionResponse::singlePage(
+                    '/api/application/locations',
+                    [['id' => 11, 'short' => 'SYD']]
+                ),
+                '/api/application/nests' => PterodactylConfigurationCollectionResponse::singlePage(
+                    '/api/application/nests',
+                    [['id' => 21, 'name' => 'Games']]
+                ),
+            ],
+            [
+                '/api/application/nests/21/eggs' => new \Exception('Panel egg endpoint unavailable.'),
+            ]
+        );
+
+        $this->expectException(\Exception::class);
+        $this->expectExceptionMessage(
+            'Pterodactyl egg configuration lookup failed: Panel egg endpoint unavailable.'
+        );
+
+        $provisioner->getProductConfig(['nest_id' => 21]);
+    }
+
+    public function test_customer_lookup_finds_an_exact_match_on_page_two(): void
+    {
+        $expectedExternalId = 'paymenter-user-42';
+        $provisioner = new PterodactylUserLookupStub([
+            1 => PterodactylUserCollectionResponse::page(
+                [[
+                    'attributes' => [
+                        'id' => 44,
+                        'external_id' => "{$expectedExternalId}-similar",
+                    ],
+                ]],
+                total: 2,
+                perPage: 1,
+                currentPage: 1,
+                totalPages: 2
+            ),
+            2 => PterodactylUserCollectionResponse::page(
+                [[
+                    'attributes' => [
+                        'id' => 45,
+                        'external_id' => $expectedExternalId,
+                    ],
+                ]],
+                total: 2,
+                perPage: 1,
+                currentPage: 2,
+                totalPages: 2
+            ),
+        ]);
+        $lookup = new \ReflectionMethod(
+            Pterodactyl::class,
+            'pterodactylUserMatches'
+        );
+        $lookup->setAccessible(true);
+
+        $matches = $lookup->invoke(
+            $provisioner,
+            ['external_id' => $expectedExternalId],
+            'external_id',
+            $expectedExternalId
+        );
+
+        $this->assertSame([45], array_column($matches, 'id'));
+        $this->assertSame(
+            [1, 2],
+            array_column($provisioner->requests, 'page')
+        );
+        foreach ($provisioner->requests as $request) {
+            $this->assertSame(
+                ['external_id' => $expectedExternalId],
+                $request['filter']
+            );
+        }
+    }
+
+    public function test_customer_lookup_rejects_a_duplicate_on_page_two(): void
+    {
+        $expectedExternalId = 'paymenter-user-42';
+        $user = fn (int $id): array => [
+            'attributes' => [
+                'id' => $id,
+                'external_id' => $expectedExternalId,
+            ],
+        ];
+        $provisioner = new PterodactylUserLookupStub([
+            1 => PterodactylUserCollectionResponse::page(
+                [$user(44)],
+                total: 2,
+                perPage: 1,
+                currentPage: 1,
+                totalPages: 2
+            ),
+            2 => PterodactylUserCollectionResponse::page(
+                [$user(45)],
+                total: 2,
+                perPage: 1,
+                currentPage: 2,
+                totalPages: 2
+            ),
+        ]);
+        $lookup = new \ReflectionMethod(
+            Pterodactyl::class,
+            'matchingPterodactylUsers'
+        );
+        $lookup->setAccessible(true);
+
+        try {
+            $lookup->invoke(
+                $provisioner,
+                ['external_id' => $expectedExternalId],
+                'external_id',
+                $expectedExternalId
+            );
+            $this->fail('Expected a page-two duplicate to fail closed.');
+        } catch (PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'multiple customers',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            [1, 2],
+            array_column($provisioner->requests, 'page')
+        );
+    }
+
+    public function test_customer_lookup_rejects_repeated_nonmatching_identity(): void
+    {
+        $expectedExternalId = 'paymenter-user-42';
+        $nonmatch = [
+            'attributes' => [
+                'id' => 44,
+                'external_id' => "{$expectedExternalId}-similar",
+            ],
+        ];
+        $provisioner = new PterodactylUserLookupStub([
+            1 => PterodactylUserCollectionResponse::page(
+                [$nonmatch],
+                total: 2,
+                perPage: 1,
+                currentPage: 1,
+                totalPages: 2
+            ),
+            2 => PterodactylUserCollectionResponse::page(
+                [$nonmatch],
+                total: 2,
+                perPage: 1,
+                currentPage: 2,
+                totalPages: 2
+            ),
+        ]);
+        $lookup = new \ReflectionMethod(
+            Pterodactyl::class,
+            'pterodactylUserMatches'
+        );
+        $lookup->setAccessible(true);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'duplicate customer identity'
+        );
+
+        $lookup->invoke(
+            $provisioner,
+            ['external_id' => $expectedExternalId],
+            'external_id',
+            $expectedExternalId
+        );
+    }
+
+    public function test_customer_lookup_rejects_noncanonical_customer_id(): void
+    {
+        $response = PterodactylUserCollectionResponse::single([[
+            'attributes' => [
+                'id' => '44.0',
+                'email' => 'customer@example.com',
+            ],
+        ]]);
+        $provisioner = new PterodactylUserLookupStub([1 => $response]);
+        $lookup = new \ReflectionMethod(
+            Pterodactyl::class,
+            'pterodactylUserMatches'
+        );
+        $lookup->setAccessible(true);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage('invalid customer identity');
+
+        $lookup->invoke(
+            $provisioner,
+            ['email' => 'customer@example.com'],
+            'email',
+            'customer@example.com',
+            true
+        );
+    }
+
+    public function test_customer_lookup_rejects_malformed_pagination(): void
+    {
+        $response = PterodactylUserCollectionResponse::single([]);
+        $response['meta']['pagination']['current_page'] = 2;
+        $provisioner = new PterodactylUserLookupStub([1 => $response]);
+        $lookup = new \ReflectionMethod(
+            Pterodactyl::class,
+            'pterodactylUserMatches'
+        );
+        $lookup->setAccessible(true);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'invalid customer lookup pagination metadata'
+        );
+
+        $lookup->invoke(
+            $provisioner,
+            ['email' => 'customer@example.com'],
+            'email',
+            'customer@example.com',
+            true
+        );
+    }
+
+    public function test_customer_lookup_rejects_a_truncated_second_page(): void
+    {
+        $expectedExternalId = 'paymenter-user-42';
+        $provisioner = new PterodactylUserLookupStub([
+            1 => PterodactylUserCollectionResponse::page(
+                [[
+                    'attributes' => [
+                        'id' => 44,
+                        'external_id' => "{$expectedExternalId}-similar",
+                    ],
+                ]],
+                total: 2,
+                perPage: 1,
+                currentPage: 1,
+                totalPages: 2
+            ),
+            2 => PterodactylUserCollectionResponse::page(
+                [],
+                total: 2,
+                perPage: 1,
+                currentPage: 2,
+                totalPages: 2
+            ),
+        ]);
+        $lookup = new \ReflectionMethod(
+            Pterodactyl::class,
+            'pterodactylUserMatches'
+        );
+        $lookup->setAccessible(true);
+
+        $this->expectException(PermanentProvisioningException::class);
+        $this->expectExceptionMessage(
+            'invalid customer lookup pagination metadata'
+        );
+
+        $lookup->invoke(
+            $provisioner,
+            ['external_id' => $expectedExternalId],
+            'external_id',
+            $expectedExternalId
+        );
     }
 
     protected function tearDown(): void
@@ -112,6 +568,131 @@ class PterodactylReservationIntegrationTest extends TestCase
         $this->assertFalse(
             $identity->requiresCoordinator($upgrade->fresh())
         );
+    }
+
+    public function test_legacy_migration_cannot_abandon_an_active_dynamic_upgrade_reservation(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $upgrade = $this->ordinaryUpgrade(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+        $reservationId = $this->insertUpgradeReservation($upgrade);
+
+        try {
+            DB::transaction(
+                fn () => LegacyServiceUpgradeMigration::reconcile()
+            );
+            $this->fail(
+                'Legacy reconciliation abandoned dynamic capacity.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                "dynamic capacity reservation {$reservationId}",
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            $upgrade->fresh()->status
+        );
+        $this->assertDatabaseHas('ptero_resource_reservations', [
+            'id' => $reservationId,
+            'status' => 'pending',
+            'service_upgrade_id' => $upgrade->id,
+        ]);
+    }
+
+    public function test_refund_only_reconciliation_cannot_abandon_dynamic_capacity(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $upgrade = $this->ordinaryUpgrade(
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION
+        );
+        DB::table('service_upgrades')
+            ->where('id', $upgrade->id)
+            ->update([
+                'quoted_amount' => '0.00',
+                'legacy_refund_only_at' => now(),
+            ]);
+        $reservationId = $this->insertUpgradeReservation(
+            $upgrade->fresh(),
+            ['status' => 'paid_committed']
+        );
+
+        try {
+            app(ServiceUpgradeReconciliationService::class)
+                ->reconcile(
+                    $upgrade->id,
+                    ServiceUpgradeReconciliationService::ACTION_REFUNDED_NOT_APPLIED,
+                    'Refund checked without releasing capacity.',
+                    'admin@example.test'
+                );
+            $this->fail(
+                'Refund-only reconciliation abandoned dynamic capacity.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                "dynamic capacity reservation {$reservationId}",
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame(
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            $upgrade->fresh()->status
+        );
+        $this->assertDatabaseHas('ptero_resource_reservations', [
+            'id' => $reservationId,
+            'status' => 'paid_committed',
+            'service_upgrade_id' => $upgrade->id,
+        ]);
+    }
+
+    public function test_cancelling_unpaid_capacity_upgrade_preserves_active_service(): void
+    {
+        $this->requireDynamicPterodactylRuntime();
+        $upgrade = $this->ordinaryUpgrade(
+            ServiceUpgrade::STATUS_AWAITING_PAYMENT
+        );
+        $service = $upgrade->service;
+        $invoice = Invoice::factory()->create([
+            'user_id' => $service->user_id,
+            'currency_code' => 'USD',
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => now()->addDays(7),
+        ]);
+        $invoice->items()->create([
+            'reference_id' => $upgrade->id,
+            'reference_type' => ServiceUpgrade::class,
+            'description' => 'Capacity upgrade',
+            'quantity' => 1,
+            'price' => 10,
+        ]);
+        $upgrade->invoice_id = $invoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
+        $reservationId = $this->insertUpgradeReservation($upgrade);
+
+        app(CancelInvoiceService::class)->handle($invoice);
+
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
+        );
+        $this->assertSame(
+            ServiceUpgrade::STATUS_CANCELLED,
+            $upgrade->fresh()->status
+        );
+        $this->assertSame(
+            Service::STATUS_ACTIVE,
+            $service->fresh()->status
+        );
+        $this->assertDatabaseHas('ptero_resource_reservations', [
+            'id' => $reservationId,
+            'status' => 'cancelled',
+            'service_id' => $service->id,
+            'service_upgrade_id' => $upgrade->id,
+        ]);
     }
 
     public function test_confirmed_capacity_service_can_pay_its_exact_active_renewal(): void
@@ -426,7 +1007,7 @@ class PterodactylReservationIntegrationTest extends TestCase
         }
 
         try {
-            app(\App\Services\Invoice\CancelInvoiceService::class)
+            app(CancelInvoiceService::class)
                 ->handle($renewal);
             $this->fail(
                 'Expected processing capacity renewal cancellation to be rejected.'
@@ -473,7 +1054,7 @@ class PterodactylReservationIntegrationTest extends TestCase
         );
         $renewal = $this->renewalInvoice($service);
 
-        app(\App\Services\Invoice\CancelInvoiceService::class)
+        app(CancelInvoiceService::class)
             ->handle($renewal);
 
         $this->assertSame(
@@ -642,8 +1223,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                 'status' => $status,
                 'type' => 'product',
                 'active_service_guard_id' => $service->id,
-                'provisioning_attempts' =>
-                    $status === ServiceUpgrade::STATUS_PROVISIONING
+                'provisioning_attempts' => $status === ServiceUpgrade::STATUS_PROVISIONING
                         ? 1
                         : 0,
             ]);
@@ -1052,15 +1632,15 @@ class PterodactylReservationIntegrationTest extends TestCase
                 if ($url === '/api/application/users' && strtolower($method) === 'get') {
                     $externalId = (string) data_get($data, 'filter.external_id', '');
 
-                    return [
-                        'data' => $externalId !== '' ? [[
+                    return PterodactylUserCollectionResponse::single(
+                        $externalId !== '' ? [[
                             'attributes' => [
                                 'id' => 44,
                                 'external_id' => $externalId,
                                 'email' => $this->expectedEmail,
                             ],
-                        ]] : [],
-                    ];
+                        ]] : []
+                    );
                 }
                 if (str_starts_with($url, '/api/application/servers/external/')) {
                     return [
@@ -1547,18 +2127,14 @@ class PterodactylReservationIntegrationTest extends TestCase
             'cancellation_requested_at' => now(),
             'external_server_id' => 72,
             'external_user_id' => 44,
-            'external_server_uuid' =>
-                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+            'external_server_uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
             'external_server_identifier' => 'original',
             'created_at' => now(),
             'updated_at' => now(),
         ]);
         $this->enableReservationExtension();
 
-        $pterodactyl = new class([
-            'host' => 'https://panel.example.com',
-            'api_key' => 'secret',
-        ]) extends Pterodactyl
+        $pterodactyl = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret']) extends Pterodactyl
         {
             public bool $deleted = false;
 
@@ -1574,8 +2150,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                     return [
                         'attributes' => [
                             'id' => 72,
-                            'uuid' =>
-                                'dfef2717-ef29-4918-98d4-20630b00bdda',
+                            'uuid' => 'dfef2717-ef29-4918-98d4-20630b00bdda',
                             'identifier' => 'replacement',
                             'external_id' => (string) $this->serviceId,
                             'user' => 44,
@@ -1693,18 +2268,14 @@ class PterodactylReservationIntegrationTest extends TestCase
             'cancellation_requested_at' => now(),
             'external_server_id' => 72,
             'external_user_id' => 44,
-            'external_server_uuid' =>
-                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+            'external_server_uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
             'external_server_identifier' => 'original',
             'created_at' => now(),
             'updated_at' => now(),
         ]);
         $this->enableReservationExtension();
 
-        $pterodactyl = new class([
-            'host' => 'https://panel.example.com',
-            'api_key' => 'secret',
-        ]) extends Pterodactyl
+        $pterodactyl = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret']) extends Pterodactyl
         {
             public bool $deleted = false;
 
@@ -1754,10 +2325,7 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     public function test_reconciled_delete_proves_absence_by_numeric_id_without_external_lookup(): void
     {
-        $pterodactyl = new class([
-            'host' => 'https://panel.example.com',
-            'api_key' => 'secret',
-        ]) extends Pterodactyl
+        $pterodactyl = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret']) extends Pterodactyl
         {
             public bool $deleted = false;
 
@@ -1899,18 +2467,16 @@ class PterodactylReservationIntegrationTest extends TestCase
             public function request($url, $method = 'get', $data = []): array
             {
                 if ($url === '/api/application/users' && strtolower($method) === 'get') {
-                    return [
-                        'data' => [[
-                            'attributes' => [
-                                'id' => 44,
-                                'external_id' => (string) data_get(
-                                    $data,
-                                    'filter.external_id'
-                                ),
-                                'email' => 'previous@example.com',
-                            ],
-                        ]],
-                    ];
+                    return PterodactylUserCollectionResponse::single([[
+                        'attributes' => [
+                            'id' => 44,
+                            'external_id' => (string) data_get(
+                                $data,
+                                'filter.external_id'
+                            ),
+                            'email' => 'previous@example.com',
+                        ],
+                    ]]);
                 }
                 if (str_starts_with($url, '/api/application/servers/external/')) {
                     return [
@@ -2017,17 +2583,15 @@ class PterodactylReservationIntegrationTest extends TestCase
             public function request($url, $method = 'get', $data = []): array
             {
                 if ($url === '/api/application/users' && strtolower($method) === 'get') {
-                    return [
-                        'data' => [[
-                            'attributes' => [
-                                'id' => 44,
-                                'external_id' => (string) data_get(
-                                    $data,
-                                    'filter.external_id'
-                                ),
-                            ],
-                        ]],
-                    ];
+                    return PterodactylUserCollectionResponse::single([[
+                        'attributes' => [
+                            'id' => 44,
+                            'external_id' => (string) data_get(
+                                $data,
+                                'filter.external_id'
+                            ),
+                        ],
+                    ]]);
                 }
                 if (str_starts_with($url, '/api/application/servers/external/')) {
                     return [
@@ -2204,10 +2768,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'product_id' => $fixture->product->id,
             'plan_id' => $fixture->plan->id,
         ]);
-        $provisioner = new class([
-            'host' => 'https://panel.example.com',
-            'api_key' => 'secret',
-        ]) extends Pterodactyl
+        $provisioner = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret']) extends Pterodactyl
         {
             public ?array $patchedUser = null;
 
@@ -2215,21 +2776,19 @@ class PterodactylReservationIntegrationTest extends TestCase
             {
                 if ($url === '/api/application/users' && strtolower($method) === 'get') {
                     if (data_get($data, 'filter.email') !== null) {
-                        return ['data' => []];
+                        return PterodactylUserCollectionResponse::single([]);
                     }
 
-                    return [
-                        'data' => [[
-                            'attributes' => [
-                                'id' => 44,
-                                'external_id' => (string) data_get(
-                                    $data,
-                                    'filter.external_id'
-                                ),
-                                'email' => 'another-customer@example.com',
-                            ],
-                        ]],
-                    ];
+                    return PterodactylUserCollectionResponse::single([[
+                        'attributes' => [
+                            'id' => 44,
+                            'external_id' => (string) data_get(
+                                $data,
+                                'filter.external_id'
+                            ),
+                            'email' => 'another-customer@example.com',
+                        ],
+                    ]]);
                 }
                 if ($url === '/api/application/users/44' && strtolower($method) === 'patch') {
                     $this->patchedUser = $data;
@@ -2269,14 +2828,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'plan_id' => $fixture->plan->id,
         ]);
         $externalId = "paymenter-user-{$service->user_id}";
-        $provisioner = new class(
-            [
-                'host' => 'https://panel.example.com',
-                'api_key' => 'secret',
-            ],
-            $externalId,
-            (string) $service->user->email
-        ) extends Pterodactyl
+        $provisioner = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret'], $externalId, (string) $service->user->email) extends Pterodactyl
         {
             public int $externalIdReads = 0;
 
@@ -2305,12 +2857,10 @@ class PterodactylReservationIntegrationTest extends TestCase
                 ) {
                     $this->externalIdReads++;
 
-                    return [
-                        'data' => [
-                            $this->user(44),
-                            $this->user(45),
-                        ],
-                    ];
+                    return PterodactylUserCollectionResponse::single([
+                        $this->user(44),
+                        $this->user(45),
+                    ]);
                 }
                 if (
                     $url === '/api/application/users'
@@ -2319,7 +2869,9 @@ class PterodactylReservationIntegrationTest extends TestCase
                 ) {
                     $this->emailReads++;
 
-                    return ['data' => [$this->user(44)]];
+                    return PterodactylUserCollectionResponse::single([
+                        $this->user(44),
+                    ]);
                 }
                 if (
                     $url === '/api/application/users'
@@ -2582,8 +3134,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'consumed_at' => now()->subMonth()->addMinute(),
             'external_server_id' => 72,
             'external_user_id' => 44,
-            'external_server_uuid' =>
-                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+            'external_server_uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
             'external_server_identifier' => 'renewal-fixture',
             'created_at' => now()->subMonth(),
             'updated_at' => now()->subMonth(),
@@ -2642,8 +3193,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             ], true)
                 ? $service->id
                 : null,
-            'provisioning_attempts' =>
-                $status === ServiceUpgrade::STATUS_PROVISIONING ? 1 : 0,
+            'provisioning_attempts' => $status === ServiceUpgrade::STATUS_PROVISIONING ? 1 : 0,
             'quoted_amount' => 10,
             'currency_code' => 'USD',
         ]);
@@ -2719,8 +3269,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'disk' => 61440,
             'nest_id' => 1,
             'egg_id' => 2,
-            'user_external_id' =>
-                "paymenter-user-{$service->user_id}",
+            'user_external_id' => "paymenter-user-{$service->user_id}",
             'provisioning_lease_id' => 'lease-status',
             'already_consumed' => false,
             'allocations' => [[
@@ -2757,7 +3306,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             ReservationService::class,
             $reservationService
         );
-        if (! Extension::query()
+        if (!Extension::query()
             ->where('extension', 'DynamicPterodactyl')
             ->where('enabled', true)
             ->exists()
@@ -2765,14 +3314,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             $this->enableReservationExtension();
         }
 
-        $provisioner = new class(
-            [
-                'host' => 'https://panel.example.com',
-                'api_key' => 'secret',
-            ],
-            $status,
-            (string) $service->user->email
-        ) extends Pterodactyl
+        $provisioner = new class(['host' => 'https://panel.example.com', 'api_key' => 'secret'], $status, (string) $service->user->email) extends Pterodactyl
         {
             public function __construct(
                 array $config,
@@ -2797,15 +3339,15 @@ class PterodactylReservationIntegrationTest extends TestCase
                         ''
                     );
 
-                    return [
-                        'data' => $externalId !== '' ? [[
+                    return PterodactylUserCollectionResponse::single(
+                        $externalId !== '' ? [[
                             'attributes' => [
                                 'id' => 44,
                                 'external_id' => $externalId,
                                 'email' => $this->expectedEmail,
                             ],
-                        ]] : [],
-                    ];
+                        ]] : []
+                    );
                 }
                 if (
                     str_starts_with(
@@ -2816,11 +3358,9 @@ class PterodactylReservationIntegrationTest extends TestCase
                     return [
                         'attributes' => [
                             'id' => 72,
-                            'uuid' =>
-                                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+                            'uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
                             'identifier' => 'existing',
-                            'external_id' =>
-                                (string) basename($url),
+                            'external_id' => (string) basename($url),
                             'status' => $this->serverStatus,
                             'user' => 44,
                             'egg' => 2,
@@ -2876,15 +3416,7 @@ class PterodactylReservationIntegrationTest extends TestCase
         string $resolvedEmail,
         bool $exposeExactIdentity
     ): Pterodactyl {
-        return new class(
-            [
-                'host' => 'https://panel.example.com',
-                'api_key' => 'secret',
-            ],
-            $expectedExternalId,
-            $resolvedEmail,
-            $exposeExactIdentity
-        ) extends Pterodactyl
+        return new class(['host' => 'https://panel.example.com', 'api_key' => 'secret'], $expectedExternalId, $resolvedEmail, $exposeExactIdentity) extends Pterodactyl
         {
             public int $postAttempts = 0;
 
@@ -2918,22 +3450,22 @@ class PterodactylReservationIntegrationTest extends TestCase
                     ) {
                         $this->externalIdReads++;
 
-                        return [
-                            'data' => $this->postFailed
+                        return PterodactylUserCollectionResponse::single(
+                            $this->postFailed
                                 && $this->exposeExactIdentity
                                     ? [$this->resolvedUser()]
-                                    : [],
-                        ];
+                                    : []
+                        );
                     }
                     if (data_get($data, 'filter.email') !== null) {
                         $this->emailReads++;
 
-                        return [
-                            'data' => $this->postFailed
+                        return PterodactylUserCollectionResponse::single(
+                            $this->postFailed
                                 && $this->exposeExactIdentity
                                     ? [$this->resolvedUser()]
-                                    : [],
-                        ];
+                                    : []
+                        );
                     }
                 }
                 if (
@@ -2987,7 +3519,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                 $this->requests[] = compact('url', 'method', 'data');
 
                 if (str_starts_with($url, '/api/application/servers/external/')) {
-                    if (! $this->created) {
+                    if (!$this->created) {
                         throw new \Exception('Server not found');
                     }
 
@@ -3033,15 +3565,15 @@ class PterodactylReservationIntegrationTest extends TestCase
                 if ($url === '/api/application/users' && strtolower($method) === 'get') {
                     $externalId = (string) data_get($data, 'filter.external_id', '');
 
-                    return [
-                        'data' => $externalId !== '' ? [[
+                    return PterodactylUserCollectionResponse::single(
+                        $externalId !== '' ? [[
                             'attributes' => [
                                 'id' => 44,
                                 'external_id' => $externalId,
                                 'email' => $this->expectedEmail,
                             ],
-                        ]] : [],
-                    ];
+                        ]] : []
+                    );
                 }
                 if ($url === '/api/application/nodes/deployable') {
                     return [
@@ -3185,8 +3717,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                 'https://panel.example.com'
             ),
             'external_server_id' => 71,
-            'external_server_uuid' =>
-                '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+            'external_server_uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
             'external_server_identifier' => 'server-71',
             'external_server_external_id' => (string) $service->id,
             'external_user_id' => 44,
@@ -3236,8 +3767,7 @@ class PterodactylReservationIntegrationTest extends TestCase
             'external_server_uuid' => null,
             'external_server_identifier' => null,
             'external_server_external_id' => (string) $service->id,
-            'user_external_id' =>
-                "paymenter-user-{$service->user_id}",
+            'user_external_id' => "paymenter-user-{$service->user_id}",
             'user_email' => strtolower((string) $service->user->email),
             'nest_id' => 1,
             'egg_id' => 2,
@@ -3278,8 +3808,7 @@ class PterodactylReservationIntegrationTest extends TestCase
         return [
             'attributes' => [
                 'id' => 71,
-                'uuid' =>
-                    '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
+                'uuid' => '2f4f28b0-0f36-4e6b-a2aa-a686c3466696',
                 'identifier' => 'created',
                 'external_id' => (string) $service->id,
                 'user' => 44,
@@ -3332,8 +3861,7 @@ class PterodactylReservationIntegrationTest extends TestCase
         $runtime->shouldReceive('serverLifecycleIdentity')
             ->once()
             ->with(Mockery::on(
-                fn (Service $candidate): bool =>
-                    (int) $candidate->id === (int) $service->id
+                fn (Service $candidate): bool => (int) $candidate->id === (int) $service->id
             ))
             ->andReturn($this->unpinnedCancellationIdentity($service));
         $runtime->shouldReceive('cancellationReconciliationContext')
@@ -3347,8 +3875,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                 ->with(
                     Mockery::type(Service::class),
                     Mockery::on(
-                        fn (array $candidate): bool =>
-                            ($candidate['attributes']['id'] ?? null) === 71
+                        fn (array $candidate): bool => ($candidate['attributes']['id'] ?? null) === 71
                     ),
                     44
                 )
@@ -3357,8 +3884,7 @@ class PterodactylReservationIntegrationTest extends TestCase
                     'external_server_id' => 71,
                     'external_user_id' => 44,
                     'external_server_uuid' => $attributes['uuid'],
-                    'external_server_identifier' =>
-                        $attributes['identifier'],
+                    'external_server_identifier' => $attributes['identifier'],
                 ]);
         } else {
             $runtime->shouldNotReceive(
@@ -3373,14 +3899,7 @@ class PterodactylReservationIntegrationTest extends TestCase
         ?array $server,
         string $expectedUserExternalId
     ): Pterodactyl {
-        return new class(
-            [
-                'host' => 'https://panel.example.com',
-                'api_key' => 'secret',
-            ],
-            $server,
-            $expectedUserExternalId
-        ) extends Pterodactyl
+        return new class(['host' => 'https://panel.example.com', 'api_key' => 'secret'], $server, $expectedUserExternalId) extends Pterodactyl
         {
             public int $externalLookups = 0;
 
@@ -3426,15 +3945,12 @@ class PterodactylReservationIntegrationTest extends TestCase
                 ) {
                     $this->userLookups++;
 
-                    return [
-                        'data' => [[
-                            'attributes' => [
-                                'id' => 44,
-                                'external_id' =>
-                                    $this->expectedUserExternalId,
-                            ],
-                        ]],
-                    ];
+                    return PterodactylUserCollectionResponse::single([[
+                        'attributes' => [
+                            'id' => 44,
+                            'external_id' => $this->expectedUserExternalId,
+                        ],
+                    ]]);
                 }
                 if (
                     $url === '/api/application/servers/71'
@@ -3510,8 +4026,8 @@ class PterodactylReservationIntegrationTest extends TestCase
     protected function beforeRefreshingDatabase(): void
     {
         if (
-            ! RefreshDatabaseState::$migrated
-            || ! $this->dynamicPterodactylMigrationsAreAvailable()
+            !RefreshDatabaseState::$migrated
+            || !$this->dynamicPterodactylMigrationsAreAvailable()
             || $this->dynamicPterodactylMigrationsAreCurrent()
         ) {
             return;
@@ -3525,7 +4041,7 @@ class PterodactylReservationIntegrationTest extends TestCase
 
     private function requireDynamicPterodactylRuntime(): void
     {
-        if (! class_exists(ReservationService::class)) {
+        if (!class_exists(ReservationService::class)) {
             $this->markTestSkipped(
                 'The companion DynamicPterodactyl checkout is not available.'
             );
@@ -3560,9 +4076,224 @@ class PterodactylReservationIntegrationTest extends TestCase
     private function migrateDynamicPterodactyl(): void
     {
         $this->artisan('migrate', [
-            '--path' =>
-                'extensions/Others/DynamicPterodactyl/database/migrations',
+            '--path' => 'extensions/Others/DynamicPterodactyl/database/migrations',
             '--force' => true,
         ]);
+    }
+}
+
+final class PterodactylUserCollectionResponse
+{
+    /**
+     * @param  list<array<string, mixed>>  $data
+     * @return array<string, mixed>
+     */
+    public static function single(
+        array $data,
+        string $endpoint = '/api/application/users'
+    ): array {
+        return self::page(
+            $data,
+            total: count($data),
+            perPage: 50,
+            currentPage: 1,
+            totalPages: 1,
+            endpoint: $endpoint
+        );
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $data
+     * @return array<string, mixed>
+     */
+    public static function page(
+        array $data,
+        int $total,
+        int $perPage,
+        int $currentPage,
+        int $totalPages,
+        string $endpoint = '/api/application/users'
+    ): array {
+        $links = [];
+        if ($currentPage > 1) {
+            $links['previous'] =
+                'https://panel.example.com' . $endpoint . '?page='
+                . ($currentPage - 1);
+        }
+        if ($currentPage < $totalPages) {
+            $links['next'] =
+                'https://panel.example.com' . $endpoint . '?page='
+                . ($currentPage + 1);
+        }
+
+        return [
+            'data' => $data,
+            'meta' => [
+                'pagination' => [
+                    'total' => $total,
+                    'count' => count($data),
+                    'per_page' => $perPage,
+                    'current_page' => $currentPage,
+                    'total_pages' => $totalPages,
+                    'links' => $links,
+                ],
+            ],
+        ];
+    }
+}
+
+final class PterodactylConfigurationCollectionResponse
+{
+    /**
+     * @param  list<array<string, mixed>>  $attributes
+     * @return array<int, array<string, mixed>>
+     */
+    public static function singlePage(
+        string $endpoint,
+        array $attributes
+    ): array {
+        return [
+            1 => PterodactylUserCollectionResponse::single(
+                array_map(
+                    fn (array $record): array => [
+                        'attributes' => $record,
+                    ],
+                    $attributes
+                ),
+                $endpoint
+            ),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $first
+     * @param  array<string, mixed>  $second
+     * @return array<int, array<string, mixed>>
+     */
+    public static function twoPages(
+        string $endpoint,
+        array $first,
+        array $second
+    ): array {
+        return [
+            1 => PterodactylUserCollectionResponse::page(
+                [['attributes' => $first]],
+                total: 2,
+                perPage: 1,
+                currentPage: 1,
+                totalPages: 2,
+                endpoint: $endpoint
+            ),
+            2 => PterodactylUserCollectionResponse::page(
+                [['attributes' => $second]],
+                total: 2,
+                perPage: 1,
+                currentPage: 2,
+                totalPages: 2,
+                endpoint: $endpoint
+            ),
+        ];
+    }
+}
+
+final class PterodactylConfigurationCollectionStub extends Pterodactyl
+{
+    /**
+     * @var list<array{string, int}>
+     */
+    public array $requests = [];
+
+    /**
+     * @param  array<string, array<int, array<string, mixed>>>  $pages
+     * @param  array<string, \Throwable>  $failures
+     */
+    public function __construct(
+        private array $pages,
+        private array $failures = []
+    ) {
+        parent::__construct([
+            'host' => 'https://panel.example.com',
+            'api_key' => 'secret',
+        ]);
+    }
+
+    public function request(
+        $url,
+        $method = 'get',
+        $data = []
+    ): array {
+        if (
+            strtolower($method) !== 'get'
+            || !is_int($data['page'] ?? null)
+        ) {
+            throw new \RuntimeException(
+                "Unexpected request: {$method} {$url}"
+            );
+        }
+
+        $page = $data['page'];
+        $this->requests[] = [$url, $page];
+        if (isset($this->failures[$url])) {
+            throw $this->failures[$url];
+        }
+        if (!isset($this->pages[$url][$page])) {
+            throw new \RuntimeException(
+                "Unexpected configuration lookup page: {$url} page {$page}"
+            );
+        }
+
+        return $this->pages[$url][$page];
+    }
+}
+
+final class PterodactylUserLookupStub extends Pterodactyl
+{
+    /**
+     * @var list<array{
+     *     filter: array<string, string>,
+     *     page: int
+     * }>
+     */
+    public array $requests = [];
+
+    /**
+     * @param  array<int, array<string, mixed>>  $pages
+     */
+    public function __construct(private array $pages)
+    {
+        parent::__construct([
+            'host' => 'https://panel.example.com',
+            'api_key' => 'secret',
+        ]);
+    }
+
+    public function request(
+        $url,
+        $method = 'get',
+        $data = []
+    ): array {
+        if (
+            $url !== '/api/application/users'
+            || strtolower($method) !== 'get'
+            || !is_array($data['filter'] ?? null)
+            || !is_int($data['page'] ?? null)
+        ) {
+            throw new \RuntimeException(
+                "Unexpected request: {$method} {$url}"
+            );
+        }
+
+        $page = $data['page'];
+        $this->requests[] = [
+            'filter' => $data['filter'],
+            'page' => $page,
+        ];
+        if (!array_key_exists($page, $this->pages)) {
+            throw new \RuntimeException(
+                "Unexpected customer lookup page: {$page}"
+            );
+        }
+
+        return $this->pages[$page];
     }
 }

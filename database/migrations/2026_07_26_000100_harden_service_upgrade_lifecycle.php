@@ -1,8 +1,8 @@
 <?php
 
-use App\Support\LegacyServiceUpgradeMigration;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -24,21 +24,48 @@ return new class extends Migration
             $table->timestamp('provisioning_started_at')->nullable()->after('paid_at');
             $table->timestamp('failed_at')->nullable()->after('provisioning_started_at');
             $table->timestamp('failure_alerted_at')->nullable()->after('failed_at');
-            $table->timestamp('completed_at')->nullable()->after('failure_alerted_at');
+            $table->timestamp('legacy_refund_only_at')->nullable()->after('failure_alerted_at');
+            $table->timestamp('completed_at')->nullable()->after('legacy_refund_only_at');
             $table->timestamp('credit_applied_at')->nullable()->after('completed_at');
 
             $table->unique('active_service_guard_id', 'service_upgrades_active_service_unique');
             $table->index('status', 'service_upgrades_status_idx');
         });
-
-        LegacyServiceUpgradeMigration::reconcile();
     }
 
     public function down(): void
     {
-        \Illuminate\Support\Facades\DB::table('service_upgrades')
-            ->where('status', 'awaiting_payment')
-            ->update(['status' => 'pending']);
+        $nonRepresentable = DB::table('service_upgrades')
+            ->where(function ($query): void {
+                $query->whereNotIn('status', [
+                    'pending',
+                    'completed',
+                    'cancelled',
+                ])->orWhereNotNull('source_snapshot')
+                    ->orWhereNotNull('target_snapshot')
+                    ->orWhereNotNull('source_fingerprint')
+                    ->orWhereNotNull('target_fingerprint')
+                    ->orWhereNotNull('quoted_amount')
+                    ->orWhereNotNull('currency_code')
+                    ->orWhere('credit_amount', '!=', 0)
+                    ->orWhereNotNull('active_service_guard_id')
+                    ->orWhere('provisioning_attempts', '!=', 0)
+                    ->orWhereNotNull('last_error')
+                    ->orWhereNotNull('paid_at')
+                    ->orWhereNotNull('provisioning_started_at')
+                    ->orWhereNotNull('failed_at')
+                    ->orWhereNotNull('failure_alerted_at')
+                    ->orWhereNotNull('legacy_refund_only_at')
+                    ->orWhereNotNull('completed_at')
+                    ->orWhereNotNull('credit_applied_at');
+            })
+            ->orderBy('id')
+            ->value('id');
+        if ($nonRepresentable !== null) {
+            throw new RuntimeException(
+                "Cannot roll back the hardened upgrade lifecycle while service upgrade {$nonRepresentable} contains state the legacy schema cannot represent."
+            );
+        }
 
         Schema::table('service_upgrades', function (Blueprint $table) {
             $table->dropUnique('service_upgrades_active_service_unique');
@@ -58,6 +85,7 @@ return new class extends Migration
                 'provisioning_started_at',
                 'failed_at',
                 'failure_alerted_at',
+                'legacy_refund_only_at',
                 'completed_at',
                 'credit_applied_at',
             ]);

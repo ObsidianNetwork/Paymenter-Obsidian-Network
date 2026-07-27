@@ -11,12 +11,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Code checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - uses: shivammathur/setup-php@15c43e89cdef867065b0213be354c2841860869e
         with:
@@ -24,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           composer install -q --no-dev --optimize-autoloader --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
-          npm i
+          npm ci
 
       - name: Build
         run: npm run build
@@ -47,7 +48,7 @@ jobs:
 
       # Upload artifact
       - name: Upload archive
-        uses: ryand56/r2-upload-action@latest
+        uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c # v1.4
         with:
           r2-account-id: ${{ secrets.CF_R2_ACCOUNT_ID }}
           r2-access-key-id: ${{ secrets.CF_R2_KEY_ID }}

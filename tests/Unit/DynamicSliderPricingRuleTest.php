@@ -10,7 +10,7 @@ class DynamicSliderPricingRuleTest extends TestCase
     private function runRule(mixed $value): array
     {
         $errors = [];
-        $rule = new DynamicSliderPricingRule();
+        $rule = new DynamicSliderPricingRule;
         $rule->validate('metadata.pricing', $value, function (string $message) use (&$errors) {
             $errors[] = $message;
         });
@@ -44,8 +44,8 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_valid_linear_passes(): void
     {
         $errors = $this->runRule([
-            'model'        => 'linear',
-            'base_price'   => 0,
+            'model' => 'linear',
+            'base_price' => 0,
             'rate_per_unit' => 2.0,
         ]);
         $this->assertEmpty($errors);
@@ -69,7 +69,7 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_linear_missing_rate_per_unit_fails(): void
     {
         $errors = $this->runRule([
-            'model'      => 'linear',
+            'model' => 'linear',
             'base_price' => 0,
         ]);
         $this->assertNotEmpty($errors);
@@ -79,7 +79,7 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_linear_negative_rate_fails(): void
     {
         $errors = $this->runRule([
-            'model'        => 'linear',
+            'model' => 'linear',
             'rate_per_unit' => -1.0,
         ]);
         $this->assertNotEmpty($errors);
@@ -88,8 +88,8 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_linear_negative_base_price_fails(): void
     {
         $errors = $this->runRule([
-            'model'        => 'linear',
-            'base_price'   => -5.0,
+            'model' => 'linear',
+            'base_price' => -5.0,
             'rate_per_unit' => 2.0,
         ]);
         $this->assertNotEmpty($errors);
@@ -163,9 +163,9 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_valid_base_addon_passes(): void
     {
         $errors = $this->runRule([
-            'model'          => 'base_addon',
+            'model' => 'base_addon',
             'included_units' => 4,
-            'overage_rate'   => 2.5,
+            'overage_rate' => 2.5,
         ]);
         $this->assertEmpty($errors);
     }
@@ -173,7 +173,7 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_base_addon_missing_included_units_fails(): void
     {
         $errors = $this->runRule([
-            'model'        => 'base_addon',
+            'model' => 'base_addon',
             'overage_rate' => 2.5,
         ]);
         $this->assertNotEmpty($errors);
@@ -183,7 +183,7 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_base_addon_missing_overage_rate_fails(): void
     {
         $errors = $this->runRule([
-            'model'          => 'base_addon',
+            'model' => 'base_addon',
             'included_units' => 4,
         ]);
         $this->assertNotEmpty($errors);
@@ -193,9 +193,9 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_base_addon_negative_overage_rate_fails(): void
     {
         $errors = $this->runRule([
-            'model'          => 'base_addon',
+            'model' => 'base_addon',
             'included_units' => 4,
-            'overage_rate'   => -1.0,
+            'overage_rate' => -1.0,
         ]);
         $this->assertNotEmpty($errors);
     }
@@ -205,8 +205,8 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_non_numeric_base_price_fails(): void
     {
         $errors = $this->runRule([
-            'model'         => 'linear',
-            'base_price'    => 'abc',
+            'model' => 'linear',
+            'base_price' => 'abc',
             'rate_per_unit' => 1.0,
         ]);
         $this->assertNotEmpty($errors);
@@ -216,7 +216,7 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_non_numeric_rate_per_unit_fails(): void
     {
         $errors = $this->runRule([
-            'model'         => 'linear',
+            'model' => 'linear',
             'rate_per_unit' => 'free',
         ]);
         $this->assertNotEmpty($errors);
@@ -250,9 +250,9 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_non_numeric_included_units_fails(): void
     {
         $errors = $this->runRule([
-            'model'          => 'base_addon',
+            'model' => 'base_addon',
             'included_units' => 'four',
-            'overage_rate'   => 1.0,
+            'overage_rate' => 1.0,
         ]);
         $this->assertNotEmpty($errors);
         $this->assertStringContainsString('numeric', $errors[0]);
@@ -261,9 +261,9 @@ class DynamicSliderPricingRuleTest extends TestCase
     public function test_non_numeric_overage_rate_fails(): void
     {
         $errors = $this->runRule([
-            'model'          => 'base_addon',
+            'model' => 'base_addon',
             'included_units' => 4,
-            'overage_rate'   => 'free',
+            'overage_rate' => 'free',
         ]);
         $this->assertNotEmpty($errors);
         $this->assertStringContainsString('numeric', $errors[0]);
@@ -349,7 +349,7 @@ class DynamicSliderPricingRuleTest extends TestCase
             ]);
             $this->assertNotEmpty(
                 $errors,
-                'Unsafe rate unexpectedly passed: '.var_export($rate, true)
+                'Unsafe rate unexpectedly passed: ' . var_export($rate, true)
             );
         }
     }
@@ -386,5 +386,4 @@ class DynamicSliderPricingRuleTest extends TestCase
             $this->assertNotEmpty($this->runRule($pricing));
         }
     }
-
 }

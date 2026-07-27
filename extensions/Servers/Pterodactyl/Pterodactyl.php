@@ -4,6 +4,7 @@ namespace Paymenter\Extensions\Servers\Pterodactyl;
 
 use App\Classes\Extension\Server;
 use App\Exceptions\PermanentProvisioningException;
+use App\Models\ConfigOption;
 use App\Models\Extension;
 use App\Models\Service;
 use App\Services\Service\DurableFulfillmentService;
@@ -24,6 +25,14 @@ class Pterodactyl extends Server
     private const CONNECT_TIMEOUT_SECONDS = 5;
 
     private const REQUEST_TIMEOUT_SECONDS = 30;
+
+    private const USER_LOOKUP_MAX_PAGES = 20;
+
+    private const USER_LOOKUP_MAX_RECORDS = 1000;
+
+    private const CONFIG_COLLECTION_MAX_PAGES = 20;
+
+    private const CONFIG_COLLECTION_MAX_RECORDS = 1000;
 
     public function getConfig($values = []): array
     {
@@ -77,7 +86,7 @@ class Pterodactyl extends Server
             $detail = $response->json('errors.0.detail')
                 ?? "Pterodactyl API request failed with status {$response->status()}";
             $exception = $response->clientError()
-                && ! in_array($response->status(), [408, 409, 423, 425, 429], true)
+                && !in_array($response->status(), [408, 409, 423, 425, 429], true)
                 ? new PermanentProvisioningException((string) $detail, $response->status())
                 : new Exception((string) $detail, $response->status());
 
@@ -89,33 +98,29 @@ class Pterodactyl extends Server
 
     public function getProductConfig($values = []): array
     {
-        $nodes = $this->request('/api/application/nodes');
-        $nodeList = [];
-        foreach ($nodes['data'] as $node) {
-            $nodeList[$node['attributes']['id']] = $node['attributes']['name'];
-        }
-
-        $location = $this->request('/api/application/locations');
-        $locationList = [];
-        foreach ($location['data'] as $location) {
-            $locationList[$location['attributes']['id']] = $location['attributes']['short'];
-        }
-
-        $nests = $this->request('/api/application/nests');
-        $nestList = [];
-        foreach ($nests['data'] as $nest) {
-            $nestList[$nest['attributes']['id']] = $nest['attributes']['name'];
-        }
+        $nodeList = $this->pterodactylConfigurationOptions(
+            '/api/application/nodes',
+            'node',
+            'name'
+        );
+        $locationList = $this->pterodactylConfigurationOptions(
+            '/api/application/locations',
+            'location',
+            'short'
+        );
+        $nestList = $this->pterodactylConfigurationOptions(
+            '/api/application/nests',
+            'nest',
+            'name'
+        );
 
         $eggList = [];
         if (isset($values['nest_id']) && $values['nest_id'] !== '') {
-            try {
-                $eggs = $this->request('/api/application/nests/' . $values['nest_id'] . '/eggs');
-                foreach ($eggs['data'] as $egg) {
-                    $eggList[$egg['attributes']['id']] = $egg['attributes']['name'];
-                }
-            } catch (Exception $e) {
-            }
+            $eggList = $this->pterodactylConfigurationOptions(
+                '/api/application/nests/' . $values['nest_id'] . '/eggs',
+                'egg',
+                'name'
+            );
         }
 
         $using_port_array = isset($values['port_array']) && $values['port_array'] !== '';
@@ -277,6 +282,277 @@ class Pterodactyl extends Server
         ];
     }
 
+    /**
+     * Load an application collection without trusting server-supplied links.
+     * Every option endpoint shares this one bounded, fail-closed traversal.
+     *
+     * @return array<int, string>
+     */
+    private function pterodactylConfigurationOptions(
+        string $url,
+        string $collection,
+        string $labelField
+    ): array {
+        $options = [];
+        foreach (
+            $this->pterodactylConfigurationRecords($url, $collection) as $attributes
+        ) {
+            $id = StrictInteger::parse($attributes['id'] ?? null);
+            $label = $attributes[$labelField] ?? null;
+            if (
+                $id === null
+                || $id <= 0
+                || !is_string($label)
+                || trim($label) === ''
+            ) {
+                throw new PermanentProvisioningException(
+                    "Pterodactyl {$collection} configuration lookup returned an invalid option record."
+                );
+            }
+
+            $options[$id] = $label;
+        }
+
+        return $options;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function pterodactylConfigurationRecords(
+        string $url,
+        string $collection
+    ): array {
+        $records = [];
+        $recordsSeen = 0;
+        $recordIdsSeen = [];
+        $expectedPagination = null;
+
+        for (
+            $page = 1;
+            $page <= self::CONFIG_COLLECTION_MAX_PAGES;
+            $page++
+        ) {
+            try {
+                $response = $this->request(
+                    $url,
+                    'get',
+                    ['page' => $page]
+                );
+            } catch (\Throwable $exception) {
+                throw new Exception(
+                    "Pterodactyl {$collection} configuration lookup failed: {$exception->getMessage()}",
+                    (int) $exception->getCode(),
+                    $exception
+                );
+            }
+
+            $pageRecords = $response['data'] ?? null;
+            $meta = $response['meta'] ?? null;
+            $pagination = is_array($meta)
+                ? ($meta['pagination'] ?? null)
+                : null;
+            if (
+                !is_array($pageRecords)
+                || !array_is_list($pageRecords)
+                || !is_array($pagination)
+            ) {
+                throw new PermanentProvisioningException(
+                    "Pterodactyl {$collection} configuration lookup returned an invalid collection response."
+                );
+            }
+
+            $validated = $this->validatePterodactylConfigurationPagination(
+                $pagination,
+                count($pageRecords),
+                $page,
+                $collection
+            );
+            $stablePagination = [
+                'total' => $validated['total'],
+                'per_page' => $validated['per_page'],
+                'total_pages' => $validated['total_pages'],
+            ];
+            if ($expectedPagination === null) {
+                $expectedPagination = $stablePagination;
+            } elseif ($stablePagination !== $expectedPagination) {
+                throw new PermanentProvisioningException(
+                    "Pterodactyl {$collection} configuration pagination changed during traversal."
+                );
+            }
+
+            $recordsSeen += $validated['count'];
+            if (
+                $recordsSeen > $validated['total']
+                || $recordsSeen > self::CONFIG_COLLECTION_MAX_RECORDS
+            ) {
+                throw new PermanentProvisioningException(
+                    "Pterodactyl {$collection} configuration lookup returned invalid pagination metadata."
+                );
+            }
+
+            foreach ($pageRecords as $record) {
+                if (
+                    !is_array($record)
+                    || !is_array($record['attributes'] ?? null)
+                ) {
+                    throw new PermanentProvisioningException(
+                        "Pterodactyl {$collection} configuration lookup returned an invalid option record."
+                    );
+                }
+
+                $attributes = $record['attributes'];
+                $recordId = StrictInteger::parse(
+                    $attributes['id'] ?? null
+                );
+                if ($recordId === null || $recordId <= 0) {
+                    throw new PermanentProvisioningException(
+                        "Pterodactyl {$collection} configuration lookup returned an invalid option identity."
+                    );
+                }
+                if (isset($recordIdsSeen[$recordId])) {
+                    throw new PermanentProvisioningException(
+                        "Pterodactyl {$collection} configuration lookup returned a duplicate option identity."
+                    );
+                }
+                $recordIdsSeen[$recordId] = true;
+                $records[] = $attributes;
+            }
+
+            if ($page === $validated['total_pages']) {
+                if ($recordsSeen !== $validated['total']) {
+                    throw new PermanentProvisioningException(
+                        "Pterodactyl {$collection} configuration lookup returned truncated results."
+                    );
+                }
+
+                return $records;
+            }
+        }
+
+        throw new PermanentProvisioningException(
+            "Pterodactyl {$collection} configuration lookup exceeded its pagination limit."
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $pagination
+     * @return array{
+     *     total: int,
+     *     count: int,
+     *     per_page: int,
+     *     current_page: int,
+     *     total_pages: int
+     * }
+     */
+    private function validatePterodactylConfigurationPagination(
+        array $pagination,
+        int $actualCount,
+        int $requestedPage,
+        string $collection
+    ): array {
+        $total = $pagination['total'] ?? null;
+        $count = $pagination['count'] ?? null;
+        $perPage = $pagination['per_page'] ?? null;
+        $currentPage = $pagination['current_page'] ?? null;
+        $totalPages = $pagination['total_pages'] ?? null;
+        $links = $pagination['links'] ?? null;
+        if (
+            !is_int($total)
+            || $total < 0
+            || $total > self::CONFIG_COLLECTION_MAX_RECORDS
+            || !is_int($count)
+            || $count < 0
+            || !is_int($perPage)
+            || $perPage < 1
+            || $perPage > self::CONFIG_COLLECTION_MAX_RECORDS
+            || !is_int($currentPage)
+            || $currentPage !== $requestedPage
+            || !is_int($totalPages)
+            || $totalPages < 1
+            || $totalPages > self::CONFIG_COLLECTION_MAX_PAGES
+            || $currentPage > $totalPages
+            || !is_array($links)
+        ) {
+            throw new PermanentProvisioningException(
+                "Pterodactyl {$collection} configuration lookup returned invalid pagination metadata."
+            );
+        }
+
+        $calculatedPages = $total === 0
+            ? 1
+            : intdiv($total - 1, $perPage) + 1;
+        $offset = ($currentPage - 1) * $perPage;
+        $expectedCount = min($perPage, max(0, $total - $offset));
+        if (
+            $totalPages !== $calculatedPages
+            || $count !== $actualCount
+            || $count !== $expectedCount
+        ) {
+            throw new PermanentProvisioningException(
+                "Pterodactyl {$collection} configuration lookup returned invalid pagination metadata."
+            );
+        }
+
+        $this->validatePterodactylConfigurationPaginationLinks(
+            $links,
+            $currentPage,
+            $totalPages,
+            $collection
+        );
+
+        return [
+            'total' => $total,
+            'count' => $count,
+            'per_page' => $perPage,
+            'current_page' => $currentPage,
+            'total_pages' => $totalPages,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $links
+     */
+    private function validatePterodactylConfigurationPaginationLinks(
+        array $links,
+        int $currentPage,
+        int $totalPages,
+        string $collection
+    ): void {
+        $previous = $links['previous'] ?? null;
+        $next = $links['next'] ?? null;
+        if (
+            (
+                $currentPage === 1
+                && $previous !== null
+            )
+            || (
+                $currentPage > 1
+                && (
+                    !is_string($previous)
+                    || $this->pterodactylPaginationLinkPage($previous)
+                        !== $currentPage - 1
+                )
+            )
+            || (
+                $currentPage === $totalPages
+                && $next !== null
+            )
+            || (
+                $currentPage < $totalPages
+                && (
+                    !is_string($next)
+                    || $this->pterodactylPaginationLinkPage($next)
+                        !== $currentPage + 1
+                )
+            )
+        ) {
+            throw new PermanentProvisioningException(
+                "Pterodactyl {$collection} configuration lookup returned non-monotonic pagination metadata."
+            );
+        }
+    }
+
     public function createServer(Service $service, $settings, $properties)
     {
         $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
@@ -289,7 +565,7 @@ class Pterodactyl extends Server
         $reservationService = $reservationExtensionEnabled && class_exists($reservationServiceClass)
             ? app($reservationServiceClass)
             : null;
-        $requiresReservation = \App\Models\ConfigOption::query()
+        $requiresReservation = ConfigOption::query()
             ->whereHas('products', fn ($query) => $query->whereKey($service->product_id))
             ->where('type', 'dynamic_slider')
             ->where('hidden', false)
@@ -320,7 +596,7 @@ class Pterodactyl extends Server
         try {
             if (
                 $reservation !== null
-                && ! hash_equals(
+                && !hash_equals(
                     (string) $reservation['panel_identity'],
                     $this->panelIdentity()
                 )
@@ -337,12 +613,12 @@ class Pterodactyl extends Server
             if ($reservation !== null) {
                 $expectedUserExternalId = "paymenter-user-{$service->user_id}";
                 if (
-                    ! is_numeric($reservation['nest_id'] ?? null)
+                    !is_numeric($reservation['nest_id'] ?? null)
                     || (int) $reservation['nest_id'] <= 0
-                    || ! is_numeric($reservation['egg_id'] ?? null)
+                    || !is_numeric($reservation['egg_id'] ?? null)
                     || (int) $reservation['egg_id'] <= 0
-                    || ! is_string($reservation['user_external_id'] ?? null)
-                    || ! hash_equals(
+                    || !is_string($reservation['user_external_id'] ?? null)
+                    || !hash_equals(
                         $expectedUserExternalId,
                         $reservation['user_external_id']
                     )
@@ -394,7 +670,7 @@ class Pterodactyl extends Server
                         $reservation['provisioning_lease_id'],
                         $existingServer
                     );
-                    if (! $activated) {
+                    if (!$activated) {
                         $this->deleteReconciledServer($existingServer);
                         $reservationService->completeServiceCancellation($service);
 
@@ -431,7 +707,7 @@ class Pterodactyl extends Server
 
             if (
                 $reservation !== null
-                && ! $reservationService->provisioningMayContinue(
+                && !$reservationService->provisioningMayContinue(
                     $service->id,
                     $reservation['provisioning_lease_id']
                 )
@@ -489,7 +765,7 @@ class Pterodactyl extends Server
             $server = $createdServer;
             if ($reservation !== null) {
                 $server = $this->getServer($service->id, failIfNotFound: false, raw: true);
-                if (! $server) {
+                if (!$server) {
                     throw new Exception(
                         'Pterodactyl has not exposed the created server for reconciliation yet.'
                     );
@@ -511,7 +787,7 @@ class Pterodactyl extends Server
                     $reservation['provisioning_lease_id'],
                     $server
                 );
-                if (! $activated) {
+                if (!$activated) {
                     $this->deleteReconciledServer($server);
                     $reservationService->completeServiceCancellation($service);
 
@@ -551,7 +827,7 @@ class Pterodactyl extends Server
         }
 
         $rawNode = $settings['node'] ?? null;
-        $hasPinnedNode = ! in_array(
+        $hasPinnedNode = !in_array(
             $rawNode,
             [null, '', false, 0, '0'],
             true
@@ -581,7 +857,7 @@ class Pterodactyl extends Server
         )
             ? [$settings['location']]
             : ($settings['location_ids'] ?? []);
-        if (! is_array($rawLocations)) {
+        if (!is_array($rawLocations)) {
             $rawLocations = [$rawLocations];
         }
         if ($rawLocations === []) {
@@ -619,7 +895,7 @@ class Pterodactyl extends Server
      */
     private function managedCapacityPolicies(): array
     {
-        if (! Schema::hasTable('ptero_node_capacity_policies')) {
+        if (!Schema::hasTable('ptero_node_capacity_policies')) {
             return [];
         }
 
@@ -706,7 +982,7 @@ class Pterodactyl extends Server
 
         foreach ($allocations->groupBy('environment_key') as $environmentKey => $claims) {
             if (
-                ! $environmentKey
+                !$environmentKey
                 || strtoupper((string) $environmentKey) === 'NONE'
             ) {
                 continue;
@@ -742,16 +1018,15 @@ class Pterodactyl extends Server
         int $expectedUserId,
         int $expectedEggId,
         int $expectedNestId
-    ): void
-    {
+    ): void {
         $attributes = $server['attributes'] ?? $server;
         if (
             (string) ($attributes['external_id'] ?? '') !== (string) $serviceId
-            || ! is_numeric($attributes['id'] ?? null)
+            || !is_numeric($attributes['id'] ?? null)
             || (int) $attributes['id'] <= 0
-            || ! is_string($attributes['uuid'] ?? null)
-            || ! Str::isUuid($attributes['uuid'])
-            || ! is_string($attributes['identifier'] ?? null)
+            || !is_string($attributes['uuid'] ?? null)
+            || !Str::isUuid($attributes['uuid'])
+            || !is_string($attributes['identifier'] ?? null)
             || trim($attributes['identifier']) === ''
         ) {
             throw new PermanentProvisioningException(
@@ -766,7 +1041,7 @@ class Pterodactyl extends Server
         ] as $field => $expected) {
             if (
                 $expected <= 0
-                || ! is_numeric($attributes[$field] ?? null)
+                || !is_numeric($attributes[$field] ?? null)
                 || (int) $attributes[$field] !== $expected
             ) {
                 throw new PermanentProvisioningException(
@@ -791,7 +1066,7 @@ class Pterodactyl extends Server
         }
 
         if (
-            ! array_key_exists('allocations', (array) ($attributes['feature_limits'] ?? []))
+            !array_key_exists('allocations', (array) ($attributes['feature_limits'] ?? []))
             || (int) $attributes['feature_limits']['allocations'] !== 0
         ) {
             throw new PermanentProvisioningException(
@@ -823,7 +1098,7 @@ class Pterodactyl extends Server
         if (
             $reservedAllocationIds->isEmpty()
             || $reservedPrimaryIds->count() !== 1
-            || ! is_numeric($attributes['allocation'] ?? null)
+            || !is_numeric($attributes['allocation'] ?? null)
             || (int) $attributes['allocation'] !== (int) $reservedPrimaryIds->first()
         ) {
             throw new PermanentProvisioningException(
@@ -849,8 +1124,8 @@ class Pterodactyl extends Server
     ): void {
         $attributes = $server['attributes'] ?? null;
         if (
-            ! is_array($attributes)
-            || ! array_key_exists('status', $attributes)
+            !is_array($attributes)
+            || !array_key_exists('status', $attributes)
         ) {
             throw new PermanentProvisioningException(
                 'Pterodactyl did not return a verifiable server installation status.'
@@ -861,7 +1136,7 @@ class Pterodactyl extends Server
         if ($status === null) {
             return;
         }
-        if (! is_string($status)) {
+        if (!is_string($status)) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned an invalid server installation status.'
             );
@@ -906,7 +1181,7 @@ class Pterodactyl extends Server
 
         $this->assertDurableLifecycleIdentity($service, $identity);
         $attributes = $server['attributes'] ?? null;
-        if (! is_array($attributes)) {
+        if (!is_array($attributes)) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned an invalid durable server identity; the lifecycle action was stopped.'
             );
@@ -920,7 +1195,7 @@ class Pterodactyl extends Server
             'egg' => (int) $identity['egg_id'],
         ] as $field => $expected) {
             if (
-                ! is_numeric($attributes[$field] ?? null)
+                !is_numeric($attributes[$field] ?? null)
                 || (int) $attributes[$field] !== $expected
             ) {
                 throw new PermanentProvisioningException(
@@ -934,8 +1209,8 @@ class Pterodactyl extends Server
             'external_id' => $identity['external_server_external_id'],
         ] as $field => $expected) {
             if (
-                ! is_string($attributes[$field] ?? null)
-                || ! hash_equals($expected, $attributes[$field])
+                !is_string($attributes[$field] ?? null)
+                || !hash_equals($expected, $attributes[$field])
             ) {
                 throw new PermanentProvisioningException(
                     "Pterodactyl {$field} no longer matches the durable server identity; the lifecycle action was stopped."
@@ -966,38 +1241,38 @@ class Pterodactyl extends Server
         $expectedPanel = $this->panelIdentity();
         $expectedExternalId = "paymenter-user-{$service->user_id}";
         if (
-            ! is_string($identity['panel_identity'] ?? null)
-            || ! hash_equals(
+            !is_string($identity['panel_identity'] ?? null)
+            || !hash_equals(
                 $expectedPanel,
                 $identity['panel_identity']
             )
-            || ! is_numeric($identity['external_server_id'] ?? null)
+            || !is_numeric($identity['external_server_id'] ?? null)
             || (int) $identity['external_server_id'] <= 0
-            || ! is_string($identity['external_server_uuid'] ?? null)
-            || ! Str::isUuid($identity['external_server_uuid'])
-            || ! is_string(
+            || !is_string($identity['external_server_uuid'] ?? null)
+            || !Str::isUuid($identity['external_server_uuid'])
+            || !is_string(
                 $identity['external_server_identifier'] ?? null
             )
             || trim($identity['external_server_identifier']) === ''
-            || ! is_string(
+            || !is_string(
                 $identity['external_server_external_id'] ?? null
             )
-            || ! hash_equals(
+            || !hash_equals(
                 (string) $service->id,
                 $identity['external_server_external_id']
             )
-            || ! is_string($identity['user_external_id'] ?? null)
-            || ! hash_equals(
+            || !is_string($identity['user_external_id'] ?? null)
+            || !hash_equals(
                 $expectedExternalId,
                 $identity['user_external_id']
             )
-            || ! is_numeric($identity['external_user_id'] ?? null)
+            || !is_numeric($identity['external_user_id'] ?? null)
             || (int) $identity['external_user_id'] <= 0
-            || ! is_numeric($identity['node_id'] ?? null)
+            || !is_numeric($identity['node_id'] ?? null)
             || (int) $identity['node_id'] <= 0
-            || ! is_numeric($identity['nest_id'] ?? null)
+            || !is_numeric($identity['nest_id'] ?? null)
             || (int) $identity['nest_id'] <= 0
-            || ! is_numeric($identity['egg_id'] ?? null)
+            || !is_numeric($identity['egg_id'] ?? null)
             || (int) $identity['egg_id'] <= 0
         ) {
             throw new PermanentProvisioningException(
@@ -1012,7 +1287,7 @@ class Pterodactyl extends Server
     private function durableLifecycleIdentity(Service $service): ?array
     {
         $fulfillment = app(DurableFulfillmentService::class);
-        if (! $fulfillment->isReservationBacked($service)) {
+        if (!$fulfillment->isReservationBacked($service)) {
             return null;
         }
 
@@ -1023,9 +1298,9 @@ class Pterodactyl extends Server
             ->where('enabled', true)
             ->exists();
         if (
-            ! $runtimeEnabled
-            || ! class_exists($reservationServiceClass)
-            || ! method_exists(
+            !$runtimeEnabled
+            || !class_exists($reservationServiceClass)
+            || !method_exists(
                 $reservationServiceClass,
                 'serverLifecycleIdentity'
             )
@@ -1037,7 +1312,7 @@ class Pterodactyl extends Server
 
         $identity = app($reservationServiceClass)
             ->serverLifecycleIdentity($service);
-        if (! is_array($identity)) {
+        if (!is_array($identity)) {
             throw new PermanentProvisioningException(
                 'The reservation-backed service has no durable server identity; the lifecycle action was stopped.'
             );
@@ -1092,11 +1367,11 @@ class Pterodactyl extends Server
             'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
         $reservationService = app($reservationServiceClass);
         if (
-            ! method_exists(
+            !method_exists(
                 $reservationService,
                 'cancellationReconciliationContext'
             )
-            || ! method_exists(
+            || !method_exists(
                 $reservationService,
                 'pinCancellationServerIdentity'
             )
@@ -1108,7 +1383,7 @@ class Pterodactyl extends Server
 
         $context = $reservationService
             ->cancellationReconciliationContext($service);
-        if (! is_array($context)) {
+        if (!is_array($context)) {
             throw new PermanentProvisioningException(
                 'The reservation-backed cancellation has no signed checkout context.'
             );
@@ -1159,7 +1434,7 @@ class Pterodactyl extends Server
                 $server,
                 $externalUserId
             );
-        if (! is_array($pinnedIdentity)) {
+        if (!is_array($pinnedIdentity)) {
             throw new PermanentProvisioningException(
                 'The cancellation candidate could not be pinned durably.'
             );
@@ -1186,37 +1461,37 @@ class Pterodactyl extends Server
             "paymenter-user-{$service->user_id}";
         $fingerprint = $context['configuration_fingerprint'] ?? null;
         if (
-            ! is_string($fingerprint)
+            !is_string($fingerprint)
             || preg_match('/^[a-f0-9]{64}$/D', $fingerprint) !== 1
             || ($context['status'] ?? null) !== 'paid_committed'
-            || ! is_bool($context['provisioning_in_flight'] ?? null)
-            || ! is_string($context['panel_identity'] ?? null)
-            || ! hash_equals(
+            || !is_bool($context['provisioning_in_flight'] ?? null)
+            || !is_string($context['panel_identity'] ?? null)
+            || !hash_equals(
                 $this->panelIdentity(),
                 $context['panel_identity']
             )
-            || ! is_string(
+            || !is_string(
                 $context['external_server_external_id'] ?? null
             )
-            || ! hash_equals(
+            || !hash_equals(
                 (string) $service->id,
                 $context['external_server_external_id']
             )
-            || ! is_string($context['user_external_id'] ?? null)
-            || ! hash_equals(
+            || !is_string($context['user_external_id'] ?? null)
+            || !hash_equals(
                 $expectedUserExternalId,
                 $context['user_external_id']
             )
-            || ! is_numeric($context['reservation_id'] ?? null)
+            || !is_numeric($context['reservation_id'] ?? null)
             || (int) $context['reservation_id']
                 !== (int) ($identity['reservation_id'] ?? 0)
-            || ! is_string($identity['panel_identity'] ?? null)
-            || ! hash_equals(
+            || !is_string($identity['panel_identity'] ?? null)
+            || !hash_equals(
                 $context['panel_identity'],
                 $identity['panel_identity']
             )
-            || ! is_string($identity['user_external_id'] ?? null)
-            || ! hash_equals(
+            || !is_string($identity['user_external_id'] ?? null)
+            || !hash_equals(
                 $context['user_external_id'],
                 $identity['user_external_id']
             )
@@ -1228,9 +1503,9 @@ class Pterodactyl extends Server
 
         foreach (['node_id', 'nest_id', 'egg_id'] as $field) {
             if (
-                ! is_numeric($context[$field] ?? null)
+                !is_numeric($context[$field] ?? null)
                 || (int) $context[$field] <= 0
-                || ! is_numeric($identity[$field] ?? null)
+                || !is_numeric($identity[$field] ?? null)
                 || (int) $context[$field]
                     !== (int) $identity[$field]
             ) {
@@ -1241,7 +1516,7 @@ class Pterodactyl extends Server
         }
         foreach (['memory', 'cpu', 'disk'] as $resource) {
             if (
-                ! is_numeric($context[$resource] ?? null)
+                !is_numeric($context[$resource] ?? null)
                 || (int) $context[$resource] <= 0
             ) {
                 throw new PermanentProvisioningException(
@@ -1250,9 +1525,9 @@ class Pterodactyl extends Server
             }
         }
         if (
-            ! is_numeric($context['client_allocation_limit'] ?? null)
+            !is_numeric($context['client_allocation_limit'] ?? null)
             || (int) $context['client_allocation_limit'] !== 0
-            || ! is_array($context['allocations'] ?? null)
+            || !is_array($context['allocations'] ?? null)
             || $context['allocations'] === []
         ) {
             throw new PermanentProvisioningException(
@@ -1271,7 +1546,7 @@ class Pterodactyl extends Server
             if (
                 $allocationId === null
                 || $allocationId <= 0
-                || ! is_bool($allocation['is_primary'] ?? null)
+                || !is_bool($allocation['is_primary'] ?? null)
             ) {
                 throw new PermanentProvisioningException(
                     'The signed cancellation context contains an invalid allocation.'
@@ -1341,7 +1616,7 @@ class Pterodactyl extends Server
         } catch (Exception $exception) {
             $notFound = $exception->getCode() === 404
                 || $exception->getMessage() === 'Server not found';
-            if (! $notFound) {
+            if (!$notFound) {
                 throw $exception;
             }
             if ($failIfNotFound) {
@@ -1367,7 +1642,7 @@ class Pterodactyl extends Server
         ?string $expectedExternalId = null
     ): int {
         $orderUser = $service->user;
-        if (! $orderUser) {
+        if (!$orderUser) {
             throw new PermanentProvisioningException(
                 'The service has no Paymenter customer for Pterodactyl provisioning.'
             );
@@ -1446,7 +1721,7 @@ class Pterodactyl extends Server
                     );
                     if (
                         $this->pterodactylUserId($updated) !== $userId
-                        || ! hash_equals(
+                        || !hash_equals(
                             $expectedExternalId,
                             (string) ($updated['external_id'] ?? '')
                         )
@@ -1482,7 +1757,7 @@ class Pterodactyl extends Server
             $actualExternalId = trim((string) ($attributes['external_id'] ?? ''));
             if (
                 $actualExternalId !== ''
-                && ! hash_equals($expectedExternalId, $actualExternalId)
+                && !hash_equals($expectedExternalId, $actualExternalId)
             ) {
                 throw new PermanentProvisioningException(
                     'The matching Pterodactyl email belongs to a different external customer identity.'
@@ -1510,7 +1785,7 @@ class Pterodactyl extends Server
                 $updatedAttributes = $updated['attributes'] ?? [];
                 if (
                     $this->pterodactylUserId((array) $updatedAttributes) !== $userId
-                    || ! hash_equals(
+                    || !hash_equals(
                         $expectedExternalId,
                         (string) ($updatedAttributes['external_id'] ?? '')
                     )
@@ -1560,7 +1835,7 @@ class Pterodactyl extends Server
         if (
             (
                 $expectedExternalId !== null
-                && ! hash_equals(
+                && !hash_equals(
                     $expectedExternalId,
                     (string) (
                         $createdAttributes['external_id'] ?? ''
@@ -1626,7 +1901,7 @@ class Pterodactyl extends Server
         if (
             count($byEmail) !== 1
             || $this->pterodactylUserId($byEmail[0]) !== $userId
-            || ! hash_equals(
+            || !hash_equals(
                 $expectedExternalId,
                 (string) ($byEmail[0]['external_id'] ?? '')
             )
@@ -1703,36 +1978,236 @@ class Pterodactyl extends Server
         string $expected,
         bool $caseInsensitive = false
     ): array {
-        $response = $this->request(
-            '/api/application/users',
-            'get',
-            ['filter' => $filter]
+        $matches = [];
+        $recordsSeen = 0;
+        $expectedPagination = null;
+        $userIdsSeen = [];
+
+        // Never follow a server-supplied URL. Walk the official collection
+        // pages ourselves so every request retains the original identity
+        // filter, then locally prove the exact field value on every result.
+        for ($page = 1; $page <= self::USER_LOOKUP_MAX_PAGES; $page++) {
+            $response = $this->request(
+                '/api/application/users',
+                'get',
+                [
+                    'filter' => $filter,
+                    'page' => $page,
+                ]
+            );
+            $users = $response['data'] ?? null;
+            $meta = $response['meta'] ?? null;
+            $pagination = is_array($meta)
+                ? ($meta['pagination'] ?? null)
+                : null;
+            if (
+                !is_array($users)
+                || !array_is_list($users)
+                || !is_array($pagination)
+            ) {
+                throw new PermanentProvisioningException(
+                    'Pterodactyl returned an invalid customer lookup response.'
+                );
+            }
+
+            $validated = $this->validatePterodactylUserPagination(
+                $pagination,
+                count($users),
+                $page
+            );
+            $stablePagination = [
+                'total' => $validated['total'],
+                'per_page' => $validated['per_page'],
+                'total_pages' => $validated['total_pages'],
+            ];
+            if ($expectedPagination === null) {
+                $expectedPagination = $stablePagination;
+            } elseif ($stablePagination !== $expectedPagination) {
+                throw new PermanentProvisioningException(
+                    'Pterodactyl customer lookup pagination changed during traversal.'
+                );
+            }
+
+            $recordsSeen += $validated['count'];
+            if (
+                $recordsSeen > $validated['total']
+                || $recordsSeen > self::USER_LOOKUP_MAX_RECORDS
+            ) {
+                throw new PermanentProvisioningException(
+                    'Pterodactyl returned invalid customer lookup pagination metadata.'
+                );
+            }
+
+            foreach ($users as $user) {
+                if (
+                    !is_array($user)
+                    || !is_array($user['attributes'] ?? null)
+                    || !array_key_exists($field, $user['attributes'])
+                    || !is_string($user['attributes'][$field])
+                ) {
+                    throw new PermanentProvisioningException(
+                        'Pterodactyl returned an invalid customer lookup response.'
+                    );
+                }
+                $attributes = $user['attributes'];
+                $userId = $this->pterodactylUserId($attributes);
+                if (isset($userIdsSeen[$userId])) {
+                    throw new PermanentProvisioningException(
+                        'Pterodactyl returned a duplicate customer identity across lookup pages.'
+                    );
+                }
+                $userIdsSeen[$userId] = true;
+                $actual = (string) ($attributes[$field] ?? '');
+
+                $matchesExpected = $caseInsensitive
+                    ? strcasecmp($actual, $expected) === 0
+                    : hash_equals($expected, $actual);
+                if ($matchesExpected) {
+                    $matches[] = $attributes;
+                }
+            }
+
+            if ($page === $validated['total_pages']) {
+                if ($recordsSeen !== $validated['total']) {
+                    throw new PermanentProvisioningException(
+                        'Pterodactyl returned truncated customer lookup results.'
+                    );
+                }
+
+                return $matches;
+            }
+        }
+
+        throw new PermanentProvisioningException(
+            'Pterodactyl customer lookup exceeded its pagination limit.'
         );
-        if (! is_array($response['data'] ?? null)) {
+    }
+
+    /**
+     * @param  array<string, mixed>  $pagination
+     * @return array{
+     *     total: int,
+     *     count: int,
+     *     per_page: int,
+     *     current_page: int,
+     *     total_pages: int
+     * }
+     */
+    private function validatePterodactylUserPagination(
+        array $pagination,
+        int $actualCount,
+        int $requestedPage
+    ): array {
+        $total = $pagination['total'] ?? null;
+        $count = $pagination['count'] ?? null;
+        $perPage = $pagination['per_page'] ?? null;
+        $currentPage = $pagination['current_page'] ?? null;
+        $totalPages = $pagination['total_pages'] ?? null;
+        $links = $pagination['links'] ?? null;
+        if (
+            !is_int($total)
+            || $total < 0
+            || $total > self::USER_LOOKUP_MAX_RECORDS
+            || !is_int($count)
+            || $count < 0
+            || !is_int($perPage)
+            || $perPage < 1
+            || $perPage > self::USER_LOOKUP_MAX_RECORDS
+            || !is_int($currentPage)
+            || $currentPage !== $requestedPage
+            || !is_int($totalPages)
+            || $totalPages < 1
+            || $totalPages > self::USER_LOOKUP_MAX_PAGES
+            || $currentPage > $totalPages
+            || !is_array($links)
+        ) {
             throw new PermanentProvisioningException(
-                'Pterodactyl returned an invalid customer lookup response.'
+                'Pterodactyl returned invalid customer lookup pagination metadata.'
             );
         }
 
-        $matches = collect($response['data'])
-            ->map(fn ($user) => is_array($user)
-                ? (array) ($user['attributes'] ?? $user)
-                : [])
-            ->filter(function (array $attributes) use (
-                $field,
-                $expected,
-                $caseInsensitive
-            ): bool {
-                $actual = (string) ($attributes[$field] ?? '');
+        $calculatedPages = $total === 0
+            ? 1
+            : intdiv($total - 1, $perPage) + 1;
+        $offset = ($currentPage - 1) * $perPage;
+        $expectedCount = min($perPage, max(0, $total - $offset));
+        if (
+            $totalPages !== $calculatedPages
+            || $count !== $actualCount
+            || $count !== $expectedCount
+        ) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl returned invalid customer lookup pagination metadata.'
+            );
+        }
 
-                return $caseInsensitive
-                    ? strcasecmp($actual, $expected) === 0
-                    : hash_equals($expected, $actual);
-            })
-            ->values()
-            ->all();
+        $this->validatePterodactylUserPaginationLinks(
+            $links,
+            $currentPage,
+            $totalPages
+        );
 
-        return $matches;
+        return [
+            'total' => $total,
+            'count' => $count,
+            'per_page' => $perPage,
+            'current_page' => $currentPage,
+            'total_pages' => $totalPages,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $links
+     */
+    private function validatePterodactylUserPaginationLinks(
+        array $links,
+        int $currentPage,
+        int $totalPages
+    ): void {
+        $previous = $links['previous'] ?? null;
+        $next = $links['next'] ?? null;
+        if (
+            (
+                $currentPage === 1
+                && $previous !== null
+            )
+            || (
+                $currentPage > 1
+                && (
+                    !is_string($previous)
+                    || $this->pterodactylPaginationLinkPage($previous)
+                        !== $currentPage - 1
+                )
+            )
+            || (
+                $currentPage === $totalPages
+                && $next !== null
+            )
+            || (
+                $currentPage < $totalPages
+                && (
+                    !is_string($next)
+                    || $this->pterodactylPaginationLinkPage($next)
+                        !== $currentPage + 1
+                )
+            )
+        ) {
+            throw new PermanentProvisioningException(
+                'Pterodactyl returned non-monotonic customer lookup pagination metadata.'
+            );
+        }
+    }
+
+    private function pterodactylPaginationLinkPage(string $link): ?int
+    {
+        $query = parse_url($link, PHP_URL_QUERY);
+        if (!is_string($query)) {
+            return null;
+        }
+
+        parse_str($query, $parameters);
+
+        return StrictInteger::parse($parameters['page'] ?? null);
     }
 
     /**
@@ -1740,14 +2215,14 @@ class Pterodactyl extends Server
      */
     private function pterodactylUserId(array $attributes): int
     {
-        $id = $attributes['id'] ?? null;
-        if (! is_numeric($id) || (int) $id <= 0) {
+        $id = StrictInteger::parse($attributes['id'] ?? null);
+        if ($id === null || $id <= 0) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned an invalid customer identity.'
             );
         }
 
-        return (int) $id;
+        return $id;
     }
 
     private function pterodactylUsername(string $name): string
@@ -1770,7 +2245,7 @@ class Pterodactyl extends Server
     private function deleteReconciledServer(array $server): void
     {
         $serverId = $server['attributes']['id'] ?? $server['id'] ?? null;
-        if (! is_numeric($serverId) || (int) $serverId <= 0) {
+        if (!is_numeric($serverId) || (int) $serverId <= 0) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned an invalid server identity during cancellation reconciliation.'
             );
@@ -2001,7 +2476,7 @@ class Pterodactyl extends Server
             );
         } catch (Exception $e) {
             $notFound = $e->getCode() === 404 || $e->getMessage() === 'Server not found';
-            if (! $notFound) {
+            if (!$notFound) {
                 throw $e;
             }
             if ($failIfNotFound) {
@@ -2071,12 +2546,12 @@ class Pterodactyl extends Server
                 );
             }
         }
-        if (! $server) {
+        if (!$server) {
             return true;
         }
 
         $serverId = $server['attributes']['id'] ?? null;
-        if (! is_numeric($serverId) || (int) $serverId <= 0) {
+        if (!is_numeric($serverId) || (int) $serverId <= 0) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned an invalid server identity during cancellation.'
             );
@@ -2107,7 +2582,7 @@ class Pterodactyl extends Server
         $hasDurableReservation = app(DurableFulfillmentService::class)
             ->isReservationBacked($service);
         if (
-            ! is_array($upgradeContract)
+            !is_array($upgradeContract)
             && (
                 $hasDurableReservation
                 || (
@@ -2129,15 +2604,15 @@ class Pterodactyl extends Server
         if (is_array($upgradeContract)) {
             $expectedUserExternalId = "paymenter-user-{$service->user_id}";
             if (
-                ! is_string($upgradeContract['user_external_id'] ?? null)
-                || ! hash_equals(
+                !is_string($upgradeContract['user_external_id'] ?? null)
+                || !hash_equals(
                     $expectedUserExternalId,
                     $upgradeContract['user_external_id']
                 )
-                || ! is_string(
+                || !is_string(
                     $upgradeContract['external_server_external_id'] ?? null
                 )
-                || ! hash_equals(
+                || !hash_equals(
                     (string) $service->id,
                     $upgradeContract['external_server_external_id']
                 )
@@ -2150,7 +2625,7 @@ class Pterodactyl extends Server
                 $expectedUserExternalId
             );
             if (
-                ! is_numeric($upgradeContract['external_user_id'] ?? null)
+                !is_numeric($upgradeContract['external_user_id'] ?? null)
                 || (int) $upgradeContract['external_user_id']
                     !== $resolvedUserId
             ) {
@@ -2161,7 +2636,7 @@ class Pterodactyl extends Server
         }
 
         $server = $this->getServer($service->id, raw: true);
-        if (! is_array($upgradeContract)) {
+        if (!is_array($upgradeContract)) {
             $this->assertStaticUpgradeAvoidsManagedNode($server);
         }
         $settings = array_merge($settings, $properties);
@@ -2208,8 +2683,8 @@ class Pterodactyl extends Server
         ];
 
         if (
-            ! is_array($upgradeContract)
-            || ! $this->serverMatchesDynamicUpgradeTarget(
+            !is_array($upgradeContract)
+            || !$this->serverMatchesDynamicUpgradeTarget(
                 $server,
                 $upgradeContract,
                 $target,
@@ -2274,8 +2749,8 @@ class Pterodactyl extends Server
     ): void {
         $expectedPanel = $this->panelIdentity();
         if (
-            ! isset($contract['panel_identity'])
-            || ! hash_equals($expectedPanel, (string) $contract['panel_identity'])
+            !isset($contract['panel_identity'])
+            || !hash_equals($expectedPanel, (string) $contract['panel_identity'])
         ) {
             throw new PermanentProvisioningException(
                 'The upgrade reservation belongs to a different Pterodactyl panel.'
@@ -2283,13 +2758,13 @@ class Pterodactyl extends Server
         }
 
         $attributes = $server['attributes'] ?? null;
-        if (! is_array($attributes)) {
+        if (!is_array($attributes)) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned an invalid server during upgrade.'
             );
         }
         if (
-            ! $this->serverMatchesDynamicUpgradeIdentity(
+            !$this->serverMatchesDynamicUpgradeIdentity(
                 $attributes,
                 $contract
             )
@@ -2300,7 +2775,7 @@ class Pterodactyl extends Server
                 'The Pterodactyl server placement changed after the upgrade was reserved.'
             );
         }
-        if (! $this->serverHasExactUpgradeAllocation($server, $contract)) {
+        if (!$this->serverHasExactUpgradeAllocation($server, $contract)) {
             throw new PermanentProvisioningException(
                 'The Pterodactyl server allocation set changed after the upgrade was reserved.'
             );
@@ -2309,7 +2784,7 @@ class Pterodactyl extends Server
         $reservedTarget = (array) ($contract['target'] ?? []);
         foreach (['memory', 'cpu', 'disk'] as $resource) {
             if (
-                ! array_key_exists($resource, $reservedTarget)
+                !array_key_exists($resource, $reservedTarget)
                 || (int) $reservedTarget[$resource] !== $target[$resource]
             ) {
                 throw new PermanentProvisioningException(
@@ -2319,11 +2794,11 @@ class Pterodactyl extends Server
         }
 
         if (
-            ! $this->serverMatchesResourceVector(
+            !$this->serverMatchesResourceVector(
                 $server,
                 (array) ($contract['source'] ?? [])
             )
-            && ! $this->serverMatchesResourceVector($server, $target)
+            && !$this->serverMatchesResourceVector($server, $target)
         ) {
             throw new PermanentProvisioningException(
                 'Pterodactyl resource limits changed after the upgrade was reserved.'
@@ -2337,7 +2812,7 @@ class Pterodactyl extends Server
         array $target,
         array $preservedBuild
     ): void {
-        if (! $this->serverMatchesDynamicUpgradeTarget(
+        if (!$this->serverMatchesDynamicUpgradeTarget(
             $server,
             $contract,
             $target,
@@ -2389,15 +2864,14 @@ class Pterodactyl extends Server
     private function dynamicUpgradePreservedBuild(
         array $server,
         array $contract
-    ): array
-    {
+    ): array {
         $limits = data_get($server, 'attributes.limits');
         $features = data_get($server, 'attributes.feature_limits');
         $threads = is_array($limits) ? ($limits['threads'] ?? null) : null;
         if (
-            ! is_array($limits)
-            || ! is_array($features)
-            || ($threads !== null && ! is_string($threads))
+            !is_array($limits)
+            || !is_array($features)
+            || ($threads !== null && !is_string($threads))
         ) {
             throw new PermanentProvisioningException(
                 'Pterodactyl returned incomplete non-resource build settings.'
@@ -2443,8 +2917,8 @@ class Pterodactyl extends Server
     private function normalizePreservedBuild(mixed $value): array
     {
         if (
-            ! is_array($value)
-            || ! array_key_exists('threads', $value)
+            !is_array($value)
+            || !array_key_exists('threads', $value)
         ) {
             throw new PermanentProvisioningException(
                 'The upgrade reservation has no complete non-resource build snapshot.'
@@ -2466,7 +2940,7 @@ class Pterodactyl extends Server
             ),
         ];
         if (
-            ($threads !== null && ! is_string($threads))
+            ($threads !== null && !is_string($threads))
             ||
             $preserved['swap'] === null
             || $preserved['swap'] < 0
@@ -2492,7 +2966,7 @@ class Pterodactyl extends Server
     ): bool {
         $limits = data_get($server, 'attributes.limits');
         $features = data_get($server, 'attributes.feature_limits');
-        if (! is_array($limits) || ! is_array($features)) {
+        if (!is_array($limits) || !is_array($features)) {
             return false;
         }
 
@@ -2563,19 +3037,19 @@ class Pterodactyl extends Server
         array $contract
     ): bool {
         $expectedAllocation = $contract['allocation_id'] ?? null;
-        if (! is_numeric($expectedAllocation) || (int) $expectedAllocation <= 0) {
+        if (!is_numeric($expectedAllocation) || (int) $expectedAllocation <= 0) {
             return false;
         }
         $expectedAllocationIds = $contract['assigned_allocation_ids'] ?? null;
         if (
-            ! is_array($expectedAllocationIds)
-            || ! array_is_list($expectedAllocationIds)
+            !is_array($expectedAllocationIds)
+            || !array_is_list($expectedAllocationIds)
         ) {
             return false;
         }
         $normalizedExpected = [];
         foreach ($expectedAllocationIds as $id) {
-            if (! is_numeric($id) || (int) $id <= 0) {
+            if (!is_numeric($id) || (int) $id <= 0) {
                 return false;
             }
             $normalizedExpected[] = (int) $id;
@@ -2585,7 +3059,7 @@ class Pterodactyl extends Server
             $normalizedExpected === []
             || count(array_unique($normalizedExpected))
                 !== count($normalizedExpected)
-            || ! in_array(
+            || !in_array(
                 (int) $expectedAllocation,
                 $normalizedExpected,
                 true
@@ -2598,11 +3072,11 @@ class Pterodactyl extends Server
             ?? $server['relationships']
             ?? null;
         if (
-            ! is_array($relationships)
-            || ! isset($relationships['allocations'])
-            || ! is_array($relationships['allocations'])
-            || ! array_key_exists('data', $relationships['allocations'])
-            || ! is_array($relationships['allocations']['data'])
+            !is_array($relationships)
+            || !isset($relationships['allocations'])
+            || !is_array($relationships['allocations'])
+            || !array_key_exists('data', $relationships['allocations'])
+            || !is_array($relationships['allocations']['data'])
         ) {
             return false;
         }
@@ -2610,7 +3084,7 @@ class Pterodactyl extends Server
         $allocationIds = [];
         foreach ($relationships['allocations']['data'] as $allocation) {
             $id = data_get($allocation, 'attributes.id');
-            if (! is_numeric($id) || (int) $id <= 0) {
+            if (!is_numeric($id) || (int) $id <= 0) {
                 return false;
             }
             $allocationIds[] = (int) $id;
@@ -2626,16 +3100,16 @@ class Pterodactyl extends Server
         array $resources
     ): bool {
         $limits = $server['attributes']['limits'] ?? null;
-        if (! is_array($limits)) {
+        if (!is_array($limits)) {
             return false;
         }
 
         foreach (['memory', 'cpu', 'disk'] as $resource) {
             if (
-                ! array_key_exists($resource, $resources)
-                || ! is_numeric($resources[$resource])
-                || ! array_key_exists($resource, $limits)
-                || ! is_numeric($limits[$resource])
+                !array_key_exists($resource, $resources)
+                || !is_numeric($resources[$resource])
+                || !array_key_exists($resource, $limits)
+                || !is_numeric($limits[$resource])
                 || (int) $limits[$resource] !== (int) $resources[$resource]
             ) {
                 return false;

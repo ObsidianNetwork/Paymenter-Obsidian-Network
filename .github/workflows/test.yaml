@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-sqlite:
     runs-on: ubuntu-latest
@@ -28,8 +32,14 @@ jobs:
           tools: composer:v2
           coverage: none
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Cache Composer Dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.composer/cache
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
@@ -42,14 +52,18 @@ jobs:
         run: php -r "file_exists('.env') || copy('.env.example', '.env');"
         
       - name: Install Dependencies
-        run: composer install --prefer-dist --no-progress --no-suggest
+        run: composer install --no-interaction --no-ansi --prefer-dist --no-progress
+
+      - name: Audit Composer Dependencies
+        run: composer audit --locked --no-interaction
         
       - name: Generate Application Key
         run: php artisan key:generate --force
 
       - name: Build Assets
         run: |
-          npm install
+          npm ci
+          npm audit --audit-level=high
           npm run build
           npm run test:js
 
@@ -88,8 +102,14 @@ jobs:
           tools: composer:v2
           coverage: none
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Cache Composer Dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.composer/cache
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
@@ -99,14 +119,18 @@ jobs:
         run: php -r "file_exists('.env') || copy('.env.example', '.env');"
         
       - name: Install Dependencies
-        run: composer install --prefer-dist --no-progress --no-suggest
+        run: composer install --no-interaction --no-ansi --prefer-dist --no-progress
+
+      - name: Audit Composer Dependencies
+        run: composer audit --locked --no-interaction
         
       - name: Generate Application Key
         run: php artisan key:generate --force
 
       - name: Build Assets
         run: |
-          npm install
+          npm ci
+          npm audit --audit-level=high
           npm run build
           npm run test:js
 

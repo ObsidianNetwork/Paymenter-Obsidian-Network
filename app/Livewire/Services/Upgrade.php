@@ -2,10 +2,11 @@
 
 namespace App\Livewire\Services;
 
-use App\Events\Invoice\Created as InvoiceCreated;
 use App\Classes\Price;
+use App\Events\Invoice\Created as InvoiceCreated;
 use App\Exceptions\DisplayException;
 use App\Livewire\Component;
+use App\Models\ConfigOption;
 use App\Models\Invoice;
 use App\Models\Plan;
 use App\Models\Product;
@@ -14,7 +15,10 @@ use App\Models\ServiceConfig;
 use App\Models\ServiceUpgrade;
 use App\Rules\DynamicSliderValueRule;
 use App\Services\Service\CapacityConfigurationLockService;
+use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
+use App\Services\ServiceUpgrade\ServiceUpgradePricingService;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
+use App\Services\ServiceUpgrade\StaticUpgradeStockService;
 use App\Services\ServiceUpgrade\UpgradeGuaranteeService;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\DB;
@@ -23,6 +27,12 @@ use Livewire\Attributes\Computed;
 
 class Upgrade extends Component
 {
+    private const SUPPORTED_CONFIG_TYPES = [
+        'select',
+        'radio',
+        'dynamic_slider',
+    ];
+
     public Service $service;
 
     public $upgrade;
@@ -37,14 +47,15 @@ class Upgrade extends Component
     {
         $this->authorize('view', $this->service);
         $this->service->loadMissing([
-            'product.upgrades',
+            'product.upgrades.configOptions.children.plans.prices',
+            'product.upgrades.plans.prices',
             'product.upgradableConfigOptions.children',
             'plan.prices',
             'configs.configOption',
             'configs.configValue',
         ]);
 
-        if (! $this->service->upgradable) {
+        if (!$this->service->upgradable) {
             $this->notify('This service is not upgradable.', 'error', true);
 
             return $this->redirect(route('services.show', $this->service), true);
@@ -92,7 +103,7 @@ class Upgrade extends Component
             ->push($this->service->product_id)
             ->map(fn ($id) => (int) $id);
 
-        if (! $allowed->containsStrict($upgradeId)) {
+        if (!$allowed->containsStrict($upgradeId)) {
             $this->upgrade = $this->service->product_id;
             $this->upgradeProduct = $this->service->product;
             $this->notify('Invalid upgrade.', 'error');
@@ -101,14 +112,26 @@ class Upgrade extends Component
         }
 
         $this->upgradeProduct = Product::query()
-            ->with(['upgradableConfigOptions.children', 'plans.prices'])
+            ->with([
+                'configOptions.children.plans.prices',
+                'upgradableConfigOptions.children.plans.prices',
+                'plans.prices',
+            ])
             ->findOrFail($upgradeId);
+        $this->configOptions = [];
     }
 
     public function nextStep(): void
     {
         $currentConfigs = $this->service->configs
             ->keyBy('config_option_id');
+
+        $plan = $this->upgradePlan();
+        if ($plan === null) {
+            throw new DisplayException(
+                'The selected upgrade has no plan in this service currency.'
+            );
+        }
 
         $this->configOptions = $this->upgradeConfigOptions()
             ->mapWithKeys(function ($option) use ($currentConfigs): array {
@@ -128,7 +151,7 @@ class Upgrade extends Component
                 return [
                     $option->id => $current?->config_value_id
                         ?? $this->configOptions[$option->id]
-                        ?? $option->availableChildren()->value('id'),
+                        ?? $this->availableUpgradeValues($option)->value('id'),
                 ];
             })
             ->toArray();
@@ -164,12 +187,14 @@ class Upgrade extends Component
                     'required',
                     new DynamicSliderValueRule($option),
                 ];
-            } elseif (in_array($option->type, ['text', 'number'], true)) {
-                $rules["configOptions.{$option->id}"] = ['required'];
-            } elseif ($option->type !== 'checkbox') {
+            } else {
                 $rules["configOptions.{$option->id}"] = [
                     'required',
-                    Rule::in($option->availableChildren()->pluck('id')->all()),
+                    Rule::in(
+                        $this->availableUpgradeValues($option)
+                            ->pluck('id')
+                            ->all()
+                    ),
                 ];
             }
         }
@@ -195,6 +220,9 @@ class Upgrade extends Component
             if (
                 $service->status !== Service::STATUS_ACTIVE
                 || $service->upgrade()->whereIn('status', ServiceUpgrade::activeStatuses())->exists()
+                || $service->invoices()
+                    ->where('status', Invoice::STATUS_PENDING)
+                    ->exists()
             ) {
                 throw new DisplayException('This service is not currently upgradable.');
             }
@@ -233,8 +261,22 @@ class Upgrade extends Component
             ]);
             $dynamic = $service->product->usesDynamicResources()
                 || $targetProduct->usesDynamicResources();
+            $crossProduct = (int) $targetProduct->id
+                !== (int) $service->product_id;
+            if (
+                $crossProduct
+                && !DB::table('product_upgrades')
+                    ->where('product_id', $service->product_id)
+                    ->where('upgrade_id', $targetProduct->id)
+                    ->lockForUpdate()
+                    ->exists()
+            ) {
+                throw new DisplayException(
+                    'The selected product is not an authorized upgrade target.'
+                );
+            }
 
-            if ($dynamic && (int) $targetProduct->id !== (int) $service->product_id) {
+            if ($dynamic && $crossProduct) {
                 throw new DisplayException(
                     'Dynamic resource upgrades must stay on the current product.'
                 );
@@ -244,10 +286,30 @@ class Upgrade extends Component
                     'Dynamic resource upgrades require a service quantity of one.'
                 );
             }
+            if (!$dynamic && (int) $service->quantity !== 1) {
+                throw new DisplayException(
+                    'Product upgrades require a service quantity of one.'
+                );
+            }
+            if (!$dynamic) {
+                app(StaticUpgradeStockService::class)
+                    ->assertProductChangeAuthorized(
+                        $service,
+                        $targetProduct
+                    );
+            }
+            $targetCoupon = app(
+                ServiceUpgradePricingService::class
+            )->targetCoupon(
+                $service,
+                $targetProduct,
+                lock: true
+            );
 
-            $targetPlan = $dynamic
+            $targetPlan = !$crossProduct
                 ? $service->plan
-                : $targetProduct->availablePlans()
+                : $targetProduct->availablePlans($service->currency_code)
+                    ->where('type', $service->plan->type)
                     ->where('billing_period', $service->plan->billing_period)
                     ->where('billing_unit', $service->plan->billing_unit)
                     ->first();
@@ -258,6 +320,16 @@ class Upgrade extends Component
                 $targetProduct,
                 $dynamic
             );
+            if (
+                $crossProduct
+                && $targetProduct->configOptions->contains(
+                    fn (ConfigOption $option): bool => !$this->isSupportedConfigOption($option)
+                )
+            ) {
+                throw new DisplayException(
+                    'This product cannot be upgraded to automatically because it contains text, number, checkbox, or legacy configuration fields.'
+                );
+            }
             $allowedOptionIds = $targetConfigOptions
                 ->pluck('id')
                 ->map(fn ($id): int => (int) $id);
@@ -279,37 +351,44 @@ class Upgrade extends Component
                 'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
                 'active_service_guard_id' => $service->id,
                 'currency_code' => strtoupper((string) $service->currency_code),
+                'capacity_mode' => $dynamic
+                    ? ServiceUpgrade::CAPACITY_MODE_DYNAMIC
+                    : ServiceUpgrade::CAPACITY_MODE_STATIC,
             ]);
+            $upgrade->resolveTargetCoupon($targetCoupon);
 
-            foreach ($targetConfigOptions as $option) {
-                if (! array_key_exists($option->id, $this->configOptions)) {
-                    continue;
+            $currentConfigs = $service->configs->keyBy('config_option_id');
+            $optionsToPersist = $crossProduct
+                ? $targetProduct->configOptions
+                : $targetConfigOptions;
+            foreach ($optionsToPersist as $option) {
+                $copiedExistingValue = $crossProduct && !$option->upgradable;
+                if ($copiedExistingValue) {
+                    $current = $currentConfigs->get($option->id);
+                    if ($current === null) {
+                        throw new DisplayException(
+                            "{$option->name} requires a target value, but it is not customer-upgradable and the current service has no transferable selection."
+                        );
+                    }
+                    $value = $option->isDynamicSlider()
+                        ? $current->slider_value
+                        : $current->config_value_id;
+                } else {
+                    if (!array_key_exists($option->id, $this->configOptions)) {
+                        throw new DisplayException(
+                            "{$option->name} requires an explicit target selection."
+                        );
+                    }
+                    $value = $this->configOptions[$option->id];
                 }
 
-                if ($option->isDynamicSlider()) {
-                    $value = $option->normalizeDynamicSliderValue(
-                        $this->configOptions[$option->id]
-                    );
-                    $upgrade->configs()->create([
-                        'config_option_id' => $option->id,
-                        'config_value_id' => null,
-                        'slider_value' => $value,
-                    ]);
-
-                    continue;
-                }
-
-                if (! $option->availableChildren()
-                    ->whereKey($this->configOptions[$option->id])
-                    ->exists()) {
-                    throw new DisplayException("{$option->name} has an invalid selection.");
-                }
-
-                $upgrade->configs()->create([
-                    'config_option_id' => $option->id,
-                    'config_value_id' => $this->configOptions[$option->id],
-                    'slider_value' => null,
-                ]);
+                $normalized = $this->normalizedTargetConfig(
+                    $option,
+                    $value,
+                    $targetPlan,
+                    allowHiddenValue: $copiedExistingValue
+                );
+                $upgrade->configs()->create($normalized->getAttributes());
             }
 
             $upgrade->load([
@@ -324,18 +403,23 @@ class Upgrade extends Component
             ]);
             $upgrade->captureSnapshots();
 
-            if ($upgrade->source_snapshot === $upgrade->target_snapshot) {
+            if ($upgrade->targetSemanticallyMatchesSource()) {
                 throw new DisplayException(
                     'You have not changed any product or resource configuration.'
                 );
             }
 
-            $price = $upgrade->calculatePrice();
+            // The signed snapshot is the quote. Recalculating here could cross
+            // a proration-day boundary and create an invoice that fails its
+            // own immutable binding.
+            $price = $upgrade->signedUpgradePrice();
             $upgrade->quoted_amount = round((float) $price->price, 2);
-            $upgrade->credit_amount = config('settings.credits_on_downgrade', true)
-                ? max(0, round(-(float) $price->price, 2))
-                : 0;
+            $upgrade->credit_amount = $upgrade->signedCreditAmount();
             $upgrade->save();
+            if (!$dynamic) {
+                app(StaticUpgradeStockService::class)
+                    ->reserve($upgrade, $service);
+            }
 
             $dueAt = app(UpgradeGuaranteeService::class)
                 ->deadline($service);
@@ -348,16 +432,19 @@ class Upgrade extends Component
                     'user_id' => $service->user_id,
                 ]);
 
-                $upgrade->invoice_id = $invoice->id;
-                $upgrade->save();
-
                 $invoice->items()->create([
-                    'description' => 'Upgrade '.$service->product->name,
+                    'description' => 'Upgrade ' . $service->product->name,
                     'price' => $price->price,
                     'quantity' => 1,
                     'reference_id' => $upgrade->id,
                     'reference_type' => ServiceUpgrade::class,
                 ]);
+
+                // Assemble the line before binding the invoice back to the
+                // upgrade. Once either durable reference exists, invoice-line
+                // observers correctly make the obligation immutable.
+                $upgrade->invoice_id = $invoice->id;
+                ServiceUpgradeMutationCoordinator::save($upgrade);
             }
 
             if ($dynamic) {
@@ -405,7 +492,19 @@ class Upgrade extends Component
             return collect();
         }
 
-        return $this->service->productUpgrades();
+        return $this->service->productUpgrades()
+            ->filter(function (Product $product): bool {
+                $product->loadMissing([
+                    'configOptions.children.plans.prices',
+                    'plans.prices',
+                ]);
+
+                return $this->planForUpgradeProduct($product) !== null
+                    && $this->crossProductConfigurationIsTransferable(
+                        $product
+                    );
+            })
+            ->values();
     }
 
     public function hasDynamicSliderOptions(): bool
@@ -428,8 +527,12 @@ class Upgrade extends Component
         Product $product,
         bool $dynamic
     ) {
-        if (! $dynamic) {
-            return $product->upgradableConfigOptions;
+        if (!$dynamic) {
+            return $product->upgradableConfigOptions
+                ->filter(
+                    fn (ConfigOption $option): bool => $this->isSupportedConfigOption($option)
+                )
+                ->values();
         }
 
         return $product->upgradableConfigOptions
@@ -455,20 +558,31 @@ class Upgrade extends Component
 
     private function upgradePlan(): ?Plan
     {
-        if (! isset($this->upgradeProduct)) {
+        if (!isset($this->upgradeProduct)) {
             return null;
+        }
+        if (
+            (int) $this->upgradeProduct->id
+            === (int) $this->service->product_id
+        ) {
+            return $this->service->plan;
         }
         if (
             $this->service->product->usesDynamicResources()
             || $this->upgradeProduct->usesDynamicResources()
         ) {
-            return (int) $this->upgradeProduct->id
-                === (int) $this->service->product_id
-                    ? $this->service->plan
-                    : null;
+            return null;
         }
 
-        return $this->upgradeProduct->availablePlans()
+        return $this->planForUpgradeProduct($this->upgradeProduct);
+    }
+
+    public function planForUpgradeProduct(Product $product): ?Plan
+    {
+        $product->loadMissing('plans.prices');
+
+        return $product->availablePlans($this->service->currency_code)
+            ->where('type', $this->service->plan->type)
             ->where('billing_period', $this->service->plan->billing_period)
             ->where('billing_unit', $this->service->plan->billing_unit)
             ->first();
@@ -476,48 +590,245 @@ class Upgrade extends Component
 
     private function temporaryConfigs()
     {
-        return $this->upgradeConfigOptions()
-            ->map(function ($option): ?ServiceConfig {
-                if (! array_key_exists($option->id, $this->configOptions)) {
-                    return null;
-                }
+        $plan = $this->upgradePlan();
+        if ($plan === null) {
+            return collect();
+        }
 
-                if ($option->isDynamicSlider()) {
-                    try {
-                        $value = $option->normalizeDynamicSliderValue(
-                            $this->configOptions[$option->id]
-                        );
-                    } catch (\InvalidArgumentException) {
-                        return null;
-                    }
+        $crossProduct = (int) $this->upgradeProduct->id
+            !== (int) $this->service->product_id;
+        $this->upgradeProduct->loadMissing(
+            'configOptions.children.plans.prices'
+        );
+        $currentConfigs = $this->service->configs
+            ->keyBy('config_option_id');
+        $options = $crossProduct
+            ? $this->upgradeProduct->configOptions
+            : $this->upgradeConfigOptions();
 
-                    $config = new ServiceConfig([
-                        'config_option_id' => $option->id,
-                        'slider_value' => $value,
-                    ]);
-                } else {
-                    $value = $this->configOptions[$option->id];
-                    if (! $option->availableChildren()->whereKey($value)->exists()) {
-                        return null;
-                    }
-                    $config = new ServiceConfig([
-                        'config_option_id' => $option->id,
-                        'config_value_id' => $value,
-                    ]);
-                }
+        return $options->map(function (ConfigOption $option) use (
+            $crossProduct,
+            $currentConfigs,
+            $plan
+        ): ?ServiceConfig {
+            $copiedExistingValue = $crossProduct && !$option->upgradable;
+            $current = $currentConfigs->get($option->id);
+            if ($copiedExistingValue && $current === null) {
+                return null;
+            }
 
-                $config->setRelation('configOption', $option);
-                if ($config->config_value_id !== null) {
-                    $config->setRelation(
-                        'configValue',
-                        $option->children->firstWhere('id', $config->config_value_id)
-                    );
-                }
+            $value = $copiedExistingValue
+                ? ($option->isDynamicSlider()
+                    ? $current->slider_value
+                    : $current->config_value_id)
+                : ($this->configOptions[$option->id]
+                    ?? $this->defaultOptionSelection($option, $current));
+            if ($value === null) {
+                return null;
+            }
 
-                return $config;
-            })
-            ->filter()
+            try {
+                return $this->normalizedTargetConfig(
+                    $option,
+                    $value,
+                    $plan,
+                    allowHiddenValue: $copiedExistingValue
+                );
+            } catch (\Throwable) {
+                return null;
+            }
+        })->filter()->values();
+    }
+
+    public function availableUpgradeValues(ConfigOption $option)
+    {
+        $plan = $this->upgradePlan();
+        if ($plan === null || !in_array($option->type, [
+            'select',
+            'radio',
+        ], true)) {
+            return collect();
+        }
+
+        $option->loadMissing('children.plans.prices');
+
+        return $option->children
+            ->where('hidden', false)
+            ->filter(
+                fn (ConfigOption $value): bool => $this->configValueAvailableForPlan($value, $plan)
+            )
             ->values();
+    }
+
+    private function normalizedTargetConfig(
+        ConfigOption $option,
+        mixed $value,
+        Plan $plan,
+        bool $allowHiddenValue = false
+    ): ServiceConfig {
+        if (!$this->isSupportedConfigOption($option)) {
+            throw new DisplayException(
+                "{$option->name} uses a configuration type that automatic upgrades do not support."
+            );
+        }
+
+        if ($option->isDynamicSlider()) {
+            try {
+                $normalized = $option->normalizeDynamicSliderValue($value);
+            } catch (\InvalidArgumentException $exception) {
+                throw new DisplayException(
+                    "{$option->name} has an invalid target value."
+                );
+            }
+            $config = new ServiceConfig([
+                'config_option_id' => $option->id,
+                'config_value_id' => null,
+                'slider_value' => $normalized,
+            ]);
+            $config->setRelation('configOption', $option);
+
+            return $config;
+        }
+
+        $option->loadMissing('children.plans.prices');
+        $selected = $option->children->firstWhere('id', (int) $value);
+        if (
+            $selected === null
+            || (!$allowHiddenValue && (bool) $selected->hidden)
+            || !$this->configValueAvailableForPlan($selected, $plan)
+        ) {
+            throw new DisplayException(
+                "{$option->name} has no valid price-backed selection in {$this->service->currency_code}."
+            );
+        }
+
+        $config = new ServiceConfig([
+            'config_option_id' => $option->id,
+            'config_value_id' => $selected->id,
+            'slider_value' => null,
+        ]);
+        $config->setRelation('configOption', $option);
+        $config->setRelation('configValue', $selected);
+
+        return $config;
+    }
+
+    private function configValueAvailableForPlan(
+        ConfigOption $value,
+        Plan $targetPlan
+    ): bool {
+        $value->loadMissing('plans.prices');
+
+        return $value->plans->contains(function (Plan $plan) use (
+            $targetPlan
+        ): bool {
+            if ($plan->type === 'free') {
+                return true;
+            }
+
+            return (int) $plan->billing_period
+                    === (int) $targetPlan->billing_period
+                && (string) $plan->billing_unit
+                    === (string) $targetPlan->billing_unit
+                && $plan->prices->contains(
+                    'currency_code',
+                    $this->service->currency_code
+                );
+        });
+    }
+
+    private function crossProductConfigurationIsTransferable(
+        Product $product
+    ): bool {
+        $plan = $this->planForUpgradeProduct($product);
+        if ($plan === null) {
+            return false;
+        }
+
+        $currentConfigs = $this->service->configs
+            ->keyBy('config_option_id');
+        foreach ($product->configOptions as $option) {
+            if (!$this->isSupportedConfigOption($option)) {
+                return false;
+            }
+
+            if ($option->upgradable) {
+                if (
+                    !$option->isDynamicSlider()
+                    && $this->eligibleChildrenForPlan($option, $plan)
+                        ->isEmpty()
+                ) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            $current = $currentConfigs->get($option->id);
+            if ($current === null) {
+                return false;
+            }
+            try {
+                $this->normalizedTargetConfig(
+                    $option,
+                    $option->isDynamicSlider()
+                        ? $current->slider_value
+                        : $current->config_value_id,
+                    $plan,
+                    allowHiddenValue: true
+                );
+            } catch (\Throwable) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function eligibleChildrenForPlan(
+        ConfigOption $option,
+        Plan $plan
+    ) {
+        $option->loadMissing('children.plans.prices');
+
+        return $option->children
+            ->where('hidden', false)
+            ->filter(
+                fn (ConfigOption $value): bool => $this->configValueAvailableForPlan($value, $plan)
+            )
+            ->values();
+    }
+
+    private function defaultOptionSelection(
+        ConfigOption $option,
+        ?ServiceConfig $current
+    ): mixed {
+        if ($option->isDynamicSlider()) {
+            return $current?->slider_value
+                ?? $option->getMetadata(
+                    'default',
+                    $option->getMetadata('min')
+                );
+        }
+
+        $available = $this->availableUpgradeValues($option);
+        if (
+            $current?->config_value_id !== null
+            && $available->contains('id', $current->config_value_id)
+        ) {
+            return $current->config_value_id;
+        }
+
+        return $available->value('id');
+    }
+
+    private function isSupportedConfigOption(ConfigOption $option): bool
+    {
+        return in_array(
+            (string) $option->type,
+            self::SUPPORTED_CONFIG_TYPES,
+            true
+        );
     }
 
     private function reserveDynamicCapacity(
@@ -533,7 +844,7 @@ class Upgrade extends Component
     private function dynamicUpgradeReservation(): object
     {
         $class = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\UpgradeReservationService';
-        if (! class_exists($class)) {
+        if (!class_exists($class)) {
             throw new DisplayException(
                 'Dynamic upgrade capacity reservations are unavailable. Contact support.'
             );

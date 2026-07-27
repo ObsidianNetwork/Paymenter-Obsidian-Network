@@ -1,4 +1,7 @@
 const safeMessage = 'Live resource availability is temporarily unavailable. Please try again.'
+const rateLimitMessage = 'Availability checks are temporarily rate-limited.'
+const defaultRetryAfterSeconds = 5
+const maxRetryAfterSeconds = 300
 
 function normalizeInteger(value) {
     if (typeof value === 'number' && Number.isSafeInteger(value)) {
@@ -121,6 +124,47 @@ function responseMessage(response, payload) {
     return safeMessage
 }
 
+export function retryAfterDelaySeconds(response, currentTime = Date.now()) {
+    const rawValue = response?.headers?.get?.('Retry-After')
+    if (typeof rawValue !== 'string' || rawValue.trim() === '') {
+        return defaultRetryAfterSeconds
+    }
+
+    const value = rawValue.trim()
+    let seconds = null
+    if (/^\d+$/.test(value)) {
+        seconds = Number(value)
+    } else {
+        const retryAt = Date.parse(value)
+        if (Number.isFinite(retryAt)) {
+            seconds = Math.ceil((retryAt - currentTime) / 1000)
+        }
+    }
+
+    if (!Number.isSafeInteger(seconds)) {
+        return defaultRetryAfterSeconds
+    }
+
+    return Math.min(maxRetryAfterSeconds, Math.max(1, seconds))
+}
+
+export function retryWaitSecondsUntil(
+    retryAvailableAt,
+    currentTime = Date.now(),
+) {
+    if (
+        !Number.isFinite(retryAvailableAt)
+        || !Number.isFinite(currentTime)
+    ) {
+        return 0
+    }
+
+    return Math.max(
+        0,
+        Math.ceil((retryAvailableAt - currentTime) / 1000),
+    )
+}
+
 export default function dynamicResourceStock({
     endpoint,
     cartItemId = null,
@@ -138,6 +182,10 @@ export default function dynamicResourceStock({
         _requestId: 0,
         _controller: null,
         _quoteTimer: null,
+        _retryCooldownTimer: null,
+        _retryAvailableAt: 0,
+        _retryQueued: false,
+        retryWaitSeconds: 0,
         _adjustmentPasses: 0,
 
         init() {
@@ -153,7 +201,15 @@ export default function dynamicResourceStock({
                 || (this.quoteState === 'ready' && this.latestQuote?.available === true)
         },
 
+        get canRetry() {
+            return this.retryWaitSeconds === 0
+        },
+
         retryQuote() {
+            if (!this.canRetry) {
+                return
+            }
+
             this._adjustmentPasses = 0
             this.queueQuote(0)
         },
@@ -169,6 +225,13 @@ export default function dynamicResourceStock({
             // selection can resolve and re-enable checkout with stale bounds.
             this._requestId++
             this._controller?.abort()
+            if (this._retryAvailableAt > Date.now()) {
+                this._retryQueued = true
+                this.quoteState = 'error'
+
+                return
+            }
+
             this.quoteState = 'loading'
             this.quoteError = ''
             window.dispatchEvent(new CustomEvent('dynamic-capacity-loading'))
@@ -177,6 +240,13 @@ export default function dynamicResourceStock({
 
         async requestQuote() {
             if (!this.enabled) {
+                return
+            }
+
+            if (this._retryAvailableAt > Date.now()) {
+                this._retryQueued = true
+                this.quoteState = 'error'
+
                 return
             }
 
@@ -218,6 +288,14 @@ export default function dynamicResourceStock({
                 const payload = await response.json().catch(() => ({}))
 
                 if (requestId !== this._requestId) {
+                    return
+                }
+
+                if (response.status === 429) {
+                    this.failRateLimitedQuote(
+                        retryAfterDelaySeconds(response),
+                    )
+
                     return
                 }
 
@@ -269,12 +347,72 @@ export default function dynamicResourceStock({
         },
 
         failQuote(message) {
+            this.clearRetryCooldown()
             this.latestQuote = null
             this.quoteState = 'error'
             this.quoteError = message || safeMessage
             window.dispatchEvent(new CustomEvent('dynamic-capacity-failed', {
                 detail: { message: this.quoteError },
             }))
+        },
+
+        failRateLimitedQuote(seconds) {
+            this.clearRetryCooldown()
+            this.latestQuote = null
+            this.quoteState = 'error'
+            this.retryWaitSeconds = seconds
+            this._retryAvailableAt = Date.now() + (seconds * 1000)
+            this.quoteError = `${rateLimitMessage} Retry in ${seconds} seconds.`
+            window.dispatchEvent(new CustomEvent('dynamic-capacity-failed', {
+                detail: {
+                    message: this.quoteError,
+                    retry_after: seconds,
+                },
+            }))
+            this.scheduleRetryCooldownTick()
+        },
+
+        scheduleRetryCooldownTick() {
+            window.clearTimeout(this._retryCooldownTimer)
+            const remaining = retryWaitSecondsUntil(
+                this._retryAvailableAt,
+            )
+            this.retryWaitSeconds = remaining
+            if (remaining === 0) {
+                this._retryCooldownTimer = null
+                this._retryAvailableAt = 0
+                if (this._retryQueued) {
+                    this._retryQueued = false
+                    this.queueQuote(0)
+
+                    return
+                }
+
+                if (this.quoteState === 'error') {
+                    this.quoteError = `${rateLimitMessage} You can retry now.`
+                }
+
+                return
+            }
+
+            this.quoteError = `${rateLimitMessage} Retry in ${remaining} seconds.`
+            const millisecondsUntilNextSecond = Math.max(
+                1,
+                (this._retryAvailableAt - Date.now())
+                    - ((remaining - 1) * 1000),
+            )
+            this._retryCooldownTimer = window.setTimeout(
+                () => this.scheduleRetryCooldownTick(),
+                Math.min(1000, millisecondsUntilNextSecond),
+            )
+        },
+
+        clearRetryCooldown() {
+            window.clearTimeout(this._retryCooldownTimer)
+            this._retryCooldownTimer = null
+            this._retryAvailableAt = 0
+            this._retryQueued = false
+            this.retryWaitSeconds = 0
         },
     }
 }

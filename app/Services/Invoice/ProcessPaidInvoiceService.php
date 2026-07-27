@@ -9,6 +9,7 @@ use App\Models\ServiceUpgrade;
 use App\Services\Service\RenewServiceService;
 use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -97,20 +98,11 @@ class ProcessPaidInvoiceService
                             ->handle($serviceUpgrade);
                     }
                 } elseif ($item->reference_type == Credit::class) {
-                    $user = $invoice->user;
-                    $credit = $user->credits()->where('currency_code', $invoice->currency_code)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($credit) {
-                        $credit->amount += $item->price;
-                        $credit->save();
-                    } else {
-                        $user->credits()->create([
-                            'currency_code' => $invoice->currency_code,
-                            'amount' => $item->price,
-                        ]);
-                    }
+                    app(CreditInvoicePaymentService::class)->addBalance(
+                        (int) $invoice->user_id,
+                        (string) $invoice->currency_code,
+                        $item->price
+                    );
                 }
             });
         }, 5);
@@ -125,9 +117,9 @@ class ProcessPaidInvoiceService
      * The invoice itself must already be locked by the caller.
      *
      * @return array{
-     *     items: \Illuminate\Database\Eloquent\Collection<int, mixed>,
-     *     services: \Illuminate\Database\Eloquent\Collection<int, Service>,
-     *     upgrades: \Illuminate\Database\Eloquent\Collection<int, ServiceUpgrade>
+     *     items: Collection<int, mixed>,
+     *     services: Collection<int, Service>,
+     *     upgrades: Collection<int, ServiceUpgrade>
      * }
      */
     public function lockFulfillmentObligations(Invoice $invoice): array
@@ -175,9 +167,8 @@ class ProcessPaidInvoiceService
             ->pluck('service_id')
             ->map(fn ($id) => (int) $id)
             ->first(
-                fn (int $id): bool => ! $services->contains(
-                    fn (Service $service): bool =>
-                        (int) $service->id === $id
+                fn (int $id): bool => !$services->contains(
+                    fn (Service $service): bool => (int) $service->id === $id
                 )
             );
         if ($unlockedUpgradeServiceId !== null) {

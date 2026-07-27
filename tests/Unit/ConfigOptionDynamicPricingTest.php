@@ -9,7 +9,7 @@ class ConfigOptionDynamicPricingTest extends TestCase
 {
     private function createConfigOption(array $metadata): ConfigOption
     {
-        $option = new ConfigOption();
+        $option = new ConfigOption;
         $option->type = 'dynamic_slider';
         $option->metadata = $metadata;
 
@@ -101,7 +101,7 @@ class ConfigOptionDynamicPricingTest extends TestCase
 
     public function test_non_dynamic_slider_returns_zero(): void
     {
-        $option = new ConfigOption();
+        $option = new ConfigOption;
         $option->type = 'select';
         $option->metadata = [
             'pricing' => [

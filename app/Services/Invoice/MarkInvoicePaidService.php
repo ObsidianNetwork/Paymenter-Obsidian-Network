@@ -7,6 +7,7 @@ use App\Models\Service;
 use App\Models\ServiceUpgrade;
 use App\Services\Service\DurableFulfillmentService;
 use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
+use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
 use Illuminate\Support\Facades\DB;
 
@@ -212,8 +213,7 @@ class MarkInvoicePaidService
         Invoice $invoice,
         $items,
         $services
-    ): ?string
-    {
+    ): ?string {
         if ($invoice->status !== Invoice::STATUS_PENDING) {
             return null;
         }
@@ -222,8 +222,7 @@ class MarkInvoicePaidService
         $failures = [];
         foreach (
             $items->where('reference_type', Service::class)
-                ->sortBy(fn ($item): int => (int) $item->reference_id)
-                as $item
+                ->sortBy(fn ($item): int => (int) $item->reference_id) as $item
         ) {
             $service = $services->firstWhere(
                 'id',
@@ -255,8 +254,7 @@ class MarkInvoicePaidService
         Invoice $invoice,
         $items,
         $upgrades
-    ): ?string
-    {
+    ): ?string {
         if ($invoice->status !== Invoice::STATUS_PENDING) {
             return null;
         }
@@ -278,8 +276,7 @@ class MarkInvoicePaidService
             $items->where(
                 'reference_type',
                 ServiceUpgrade::class
-            )->sortBy(fn ($item): int => (int) $item->reference_id)
-            as $item
+            )->sortBy(fn ($item): int => (int) $item->reference_id) as $item
         ) {
             $upgrade = $upgrades->firstWhere(
                 'id',
@@ -292,7 +289,7 @@ class MarkInvoicePaidService
                 continue;
             }
 
-            if (! $identity->requiresCoordinator($upgrade)) {
+            if (!$identity->requiresCoordinator($upgrade)) {
                 $failure = app(ServiceUpgradeService::class)
                     ->preflightPaidNonCapacityUpgrade(
                         $upgrade,
@@ -306,7 +303,7 @@ class MarkInvoicePaidService
                 continue;
             }
 
-            if (! $coordinatorAvailable) {
+            if (!$coordinatorAvailable) {
                 $upgrade->forceFill([
                     'status' => $hasPaymentEvidence
                         ? ServiceUpgrade::STATUS_NEEDS_ATTENTION
@@ -318,7 +315,8 @@ class MarkInvoicePaidService
                         ? 'The reservation coordinator was unavailable when payment was recorded.'
                         : 'The reservation coordinator was unavailable before payment.',
                     'failed_at' => now(),
-                ])->save();
+                ]);
+                ServiceUpgradeMutationCoordinator::save($upgrade);
                 $failures[] =
                     "Capacity-backed service upgrade {$upgrade->id} cannot be paid because its reservation coordinator is unavailable.";
 

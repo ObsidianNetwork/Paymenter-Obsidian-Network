@@ -99,8 +99,8 @@ class CapacityConfigurationLockService
             ->pluck('id')
             ->map(fn ($id): int => (int) $id);
 
-        $productMorph = (new Product())->getMorphClass();
-        $configOptionMorph = (new ConfigOption())->getMorphClass();
+        $productMorph = (new Product)->getMorphClass();
+        $configOptionMorph = (new ConfigOption)->getMorphClass();
         $planIds = Plan::query()
             ->where(function ($query) use (
                 $productIds,

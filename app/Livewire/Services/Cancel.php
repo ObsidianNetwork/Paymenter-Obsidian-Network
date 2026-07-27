@@ -4,7 +4,7 @@ namespace App\Livewire\Services;
 
 use App\Livewire\Component;
 use App\Models\Service;
-use App\Models\ServiceCancellation;
+use App\Services\Service\ServiceCancellationRequestService;
 use Livewire\Attributes\Validate;
 
 class Cancel extends Component
@@ -23,8 +23,11 @@ class Cancel extends Component
 
         $this->validate();
 
-        // Event hook will handle the cancellation (if its immediate or end of period)
-        ServiceCancellation::create([
+        // The synchronous event listener owns the invoice and fulfillment
+        // transition. Keep the cancellation row in that same transaction so
+        // a listener failure cannot leave an orphan request that suppresses
+        // provisioning without a durable termination intent.
+        app(ServiceCancellationRequestService::class)->create([
             'service_id' => $this->service->id,
             'type' => $this->type,
             'reason' => $this->reason,

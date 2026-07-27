@@ -7,8 +7,10 @@ use App\Helpers\ExtensionHelper;
 use App\Helpers\NotificationHelper;
 use App\Models\Service;
 use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\ServiceJobDispatchService;
 use Exception;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -17,7 +19,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
-class CreateJob implements ShouldQueue
+class CreateJob implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
@@ -25,10 +27,26 @@ class CreateJob implements ShouldQueue
 
     public $tries = 8;
 
+    public $uniqueFor = 43200;
+
     /**
      * Create a new job instance.
      */
-    public function __construct(public Service $service, public $sendNotification = true) {}
+    public function __construct(
+        public Service $service,
+        public $sendNotification = true,
+        public ?int $dispatchId = null,
+        public ?string $dispatchToken = null
+    ) {}
+
+    public function uniqueId(): string
+    {
+        return implode(':', [
+            'create',
+            $this->service->id,
+            $this->dispatchToken ?? 'legacy',
+        ]);
+    }
 
     public function middleware(): array
     {
@@ -48,38 +66,52 @@ class CreateJob implements ShouldQueue
     /**
      * Execute the job.
      */
-    public function handle(): void
+    public function handle(ServiceJobDispatchService $dispatches): void
     {
-        $this->service = $this->service->fresh();
-        if (! $this->service) {
-            return;
-        }
+        $execution = $dispatches->run(
+            $this->service,
+            ServiceJobDispatchService::ACTION_CREATE,
+            $this->dispatchId,
+            $this->dispatchToken,
+            function (Service $service): array {
+                $this->service = $service;
+                if (
+                    $this->service->cancellation()
+                        ->where('type', 'immediate')
+                        ->exists()
+                ) {
+                    return ['created' => false, 'data' => []];
+                }
+
+                $data = [];
+                try {
+                    $data = ExtensionHelper::createServer($this->service);
+                } catch (PermanentProvisioningException $e) {
+                    $this->failed($e);
+                    $this->fail($e);
+
+                    return ['created' => false, 'data' => []];
+                } catch (Exception $e) {
+                    if ($e->getMessage() !== 'No server assigned to this product') {
+                        throw $e;
+                    }
+                }
+
+                return [
+                    'created' => true,
+                    'data' => is_array($data) ? $data : [],
+                ];
+            }
+        );
         if (
-            in_array($this->service->status, [
-                Service::STATUS_CANCELLED,
-                Service::STATUS_CANCELLATION_PENDING,
-            ], true)
-            || $this->service->cancellation()->where('type', 'immediate')->exists()
+            !$execution['executed']
+            || !($execution['result']['created'] ?? false)
         ) {
             return;
         }
 
-        $data = [];
-        // $data is the data that will be used to send the email, data is coming from the extension itself
-        try {
-            $data = ExtensionHelper::createServer($this->service);
-        } catch (PermanentProvisioningException $e) {
-            $this->failed($e);
-            $this->fail($e);
-
-            return;
-        } catch (Exception $e) {
-            if ($e->getMessage() !== 'No server assigned to this product') {
-                throw $e;
-            }
-        }
-
-        $this->service->refresh();
+        $this->service = $execution['service']->fresh();
+        $data = $execution['result']['data'];
         if ($this->sendNotification && $this->service->status === Service::STATUS_ACTIVE) {
             $reservationServiceClass = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
             $notificationPending = null;
@@ -101,10 +133,24 @@ class CreateJob implements ShouldQueue
 
     public function failed(Throwable $exception): void
     {
+        $dispatches = app(ServiceJobDispatchService::class);
+        if ($exception instanceof PermanentProvisioningException) {
+            $dispatches->abandon(
+                $this->dispatchId,
+                $this->dispatchToken
+            );
+        } else {
+            $dispatches->postponeFailure(
+                $this->dispatchId,
+                $this->dispatchToken,
+                $exception
+            );
+        }
+
         $fulfillment = app(DurableFulfillmentService::class);
         if (
-            ! $this->service->exists
-            || ! $fulfillment->isReservationBacked($this->service)
+            !$this->service->exists
+            || !$fulfillment->isReservationBacked($this->service)
         ) {
             return;
         }
@@ -140,17 +186,17 @@ class CreateJob implements ShouldQueue
             NotificationHelper::sendSystemEmailNotification(
                 'Reservation-backed server provisioning failed',
                 '<p>Server provisioning exhausted its retries while its durable '
-                    .'fulfillment runtime was unavailable or unable to record the '
-                    .'failure state.</p><p>Service ID: '
-                    .(int) $this->service->id.'</p><p>Error: '
-                    .htmlspecialchars(
+                    . 'fulfillment runtime was unavailable or unable to record the '
+                    . 'failure state.</p><p>Service ID: '
+                    . (int) $this->service->id . '</p><p>Error: '
+                    . htmlspecialchars(
                         $exception->getMessage(),
                         ENT_QUOTES,
                         'UTF-8'
                     )
-                    .'</p><p>The paid capacity remains held. Restore the Dynamic '
-                    .'Pterodactyl runtime and reconcile this service before any '
-                    .'manual provisioning or cancellation.</p>'
+                    . '</p><p>The paid capacity remains held. Restore the Dynamic '
+                    . 'Pterodactyl runtime and reconcile this service before any '
+                    . 'manual provisioning or cancellation.</p>'
             );
         } catch (Throwable $alertException) {
             Log::error(

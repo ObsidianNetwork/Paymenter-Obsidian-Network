@@ -10,9 +10,7 @@ final class StrictInteger
      */
     public const MAX_STORED_SLIDER_VALUE = 99_999_999;
 
-    private function __construct()
-    {
-    }
+    private function __construct() {}
 
     /**
      * Parse a canonical base-10 integer without float coercion, exponent
@@ -24,7 +22,7 @@ final class StrictInteger
             return $value;
         }
         if (
-            ! is_string($value)
+            !is_string($value)
             || $value === '-0'
             || preg_match('/^-?(0|[1-9]\d*)$/D', $value) !== 1
         ) {
@@ -49,7 +47,7 @@ final class StrictInteger
             return $value;
         }
         if (
-            ! is_string($value)
+            !is_string($value)
             || preg_match('/^-?(0|[1-9]\d*)(?:\.0+)?$/D', $value) !== 1
         ) {
             return null;

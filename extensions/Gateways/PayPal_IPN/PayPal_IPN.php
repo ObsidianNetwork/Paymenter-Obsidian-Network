@@ -19,6 +19,15 @@ use Illuminate\Support\Facades\Http;
 )]
 class PayPal_IPN extends Gateway
 {
+    public function supportsDurablePaymentInitiations(): bool
+    {
+        // Reopening the legacy PayPal URL can submit another independent
+        // payment. There is no provider idempotency key or exact remote
+        // payment identity to reconcile, so the generic coordinator must
+        // treat any retry as indeterminate and fail closed.
+        return false;
+    }
+
     public function boot()
     {
         require __DIR__ . '/routes.php';
@@ -103,7 +112,13 @@ class PayPal_IPN extends Gateway
             if (!$invoice || $request->mc_currency !== $invoice->currency_code) {
                 return;
             }
-            ExtensionHelper::addPayment($request->item_number, 'PayPal', $request->mc_gross, $request->mc_fee, transactionId: $request->txn_id);
+            ExtensionHelper::addPayment(
+                $request->item_number,
+                'PayPal_IPN',
+                $request->mc_gross,
+                $request->mc_fee,
+                transactionId: $request->txn_id
+            );
         }
     }
 }

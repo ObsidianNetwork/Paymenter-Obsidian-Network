@@ -6,14 +6,23 @@ on:
       - master
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pint:
-    if: github.event_name == 'push' && contains(github.ref, 'refs/heads/master')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -24,49 +33,34 @@ jobs:
           coverage: none
 
       - name: Cache Composer Dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.composer/cache
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
           restore-keys: ${{ runner.os }}-composer-
 
       - name: Install Dependencies
-        run: composer install --prefer-dist --no-progress --no-suggest
+        run: composer install --no-interaction --no-ansi --prefer-dist --no-progress
 
       - name: Run Pint
-        run: vendor/bin/pint
+        env:
+          # Every PR run must retain the complete branch diff so an earlier
+          # formatting failure cannot disappear after an unrelated push.
+          # Direct master pushes compare against their previous commit.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+          mapfile -d '' files < <(
+            git diff --diff-filter=ACMR --name-only -z \
+              "$BASE_SHA"...HEAD -- '*.php'
+          )
+          if ((${#files[@]})); then
+            vendor/bin/pint --test "${files[@]}"
+          fi
 
-      - name: Commit Pint Fixes
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "style: linted files with pint"
-          branch: master
-          file_pattern: "*.php"
-
-  #phpstan:
-    #runs-on: ubuntu-latest
-
-    #steps:
-      #- name: Checkout code
-        #uses: actions/checkout@v4
-
-      #- name: Setup PHP
-        #uses: shivammathur/setup-php@v2
-        #with:
-          #php-version: '8.3'
-          #extensions: bcmath, curl, gd, mbstring, mysql, openssl, pdo, tokenizer, xml, zip
-          #tools: composer:v2
-          #coverage: none
-
-      #- name: Cache Composer Dependencies
-        #uses: actions/cache@v3
-        #with:
-          #path: ~/.composer/cache
-          #key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          #restore-keys: ${{ runner.os }}-composer-
-
-      #- name: Install Dependencies
-        #run: composer install --no-interaction --no-progress --prefer-dist 
-
-      #- name: Run PHPStan
-        #run: vendor/bin/phpstan analyse
+  # PHPStan is intentionally not a required PR job yet. The repository has no
+  # checked-in baseline, and a clean full analysis of the current dependency
+  # graph has not been established. Enable it only after that gate is proven
+  # green rather than introducing a knowingly failing required check.

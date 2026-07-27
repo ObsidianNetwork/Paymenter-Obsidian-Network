@@ -19,6 +19,11 @@ class ServiceFactory extends Factory
     {
         return [
             'price' => $this->faker->randomFloat(2, 1),
+            'period_base_price' => fn (array $attributes) => $attributes['price'],
+            'current_period_price' => fn (array $attributes) => $attributes['price'],
+            'pricing_ledger_started_at' => now(),
+            'pricing_ledger_verified_at' => now(),
+            'billing_cycles_completed' => 1,
             'currency_code' => 'USD',
             'status' => $this->faker->randomElement([
                 Service::STATUS_PENDING,

@@ -31,23 +31,21 @@ class Plan extends Model implements Auditable
     protected static function booted(): void
     {
         static::saving(
-            fn (Plan $plan) =>
-                app(CapacityConfigurationMutationGuard::class)
-                    ->assertPlanMutable(
-                        $plan,
-                        $plan->exists && $plan->isDirty([
-                            'priceable_type',
-                            'priceable_id',
-                            'type',
-                            'billing_period',
-                            'billing_unit',
-                        ])
-                    )
+            fn (Plan $plan) => app(CapacityConfigurationMutationGuard::class)
+                ->assertPlanMutable(
+                    $plan,
+                    $plan->exists && $plan->isDirty([
+                        'priceable_type',
+                        'priceable_id',
+                        'type',
+                        'billing_period',
+                        'billing_unit',
+                    ])
+                )
         );
         static::deleting(
-            fn (Plan $plan) =>
-                app(CapacityConfigurationMutationGuard::class)
-                    ->assertPlanMutable($plan, true)
+            fn (Plan $plan) => app(CapacityConfigurationMutationGuard::class)
+                ->assertPlanMutable($plan, true)
         );
     }
 

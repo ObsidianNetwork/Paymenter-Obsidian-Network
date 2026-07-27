@@ -130,6 +130,8 @@
                 <button
                     type="button"
                     x-ref="retryResourceQuote"
+                    x-bind:disabled="!canRetry"
+                    x-bind:aria-disabled="(!canRetry).toString()"
                     x-on:click="
                         retryQuote();
                         $nextTick(() => $root.querySelector('.dynamic-slider-input')?.focus());
@@ -137,7 +139,11 @@
                     aria-controls="dynamic-resource-stock-status"
                     class="rounded underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
                 >
-                    Retry availability check
+                    <span x-show="canRetry">Retry availability check</span>
+                    <span
+                        x-show="!canRetry"
+                        x-text="`Retry available in ${retryWaitSeconds} seconds`"
+                    ></span>
                 </button>
             </div>
         @endif

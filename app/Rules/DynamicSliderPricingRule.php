@@ -14,8 +14,8 @@ class DynamicSliderPricingRule implements ValidationRule
      * Recognized pricing models and their required keys.
      */
     private const REQUIRED_KEYS = [
-        'linear'     => ['rate_per_unit'],
-        'tiered'     => ['tiers'],
+        'linear' => ['rate_per_unit'],
+        'tiered' => ['tiers'],
         'base_addon' => ['included_units', 'overage_rate'],
     ];
 
@@ -24,7 +24,7 @@ class DynamicSliderPricingRule implements ValidationRule
      */
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
-        if (! is_array($value)) {
+        if (!is_array($value)) {
             $fail('The pricing configuration must be an array.');
 
             return;
@@ -34,7 +34,7 @@ class DynamicSliderPricingRule implements ValidationRule
 
         // Reject unknown / missing / non-string model names. is_string() guards against array_key_exists()
         // throwing TypeError when $model is e.g. an array (it accepts null/string/int only).
-        if (! is_string($model) || ! array_key_exists($model, self::REQUIRED_KEYS)) {
+        if (!is_string($model) || !array_key_exists($model, self::REQUIRED_KEYS)) {
             $fail(
                 'Unknown dynamic_slider pricing model "' . var_export($model, true) . '". '
                 . 'Allowed values: ' . implode(', ', array_keys(self::REQUIRED_KEYS)) . '.'
@@ -70,7 +70,7 @@ class DynamicSliderPricingRule implements ValidationRule
 
         // Check required keys per model
         foreach (self::REQUIRED_KEYS[$model] as $key) {
-            if (! array_key_exists($key, $value)) {
+            if (!array_key_exists($key, $value)) {
                 $fail("The pricing configuration is missing required key \"{$key}\" for model \"{$model}\".");
 
                 return;
@@ -79,8 +79,8 @@ class DynamicSliderPricingRule implements ValidationRule
 
         // Model-specific validation
         match ($model) {
-            'linear'     => $this->validateLinear($value, $fail),
-            'tiered'     => $this->validateTiered($value, $fail),
+            'linear' => $this->validateLinear($value, $fail),
+            'tiered' => $this->validateTiered($value, $fail),
             'base_addon' => $this->validateBaseAddon($value, $fail),
         };
     }
@@ -98,24 +98,24 @@ class DynamicSliderPricingRule implements ValidationRule
     {
         $tiers = $pricing['tiers'] ?? [];
 
-        if (! is_array($tiers) || count($tiers) === 0) {
+        if (!is_array($tiers) || count($tiers) === 0) {
             $fail('Tiered pricing must have at least one tier.');
 
             return;
         }
 
         $previousUpTo = -1;
-        $lastIndex    = array_key_last($tiers);
+        $lastIndex = array_key_last($tiers);
 
         foreach ($tiers as $index => $tier) {
-            if (! is_array($tier)) {
+            if (!is_array($tier)) {
                 $fail('Each tier must be an array with "up_to" and "rate" keys.');
 
                 return;
             }
             $tierNum = (int) $index + 1;
 
-            if (! array_key_exists('rate', $tier)) {
+            if (!array_key_exists('rate', $tier)) {
                 $fail("Tier {$tierNum} is missing a required \"rate\" value.");
 
                 return;
@@ -141,12 +141,13 @@ class DynamicSliderPricingRule implements ValidationRule
             // up_to is optional (null/missing = unlimited), but only valid as the LAST tier.
             $hasUpTo = array_key_exists('up_to', $tier) && $tier['up_to'] !== null;
 
-            if (! $hasUpTo) {
+            if (!$hasUpTo) {
                 if ($index !== $lastIndex) {
                     $fail("Tier {$tierNum} is unlimited (no \"up_to\"), so it must be the last tier.");
 
                     return;
                 }
+
                 continue;
             }
 

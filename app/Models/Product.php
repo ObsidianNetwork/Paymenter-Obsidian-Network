@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Models\Concerns\SerializesCapacityConfigurationMutations;
 use App\Models\Traits\HasPlans;
 use App\Services\Service\CapacityConfigurationMutationGuard;
+use App\Services\ServiceUpgrade\CouponUpgradeMutationGuard;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -28,14 +29,15 @@ class Product extends Model implements Auditable
     protected static function booted(): void
     {
         static::saving(function (Product $product): void {
+            $guard = app(CapacityConfigurationMutationGuard::class);
+            $guard->assertProductStockMutationFresh($product);
             if (
-                ! $product->exists
-                || ! $product->isDirty('server_id')
+                !$product->exists
+                || !$product->isDirty('server_id')
             ) {
                 return;
             }
 
-            $guard = app(CapacityConfigurationMutationGuard::class);
             $guard->assertProductProvisionerActivationSafe($product);
             $guard->assertProductsMutable(
                 [(int) $product->id],
@@ -43,14 +45,16 @@ class Product extends Model implements Auditable
                 destructive: true
             );
         });
-        static::deleting(fn (Product $product) =>
+        static::deleting(function (Product $product): void {
+            app(CouponUpgradeMutationGuard::class)
+                ->assertProductDeletionSafe((int) $product->id);
             app(CapacityConfigurationMutationGuard::class)
                 ->assertProductsMutable(
                     [(int) $product->id],
                     'product',
                     destructive: true
-                )
-        );
+                );
+        });
     }
 
     /**
@@ -98,7 +102,12 @@ class Product extends Model implements Auditable
      */
     public function upgrades()
     {
-        return $this->belongsToMany(Product::class, 'product_upgrades', 'product_id', 'upgrade_id');
+        return $this->belongsToMany(
+            Product::class,
+            'product_upgrades',
+            'product_id',
+            'upgrade_id'
+        )->using(ProductUpgrade::class)->withTimestamps();
     }
 
     /**
@@ -112,8 +121,8 @@ class Product extends Model implements Auditable
     public function usesDynamicResources(): bool
     {
         if (
-            ! $this->exists
-            || ! $this->server()
+            !$this->exists
+            || !$this->server()
                 ->where('extension', 'Pterodactyl')
                 ->exists()
         ) {

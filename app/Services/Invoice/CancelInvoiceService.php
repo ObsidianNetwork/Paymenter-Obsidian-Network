@@ -57,9 +57,18 @@ class CancelInvoiceService
                         "A {$invoice->status} invoice cannot be cancelled."
                     );
                 }
+                app(BillingChargeAttemptService::class)
+                    ->assertInvoiceLifecycleMutable($invoice);
+                app(InvoicePaymentInitiationService::class)
+                    ->assertInvoiceLifecycleMutable($invoice);
 
                 $payments = app(CapacityInvoicePaymentService::class);
-                if (! $payments->isCapacityBacked($invoice)) {
+                $hasUpgradeObligation =
+                    $payments->hasServiceUpgradeObligation($invoice);
+                if (
+                    !$payments->isCapacityBacked($invoice)
+                    && !$hasUpgradeObligation
+                ) {
                     if (
                         $payments->requiresFulfillmentCoordinator($invoice)
                         && $payments->hasInFlightOrSucceededPayment($invoice)
@@ -85,12 +94,14 @@ class CancelInvoiceService
                 $itemSnapshot = $invoice->items()
                     ->orderBy('id')
                     ->get();
-                $reservationSnapshot = DB::table(
+                $reservationSnapshot = Schema::hasTable(
                     'ptero_resource_reservations'
                 )
-                    ->where('invoice_id', $invoice->id)
-                    ->orderBy('id')
-                    ->get();
+                    ? DB::table('ptero_resource_reservations')
+                        ->where('invoice_id', $invoice->id)
+                        ->orderBy('id')
+                        ->get()
+                    : collect();
                 $upgradeIds = $itemSnapshot
                     ->where('reference_type', ServiceUpgrade::class)
                     ->pluck('reference_id')
@@ -116,7 +127,7 @@ class CancelInvoiceService
                     : ServiceUpgrade::query()
                         ->whereKey($upgradeIds->all())
                         ->pluck('service_id');
-                $serviceIds = $itemSnapshot
+                $checkoutServiceIds = $itemSnapshot
                     ->where('reference_type', Service::class)
                     ->pluck('reference_id')
                     ->merge(
@@ -128,6 +139,12 @@ class CancelInvoiceService
                             )
                             ->pluck('service_id')
                     )
+                    ->filter()
+                    ->map(fn ($id): int => (int) $id)
+                    ->unique()
+                    ->sort()
+                    ->values();
+                $serviceIds = $checkoutServiceIds
                     ->merge($upgradeServiceIds)
                     ->filter()
                     ->map(fn ($id): int => (int) $id)
@@ -161,13 +178,15 @@ class CancelInvoiceService
                     );
                 }
 
-                $reservations = DB::table(
+                $reservations = Schema::hasTable(
                     'ptero_resource_reservations'
                 )
-                    ->where('invoice_id', $invoice->id)
-                    ->orderBy('id')
-                    ->lockForUpdate()
-                    ->get();
+                    ? DB::table('ptero_resource_reservations')
+                        ->where('invoice_id', $invoice->id)
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get()
+                    : collect();
                 $items = $invoice->items()
                     ->orderBy('id')
                     ->lockForUpdate()
@@ -184,7 +203,7 @@ class CancelInvoiceService
                 }
 
                 $unsafe = $reservations->first(
-                    fn ($reservation): bool => ! in_array(
+                    fn ($reservation): bool => !in_array(
                         $reservation->status,
                         ['pending', 'expired', 'cancelled'],
                         true
@@ -210,7 +229,7 @@ class CancelInvoiceService
                     );
                 }
 
-                foreach ($serviceIds as $serviceId) {
+                foreach ($checkoutServiceIds as $serviceId) {
                     $service = $services->firstWhere('id', $serviceId);
 
                     $dynamic = app(DurableFulfillmentService::class)

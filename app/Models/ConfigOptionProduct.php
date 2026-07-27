@@ -38,23 +38,22 @@ class ConfigOptionProduct extends Pivot implements Auditable
                         'config_option_id',
                     ])
             );
-            if (! $pivot->exists) {
+            if (!$pivot->exists) {
                 $guard->assertDynamicResourceAttachmentSafe(
                     (int) $pivot->config_option_id,
                     (int) $pivot->product_id
                 );
             }
         });
-        static::deleting(fn (ConfigOptionProduct $pivot) =>
-            app(CapacityConfigurationMutationGuard::class)
-                ->assertProductsMutable(
-                    array_filter([
-                        $pivot->product_id,
-                        $pivot->getOriginal('product_id'),
-                    ]),
-                    'configuration-option product assignment',
-                    destructive: true
-                )
+        static::deleting(fn (ConfigOptionProduct $pivot) => app(CapacityConfigurationMutationGuard::class)
+            ->assertProductsMutable(
+                array_filter([
+                    $pivot->product_id,
+                    $pivot->getOriginal('product_id'),
+                ]),
+                'configuration-option product assignment',
+                destructive: true
+            )
         );
     }
 

@@ -71,9 +71,8 @@ class ConfigOption extends Model implements Auditable
             $guard->assertConfigOptionMutable($option, $identityChanged);
         });
         static::deleting(
-            fn (ConfigOption $option) =>
-                app(CapacityConfigurationMutationGuard::class)
-                    ->assertConfigOptionMutable($option, true)
+            fn (ConfigOption $option) => app(CapacityConfigurationMutationGuard::class)
+                ->assertConfigOptionMutable($option, true)
         );
     }
 
@@ -99,7 +98,7 @@ class ConfigOption extends Model implements Auditable
      */
     public function normalizeDynamicSliderValue(mixed $value): int
     {
-        if (! $this->isDynamicSlider()) {
+        if (!$this->isDynamicSlider()) {
             throw new \InvalidArgumentException('Only dynamic sliders have numeric resource values.');
         }
 
@@ -128,14 +127,13 @@ class ConfigOption extends Model implements Auditable
         float $value,
         int $billingPeriod = 1,
         ?string $billingUnit = 'month'
-    ): float
-    {
-        if (! $this->isDynamicSlider()) {
+    ): float {
+        if (!$this->isDynamicSlider()) {
             return 0;
         }
         $this->assertUsesPlanLevelBasePrice();
         if (
-            ! is_finite($value)
+            !is_finite($value)
             || $value < 0
             || floor($value) !== $value
             || $value > StrictInteger::MAX_STORED_SLIDER_VALUE
@@ -149,10 +147,10 @@ class ConfigOption extends Model implements Auditable
         $model = $pricing['model'] ?? 'linear';
 
         $monthlyDelta = match ($model) {
-            'linear'     => $this->calculateLinearDelta($value, $pricing),
-            'tiered'     => $this->calculateTieredDelta($value, $pricing),
+            'linear' => $this->calculateLinearDelta($value, $pricing),
+            'tiered' => $this->calculateTieredDelta($value, $pricing),
             'base_addon' => $this->calculateBaseAddonDelta($value, $pricing),
-            default      => throw new \InvalidArgumentException("Unknown dynamic_slider pricing model: ".var_export($model, true)),
+            default => throw new \InvalidArgumentException('Unknown dynamic_slider pricing model: ' . var_export($model, true)),
         };
 
         return $this->guardCalculatedPrice(
@@ -168,8 +166,7 @@ class ConfigOption extends Model implements Auditable
         float $value,
         int $billingPeriod = 1,
         ?string $billingUnit = 'month'
-    ): float
-    {
+    ): float {
         return $this->calculateDynamicPriceDelta(
             $value,
             $billingPeriod,
@@ -184,14 +181,14 @@ class ConfigOption extends Model implements Auditable
      */
     public function assertUsesPlanLevelBasePrice(): void
     {
-        if (! $this->isDynamicSlider()) {
+        if (!$this->isDynamicSlider()) {
             return;
         }
 
         $pricing = $this->metadata['pricing'] ?? null;
         if (
-            ! is_array($pricing)
-            || ! array_key_exists('base_price', $pricing)
+            !is_array($pricing)
+            || !array_key_exists('base_price', $pricing)
             || $pricing['base_price'] === null
             || $pricing['base_price'] === ''
         ) {
@@ -210,7 +207,7 @@ class ConfigOption extends Model implements Auditable
         if ($basePrice > 0) {
             throw new \InvalidArgumentException(
                 'Dynamic-slider metadata contains an unmigrated per-slider base price. '
-                .'Run paymenter:migrate-slider-base-price --force and configure the shared base on each plan.'
+                . 'Run paymenter:migrate-slider-base-price --force and configure the shared base on each plan.'
             );
         }
     }
@@ -242,7 +239,7 @@ class ConfigOption extends Model implements Auditable
         $previousLimit = 0.0;
 
         foreach ($pricing['tiers'] ?? [] as $tier) {
-            if (! is_array($tier)) {
+            if (!is_array($tier)) {
                 throw new \InvalidArgumentException(
                     'Tiered dynamic-slider pricing contains an invalid tier.'
                 );
@@ -309,8 +306,7 @@ class ConfigOption extends Model implements Auditable
     private function getBillingMultiplier(
         int $billingPeriod,
         ?string $billingUnit
-    ): float
-    {
+    ): float {
         if ($billingPeriod < 1) {
             throw new \InvalidArgumentException(
                 'Dynamic-slider billing periods must be positive.'
@@ -363,7 +359,7 @@ class ConfigOption extends Model implements Auditable
         // Leave an order of magnitude of headroom in the DECIMAL(17,2)
         // invoice columns for base prices, other sliders, taxes, and fees.
         if (
-            ! is_finite($price)
+            !is_finite($price)
             || $price < 0
             || $price > 99_999_999_999_999.99
         ) {
@@ -389,7 +385,7 @@ class ConfigOption extends Model implements Auditable
         if ($resourceType === 'cpu') {
             $cores = $value / 100;
 
-            return $cores.' '.($cores == 1 ? 'core' : 'cores');
+            return $cores . ' ' . ($cores == 1 ? 'core' : 'cores');
         }
 
         $displayValue = $value / $displayDivisor;
@@ -399,7 +395,7 @@ class ConfigOption extends Model implements Auditable
             ? (int) $displayValue
             : number_format($displayValue, 1);
 
-        return $formatted.' '.$displayUnit;
+        return $formatted . ' ' . $displayUnit;
     }
 
     /**

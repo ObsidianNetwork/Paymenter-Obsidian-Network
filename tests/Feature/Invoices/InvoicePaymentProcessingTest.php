@@ -16,9 +16,12 @@ use App\Models\User;
 use App\Services\Invoice\CapacityInvoicePaymentService;
 use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use App\Services\ServiceUpgrade\ServiceUpgradePricingService;
+use Illuminate\Bus\UniqueLock;
 use Illuminate\Database\QueryException;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
@@ -28,6 +31,145 @@ use Tests\TestCase;
 class InvoicePaymentProcessingTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_paid_reservation_checkout_persists_verified_pricing_ledger_before_commit_reload(): void
+    {
+        Queue::fake();
+        $user = User::factory()->create();
+        $source = $this->createProduct();
+        $target = $this->createProduct();
+        $source->product->upgrades()->attach($target->product->id);
+        $service = Service::factory()->create([
+            'status' => Service::STATUS_PENDING,
+            'user_id' => $user->id,
+            'product_id' => $source->product->id,
+            'plan_id' => $source->plan->id,
+            'currency_code' => 'USD',
+            'quantity' => 1,
+            'price' => '10.00',
+            'period_base_price' => '10.00',
+            'current_period_price' => '10.00',
+            'pricing_ledger_started_at' => now(),
+            'pricing_ledger_verified_at' => null,
+            'expires_at' => null,
+        ]);
+        $invoice = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => now()->addDays(7),
+            'currency_code' => 'USD',
+        ]);
+        $invoice->items()->create([
+            'reference_type' => Service::class,
+            'reference_id' => $service->id,
+            'price' => '10.00',
+            'quantity' => 1,
+            'description' => 'Reserved dynamic checkout',
+        ]);
+        $this->app->instance(
+            CapacityInvoicePaymentService::class,
+            new class extends CapacityInvoicePaymentService
+            {
+                public function isCapacityBacked(
+                    Invoice|int $invoice
+                ): bool {
+                    return true;
+                }
+
+                public function deadlineExpired(Invoice $invoice): bool
+                {
+                    return false;
+                }
+            }
+        );
+        $this->app->instance(
+            DurableFulfillmentService::class,
+            new class extends DurableFulfillmentService
+            {
+                public function isReservationBacked(
+                    Service $service
+                ): bool {
+                    return true;
+                }
+
+                public function preflightPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): ?string {
+                    return null;
+                }
+
+                public function commitPaidService(
+                    Service $service,
+                    Invoice $invoice
+                ): bool {
+                    $reloaded = Service::query()
+                        ->findOrFail($service->id);
+                    if (
+                        $reloaded->pricing_ledger_started_at === null
+                        || $reloaded->pricing_ledger_verified_at === null
+                        || (string) $reloaded->period_base_price
+                            !== '10.00'
+                        || (string) $reloaded->current_period_price
+                            !== '10.00'
+                        || $reloaded->billing_cycles_completed !== 1
+                    ) {
+                        throw new \RuntimeException(
+                            'The dynamic commit reload lost verified pricing evidence.'
+                        );
+                    }
+                    $reloaded->status = Service::STATUS_PROVISIONING;
+                    $reloaded->expires_at =
+                        $reloaded->calculateNextDueDate();
+                    FulfillmentStatusTransitionService::run(
+                        $reloaded,
+                        fn () => $reloaded->save()
+                    );
+
+                    return true;
+                }
+            }
+        );
+
+        ExtensionHelper::addPayment(
+            $invoice,
+            null,
+            10,
+            transactionId: 'verified-ledger-checkout'
+        );
+
+        $this->assertSame(
+            Invoice::STATUS_PAID,
+            $invoice->fresh()->status
+        );
+        $service = $service->fresh();
+        $this->assertSame(
+            Service::STATUS_PROVISIONING,
+            $service->status
+        );
+        $this->assertNotNull($service->pricing_ledger_started_at);
+        $this->assertNotNull($service->pricing_ledger_verified_at);
+        $this->assertSame(
+            '10.00',
+            (string) $service->period_base_price
+        );
+        $this->assertSame(
+            '10.00',
+            (string) $service->current_period_price
+        );
+        $this->assertSame(
+            '10.00',
+            app(ServiceUpgradePricingService::class)
+                ->currentPrepaidBasis($service)['amount']
+        );
+
+        $service->status = Service::STATUS_ACTIVE;
+        FulfillmentStatusTransitionService::run(
+            $service,
+            fn () => $service->save()
+        );
+        $this->assertTrue($service->fresh()->upgradable);
+    }
 
     private function createInvoiceWithItem($total = 100.00)
     {
@@ -272,7 +414,7 @@ class InvoicePaymentProcessingTest extends TestCase
         $this->assertDatabaseHas('invoice_transactions', [
             'invoice_id' => $invoice->id,
             'transaction_id' => 'captured-checkout-failure',
-            'status' => \App\Enums\InvoiceTransactionStatus::Succeeded->value,
+            'status' => InvoiceTransactionStatus::Succeeded->value,
         ]);
         $this->assertSame(
             Invoice::STATUS_PENDING,
@@ -484,8 +626,7 @@ class InvoicePaymentProcessingTest extends TestCase
             {
                 public function __construct(
                     private readonly int $capacityInvoiceId
-                ) {
-                }
+                ) {}
 
                 public function isCapacityBacked(
                     Invoice|int $invoice
@@ -731,6 +872,78 @@ class InvoicePaymentProcessingTest extends TestCase
         }
     }
 
+    public function test_locked_gateway_replay_rejects_a_conflict_inserted_after_precheck(): void
+    {
+        $invoice = $this->createInvoiceWithItem(100);
+        $transactionId = 'concurrent-payment-evidence';
+        $injected = false;
+
+        // Deterministically model a second callback that inserts the shared
+        // transaction identity after the optimistic lookup returned no row,
+        // but before addPayment acquires its invoice and evidence locks.
+        DB::listen(function ($query) use (
+            &$injected,
+            $invoice,
+            $transactionId
+        ): void {
+            $sql = strtolower((string) $query->sql);
+            if (
+                $injected
+                || !str_contains($sql, 'invoice_transactions')
+                || !str_contains($sql, 'gateway_transaction_guard')
+            ) {
+                return;
+            }
+
+            $injected = true;
+            DB::table('invoice_transactions')->insert([
+                'invoice_id' => $invoice->id,
+                'gateway_id' => null,
+                'amount' => '10.00',
+                'fee' => '0.00',
+                'transaction_id' => $transactionId,
+                'gateway_transaction_guard' => InvoiceTransaction::gatewayTransactionGuard(
+                    null,
+                    $transactionId
+                ),
+                'status' => InvoiceTransactionStatus::Processing->value,
+                'is_credit_transaction' => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+
+        try {
+            ExtensionHelper::addPayment(
+                $invoice->id,
+                null,
+                10,
+                transactionId: $transactionId
+            );
+            $this->fail(
+                'The locked replay accepted conflicting payment evidence.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'does not match the recorded payment evidence',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertTrue($injected);
+        $transaction = $invoice->transactions()->sole();
+        $this->assertSame('10.00', $transaction->amount);
+        $this->assertTrue((bool) $transaction->is_credit_transaction);
+        $this->assertSame(
+            InvoiceTransactionStatus::Processing,
+            $transaction->status
+        );
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $invoice->fresh()->status
+        );
+    }
+
     public function test_paid_and_cancelled_capacity_invoices_share_the_same_lock_order(): void
     {
         $coordinator = file_get_contents(
@@ -971,8 +1184,7 @@ class InvoicePaymentProcessingTest extends TestCase
             {
                 public function __construct(
                     private readonly int $capacityInvoiceId
-                ) {
-                }
+                ) {}
 
                 public function isCapacityBacked(
                     Invoice|int $invoice
@@ -1025,8 +1237,7 @@ class InvoicePaymentProcessingTest extends TestCase
             {
                 public function __construct(
                     private readonly int $capacityInvoiceId
-                ) {
-                }
+                ) {}
 
                 public function isCapacityBacked(
                     Invoice|int $invoice
@@ -1058,17 +1269,14 @@ class InvoicePaymentProcessingTest extends TestCase
     {
         $invoice = $this->createInvoiceWithItem();
         $otherInvoice = $this->createInvoiceWithItem();
-        $payments = new class(
-            [(int) $invoice->id, (int) $otherInvoice->id]
-        ) extends CapacityInvoicePaymentService
+        $payments = new class([(int) $invoice->id, (int) $otherInvoice->id]) extends CapacityInvoicePaymentService
         {
             /**
              * @param  list<int>  $capacityInvoiceIds
              */
             public function __construct(
                 private readonly array $capacityInvoiceIds
-            ) {
-            }
+            ) {}
 
             public function isCapacityBacked(Invoice|int $invoice): bool
             {
@@ -1108,14 +1316,11 @@ class InvoicePaymentProcessingTest extends TestCase
     public function test_payment_scope_rolls_back_and_clears_after_exception(): void
     {
         $invoice = $this->createInvoiceWithItem();
-        $payments = new class(
-            (int) $invoice->id
-        ) extends CapacityInvoicePaymentService
+        $payments = new class((int) $invoice->id) extends CapacityInvoicePaymentService
         {
             public function __construct(
                 private readonly int $capacityInvoiceId
-            ) {
-            }
+            ) {}
 
             public function isCapacityBacked(Invoice|int $invoice): bool
             {
@@ -1235,8 +1440,7 @@ class InvoicePaymentProcessingTest extends TestCase
                 $mock->shouldReceive('requiresCoordinator')
                     ->once()
                     ->with(\Mockery::on(
-                        fn (ServiceUpgrade $candidate): bool =>
-                            $candidate->is($upgrade)
+                        fn (ServiceUpgrade $candidate): bool => $candidate->is($upgrade)
                     ))
                     ->andReturnTrue();
             }
@@ -1288,8 +1492,9 @@ class InvoicePaymentProcessingTest extends TestCase
         [$invoice, $upgrade] = $this->upgradeInvoice(
             ServiceUpgrade::STATUS_AWAITING_PAYMENT
         );
-        $upgrade->service->price = 11;
-        $upgrade->service->save();
+        DB::table('services')
+            ->where('id', $upgrade->service_id)
+            ->update(['price' => 11]);
 
         $result = DB::transaction(
             fn (): Invoice => app(MarkInvoicePaidService::class)
@@ -1321,8 +1526,9 @@ class InvoicePaymentProcessingTest extends TestCase
         [$invoice, $upgrade] = $this->upgradeInvoice(
             ServiceUpgrade::STATUS_AWAITING_PAYMENT
         );
-        $upgrade->service->price = 11;
-        $upgrade->service->save();
+        DB::table('services')
+            ->where('id', $upgrade->service_id)
+            ->update(['price' => 11]);
 
         $transaction = ExtensionHelper::addPayment(
             $invoice->id,
@@ -1476,9 +1682,10 @@ class InvoicePaymentProcessingTest extends TestCase
         $this->assertNull($upgrade->last_error);
         Queue::assertPushed(
             UpgradeJob::class,
-            fn (UpgradeJob $job): bool =>
-                $job->serviceUpgrade->is($upgrade)
+            fn (UpgradeJob $job): bool => $job->serviceUpgrade->is($upgrade)
         );
+        (new UniqueLock(app('cache')->store()))
+            ->release(new UpgradeJob($upgrade));
     }
 
     private function upgradeInvoice(string $upgradeStatus): array

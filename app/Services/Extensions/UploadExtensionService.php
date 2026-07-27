@@ -70,10 +70,10 @@ class UploadExtensionService
                     $type['type'],
                     $type['class']
                 );
-                $backupPath = dirname($destinationPath).'/.'
-                    .basename($destinationPath).'.backup-'
-                    .bin2hex(random_bytes(8));
-                if (! rename($destinationPath, $backupPath)) {
+                $backupPath = dirname($destinationPath) . '/.'
+                    . basename($destinationPath) . '.backup-'
+                    . bin2hex(random_bytes(8));
+                if (!rename($destinationPath, $backupPath)) {
                     throw new \RuntimeException(
                         'Failed to preserve the installed extension before updating it.'
                     );
@@ -137,11 +137,11 @@ class UploadExtensionService
             // process during an update. Run the newly installed destination's
             // migrations by path so schema activation never depends on that
             // stale class definition invoking its new upgraded() hook.
-            $migrationPath = $destinationPath.'/database/migrations';
+            $migrationPath = $destinationPath . '/database/migrations';
             if (is_dir($migrationPath)) {
                 ExtensionHelper::runMigrationsOrFail(
-                    'extensions/'.ucfirst($type['type']).'s/'
-                    .$type['class'].'/database/migrations'
+                    'extensions/' . ucfirst($type['type']) . 's/'
+                    . $type['class'] . '/database/migrations'
                 );
             }
             $this->runDestinationReadinessHook($destinationPath);
@@ -158,12 +158,12 @@ class UploadExtensionService
 
             throw new \RuntimeException(
                 'The extension lifecycle failed and the previous extension '
-                .'files were restored. Extension migrations are forward-only '
-                .'and were not rolled back. Paymenter remains in maintenance; '
-                .'install compatible extension files, complete a forward '
-                .'schema/readiness repair, restart queue workers, and run '
-                .'php artisan up only after verification. '
-                .$exception->getMessage(),
+                . 'files were restored. Extension migrations are forward-only '
+                . 'and were not rolled back. Paymenter remains in maintenance; '
+                . 'install compatible extension files, complete a forward '
+                . 'schema/readiness repair, restart queue workers, and run '
+                . 'php artisan up only after verification. '
+                . $exception->getMessage(),
                 0,
                 $exception
             );
@@ -278,13 +278,13 @@ class UploadExtensionService
         if ($activated && is_dir($destinationPath)) {
             File::deleteDirectory($destinationPath);
         }
-        if ($backupPath === null || ! is_dir($backupPath)) {
+        if ($backupPath === null || !is_dir($backupPath)) {
             return;
         }
-        if (! rename($backupPath, $destinationPath)) {
+        if (!rename($backupPath, $destinationPath)) {
             throw new \RuntimeException(
                 'The extension update failed and the previous extension files could not be restored: '
-                .$original->getMessage(),
+                . $original->getMessage(),
                 0,
                 $original
             );
@@ -311,7 +311,7 @@ class UploadExtensionService
             $original
         );
 
-        if (! $schemaActivationStarted) {
+        if (!$schemaActivationStarted) {
             $this->leaveMaintenanceMode($enteredMaintenance);
         }
     }
@@ -321,10 +321,10 @@ class UploadExtensionService
         string $class
     ): ?string {
         $extensionClass = 'Paymenter\\Extensions\\'
-            .ucfirst($type).'s\\'
-            .ucfirst($class).'\\'
-            .ucfirst($class);
-        if (! class_exists($extensionClass)) {
+            . ucfirst($type) . 's\\'
+            . ucfirst($class) . '\\'
+            . ucfirst($class);
+        if (!class_exists($extensionClass)) {
             return null;
         }
 
@@ -346,8 +346,8 @@ class UploadExtensionService
      */
     private function runDestinationReadinessHook(string $destinationPath): void
     {
-        $hookPath = $destinationPath.'/migration-readiness.php';
-        if (! is_file($hookPath)) {
+        $hookPath = $destinationPath . '/migration-readiness.php';
+        if (!is_file($hookPath)) {
             return;
         }
 
@@ -365,7 +365,7 @@ class UploadExtensionService
 
         throw new \RuntimeException(
             'The destination extension migration-readiness.php file must '
-            .'return a callable or an object with assertReady().'
+            . 'return a callable or an object with assertReady().'
         );
     }
 
@@ -385,13 +385,13 @@ class UploadExtensionService
 
     private function leaveMaintenanceMode(bool $enteredMaintenance): void
     {
-        if (! $enteredMaintenance) {
+        if (!$enteredMaintenance) {
             return;
         }
         if (Artisan::call('up') !== 0) {
             throw new \RuntimeException(
                 'Paymenter could not leave deployment maintenance. Run '
-                .'php artisan up manually after inspecting the extension state.'
+                . 'php artisan up manually after inspecting the extension state.'
             );
         }
     }

@@ -14,34 +14,20 @@ return new class extends Migration
                 ->nullable()
                 ->after('status');
         });
-
-        // Legacy cancelled services were already processed by the old
-        // cancellation paths. Mark them released to prevent replay.
-        DB::table('services')
-            ->where('status', 'cancelled')
-            ->whereNull('product_stock_released_at')
-            ->update(['product_stock_released_at' => now()]);
-        if (Schema::hasTable('ptero_resource_reservations')) {
-            DB::table('services')
-                ->whereNull('product_stock_released_at')
-                ->whereExists(function ($query): void {
-                    $query->selectRaw('1')
-                        ->from('ptero_resource_reservations')
-                        ->whereColumn(
-                            'ptero_resource_reservations.service_id',
-                            'services.id'
-                        )
-                        ->whereIn(
-                            'ptero_resource_reservations.status',
-                            ['expired', 'cancelled']
-                        );
-                })
-                ->update(['product_stock_released_at' => now()]);
-        }
     }
 
     public function down(): void
     {
+        if (
+            DB::table('services')
+                ->whereNotNull('product_stock_released_at')
+                ->exists()
+        ) {
+            throw new RuntimeException(
+                'Cannot roll back durable product-stock release evidence.'
+            );
+        }
+
         Schema::table('services', function (Blueprint $table): void {
             $table->dropColumn('product_stock_released_at');
         });

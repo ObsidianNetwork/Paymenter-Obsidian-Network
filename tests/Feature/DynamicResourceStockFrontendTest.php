@@ -39,7 +39,7 @@ class DynamicResourceStockFrontendTest extends TestCase
             $view
         );
         $this->assertStringContainsString(
-            "this._adjustmentPasses = 0",
+            'this._adjustmentPasses = 0',
             $controller
         );
         $this->assertStringContainsString(

@@ -990,11 +990,10 @@ class ImportFromWhmcs extends Command
                     'invoice_id' => $record['invoiceid'],
                     'amount' => $record['amountin'],
                     'transaction_id' => $record['transid'],
-                    'gateway_transaction_guard' =>
-                        InvoiceTransaction::gatewayTransactionGuard(
-                            null,
-                            $record['transid']
-                        ),
+                    'gateway_transaction_guard' => InvoiceTransaction::gatewayTransactionGuard(
+                        null,
+                        $record['transid']
+                    ),
                     'created_at' => $this->validateDate($record['date']),
                     'updated_at' => $this->validateDate($record['date']),
                 ];

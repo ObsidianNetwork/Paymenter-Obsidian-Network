@@ -13,14 +13,14 @@ return new class extends Migration
 
     public function up(): void
     {
-        if (! Schema::hasTable('invoice_transactions')) {
+        if (!Schema::hasTable('invoice_transactions')) {
             return;
         }
         if (Schema::hasColumn(
             'invoice_transactions',
             'gateway_transaction_guard'
         )) {
-            throw new \RuntimeException(
+            throw new RuntimeException(
                 'The gateway transaction guard column already exists without a completed migration. Remove the incomplete column or restore the migration record before retrying.'
             );
         }
@@ -42,7 +42,7 @@ return new class extends Migration
                             $guard !== null
                             && array_key_exists($guard, $guards)
                         ) {
-                            throw new \RuntimeException(
+                            throw new RuntimeException(
                                 "Gateway transaction evidence {$transaction->id} duplicates invoice transaction {$guards[$guard]}; reconcile these financial records before migrating."
                             );
                         }
@@ -74,11 +74,10 @@ return new class extends Migration
                         DB::table('invoice_transactions')
                             ->where('id', $transaction->id)
                             ->update([
-                                'gateway_transaction_guard' =>
-                                    InvoiceTransaction::gatewayTransactionGuard(
-                                        $transaction->gateway_id,
-                                        $transaction->transaction_id
-                                    ),
+                                'gateway_transaction_guard' => InvoiceTransaction::gatewayTransactionGuard(
+                                    $transaction->gateway_id,
+                                    $transaction->transaction_id
+                                ),
                             ]);
                     }
                 },
@@ -99,8 +98,8 @@ return new class extends Migration
     public function down(): void
     {
         if (
-            ! Schema::hasTable('invoice_transactions')
-            || ! Schema::hasColumn(
+            !Schema::hasTable('invoice_transactions')
+            || !Schema::hasColumn(
                 'invoice_transactions',
                 'gateway_transaction_guard'
             )

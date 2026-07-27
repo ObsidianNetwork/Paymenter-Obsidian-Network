@@ -4,6 +4,4 @@ namespace App\Exceptions;
 
 use RuntimeException;
 
-class LateCapacityPaymentException extends RuntimeException
-{
-}
+class LateCapacityPaymentException extends RuntimeException {}

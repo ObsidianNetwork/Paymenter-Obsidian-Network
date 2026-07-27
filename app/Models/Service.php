@@ -6,12 +6,13 @@ use App\Classes\Price;
 use App\Classes\Settings;
 use App\Models\Traits\HasProperties;
 use App\Observers\ServiceObserver;
+use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use OwenIt\Auditing\Contracts\Auditable;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use OwenIt\Auditing\Contracts\Auditable;
 
 #[ObservedBy([ServiceObserver::class])]
 class Service extends Model implements Auditable
@@ -38,6 +39,11 @@ class Service extends Model implements Auditable
         'plan_id',
         'quantity',
         'price',
+        'period_base_price',
+        'current_period_price',
+        'pricing_ledger_started_at',
+        'pricing_ledger_verified_at',
+        'billing_cycles_completed',
         'expires_at',
         'subscription_id',
         'status',
@@ -51,18 +57,35 @@ class Service extends Model implements Auditable
     protected $casts = [
         'expires_at' => 'date',
         'product_stock_released_at' => 'datetime',
+        'period_base_price' => 'decimal:2',
+        'current_period_price' => 'decimal:2',
+        'pricing_ledger_started_at' => 'datetime',
+        'pricing_ledger_verified_at' => 'datetime',
+        'billing_cycles_completed' => 'integer',
     ];
 
     protected static function booted(): void
     {
+        static::creating(function (Service $service): void {
+            $recurring = number_format(
+                max(0, (float) ($service->price ?? 0)),
+                2,
+                '.',
+                ''
+            );
+            $service->period_base_price ??= '0.00';
+            $service->current_period_price ??=
+                $recurring;
+            $service->billing_cycles_completed ??= 0;
+        });
         static::saving(function (Service $service): void {
             if (
                 $service->exists
-                && ! $service->isDirty(['product_id', 'quantity'])
+                && !$service->isDirty(['product_id', 'quantity'])
             ) {
                 return;
             }
-            if ((int) $service->quantity === 1 || ! $service->product_id) {
+            if ((int) $service->quantity === 1 || !$service->product_id) {
                 return;
             }
 
@@ -144,7 +167,7 @@ class Service extends Model implements Auditable
             );
         }
         $date = $this->expires_at ?? now();
-        $endDate = $date->copy()->{'add' . ucfirst($this->plan->billing_unit) . 's'}($this->plan->billing_period);
+        $endDate = $this->advanceBillingDate($date);
 
         return Attribute::make(
             get: fn () => $this->product->name . ' (' . $date->format('M d, Y') . ' - ' . $endDate->format('M d, Y') . ')'
@@ -154,19 +177,44 @@ class Service extends Model implements Auditable
     /**
      * Calculate next due date.
      */
-    public function calculateNextDueDate()
-    {
+    public function calculateNextDueDate(
+        ?CarbonInterface $periodStart = null
+    ) {
         if ($this->plan->type == 'one-time' || $this->plan->type == 'free') {
             return null;
         }
-        if (!$this->expires_at || $this->status != self::STATUS_ACTIVE) {
+        if ($periodStart !== null) {
+            $date = $periodStart->copy();
+        } elseif (!$this->expires_at || $this->status != self::STATUS_ACTIVE) {
             // Make sure that if a service is being renewed after suspension or pending, we use the current date as base
             $date = now();
         } else {
-            $date = $this->expires_at;
+            $date = $this->expires_at->copy();
         }
 
-        return $date->{'add' . ucfirst($this->plan->billing_unit) . 's'}($this->plan->billing_period);
+        return $this->advanceBillingDate($date);
+    }
+
+    private function advanceBillingDate(
+        CarbonInterface $date
+    ): CarbonInterface {
+        $period = (int) $this->plan->billing_period;
+        if ($period <= 0) {
+            throw new \RuntimeException(
+                'Recurring services require a positive billing period.'
+            );
+        }
+
+        return match ($this->plan->billing_unit) {
+            'hour' => $date->copy()->addHours($period),
+            'day' => $date->copy()->addDays($period),
+            'week' => $date->copy()->addWeeks($period),
+            'month' => $date->copy()->addMonthsNoOverflow($period),
+            'year' => $date->copy()->addYearsNoOverflow($period),
+            default => throw new \RuntimeException(
+                'Recurring services require a supported billing unit.'
+            ),
+        };
     }
 
     /**
@@ -220,13 +268,13 @@ class Service extends Model implements Auditable
     public function cancellable(): Attribute
     {
         return Attribute::make(
-            get: fn () => ! in_array($this->status, [
+            get: fn () => !in_array($this->status, [
                 self::STATUS_CANCELLED,
                 self::STATUS_CANCELLATION_PENDING,
             ], true)
                 && $this->plan->type != 'free'
                 && $this->plan->type != 'one-time'
-                && ! $this->cancellation?->exists()
+                && !$this->cancellation?->exists()
         );
     }
 
@@ -235,6 +283,13 @@ class Service extends Model implements Auditable
         return Attribute::make(
             get: fn () => ($this->productUpgrades()->count() > 0 || $this->product->upgradableConfigOptions()->count() > 0)
                 && $this->status == 'active'
+                && (
+                    $this->pricing_ledger_started_at === null
+                    ? false
+                    : !$this->pricing_ledger_started_at->isFuture()
+                )
+                && $this->pricing_ledger_verified_at !== null
+                && (int) $this->billing_cycles_completed > 0
                 && $this->upgrade->whereIn('status', ServiceUpgrade::activeStatuses())->count() == 0
         );
     }
@@ -246,7 +301,11 @@ class Service extends Model implements Auditable
             if ($product->stock !== null && ($product->stock - $this->quantity) < 0) {
                 return null;
             }
-            $plan = $product->plans()->where('billing_unit', $this->plan->billing_unit)->where('billing_period', $this->plan->billing_period)->get();
+            $plan = $product->plans()
+                ->where('type', $this->plan->type)
+                ->where('billing_unit', $this->plan->billing_unit)
+                ->where('billing_period', $this->plan->billing_period)
+                ->get();
             // Only get the upgrades that have the exact same billing cycle as the service
             if ($plan->count() > 0) {
                 $product->plan = $plan->first();
@@ -270,14 +329,14 @@ class Service extends Model implements Auditable
 
         $resolvedSliderValues = $this->configs->mapWithKeys(function ($config) use ($propertyValues) {
             $configOption = $config->configOption;
-            if (! $configOption || $configOption->type !== 'dynamic_slider') {
+            if (!$configOption || $configOption->type !== 'dynamic_slider') {
                 return [];
             }
 
             $sliderValue = $config->slider_value;
 
             if ($sliderValue === null) {
-                $propertyKey   = $configOption->env_variable ?: $configOption->name;
+                $propertyKey = $configOption->env_variable ?: $configOption->name;
                 $propertyValue = $propertyValues->get($propertyKey);
                 if ($propertyValue !== null && is_numeric($propertyValue)) {
                     $sliderValue = (float) $propertyValue;
@@ -308,14 +367,14 @@ class Service extends Model implements Auditable
                     // slider_value is set; during the backfill window the property
                     // is the only source so no divergence is possible.
                     if ($config->slider_value !== null) {
-                        $propertyKey   = $configOption->env_variable ?: $configOption->name;
+                        $propertyKey = $configOption->env_variable ?: $configOption->name;
                         $propertyValue = $propertyValues->get($propertyKey);
                         if ($propertyValue !== null && abs((float) $propertyValue - (float) $sliderValue) > 1e-6) {
                             Log::warning('dynamic_slider value divergence detected', [
-                                'service_id'       => $this->id,
+                                'service_id' => $this->id,
                                 'config_option_id' => $configOption->id,
-                                'property_value'   => $propertyValue,
-                                'slider_value'     => $config->slider_value,
+                                'property_value' => $propertyValue,
+                                'slider_value' => $config->slider_value,
                             ]);
                         }
                     }
@@ -336,22 +395,33 @@ class Service extends Model implements Auditable
             }
         });
 
+        // Match checkout: exclusive tax is part of the customer-facing
+        // recurring obligation before a fixed coupon is applied.
+        $customerPrice = new Price([
+            'price' => $price,
+            'currency' => $this->currency,
+        ], apply_exclusive_tax: true, tax: Settings::tax($this->user));
+
         // Add coupon discount if applicable
         if ($this->coupon) {
-            $invoices = $this->invoices()->where('status', 'paid')->count() + 1;
-            // If it already used for the recurring period, do not apply the discount
-            if ($this->coupon->recurring == 0 || $invoices <= $this->coupon->recurring) {
-                $discount = $this->coupon->calculateDiscount($price);
-                $price -= $discount;
+            $completedCycles = (int) $this->billing_cycles_completed;
+            $recurring = $this->coupon->recurring;
+            $appliesToNextCycle = $completedCycles > 0
+                && $recurring !== null
+                && (
+                    (int) $recurring === 0
+                    || $completedCycles + 1
+                        <= (int) $recurring
+                );
+            if ($appliesToNextCycle) {
+                $discount = $this->coupon->calculateDiscount(
+                    $customerPrice->price
+                );
+                $customerPrice->price -= $discount;
             }
         }
 
-        $price = (new Price([
-            'price' => $price,
-            'currency' => $this->currency,
-        ], apply_exclusive_tax: true, tax: Settings::tax($this->user)))->price;
-
-        return number_format($price, 2, '.', '');
+        return number_format($customerPrice->price, 2, '.', '');
     }
 
     public function upgrade()

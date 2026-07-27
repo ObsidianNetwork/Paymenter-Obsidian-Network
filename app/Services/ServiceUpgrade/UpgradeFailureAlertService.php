@@ -65,13 +65,13 @@ class UpgradeFailureAlertService
 
         $alertServiceClass =
             'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\AlertService';
-        if (! class_exists($alertServiceClass)) {
+        if (!class_exists($alertServiceClass)) {
             return;
         }
 
         try {
             $alerts = app($alertServiceClass);
-            if (! method_exists($alerts, 'notifyUpgradeFailure')) {
+            if (!method_exists($alerts, 'notifyUpgradeFailure')) {
                 return;
             }
             $alerts->notifyUpgradeFailure($snapshot);

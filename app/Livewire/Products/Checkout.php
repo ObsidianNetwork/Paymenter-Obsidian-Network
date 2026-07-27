@@ -216,7 +216,7 @@ class Checkout extends Component
         }
 
         $locationIds = is_array($locationSetting) ? $locationSetting : json_decode($locationSetting, true);
-        if (! is_array($locationIds)) {
+        if (!is_array($locationIds)) {
             return null;
         }
 
@@ -228,12 +228,12 @@ class Checkout extends Component
 
     public function rules()
     {
+        $availablePlanIds = $this->product->availablePlans()->pluck('id')->toArray();
+
         $rules = [
             'plan_id' => [
                 'required',
-                Rule::exists('plans', 'id')->where(function ($query) {
-                    $query->where('priceable_id', $this->product->id)->where('priceable_type', get_class($this->product));
-                }),
+                Rule::in($availablePlanIds),
             ],
         ];
         foreach ($this->product->configOptions as $option) {

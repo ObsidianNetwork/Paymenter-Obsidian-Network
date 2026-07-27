@@ -16,7 +16,7 @@ class UploadExtensionServiceTest extends TestCase
         parent::setUp();
 
         $this->fixtureDirectory = storage_path(
-            'framework/testing/extension-readiness-'.bin2hex(random_bytes(8))
+            'framework/testing/extension-readiness-' . bin2hex(random_bytes(8))
         );
         File::ensureDirectoryExists($this->fixtureDirectory);
     }
@@ -31,7 +31,7 @@ class UploadExtensionServiceTest extends TestCase
     public function test_destination_readiness_hook_runs_without_resolving_loaded_main_class(): void
     {
         File::put(
-            $this->fixtureDirectory.'/migration-readiness.php',
+            $this->fixtureDirectory . '/migration-readiness.php',
             <<<'PHP'
 <?php
 
@@ -52,7 +52,7 @@ PHP
     public function test_invalid_destination_readiness_contract_fails_closed(): void
     {
         File::put(
-            $this->fixtureDirectory.'/migration-readiness.php',
+            $this->fixtureDirectory . '/migration-readiness.php',
             '<?php return true;'
         );
 
@@ -75,7 +75,7 @@ PHP
     {
         require_once base_path(
             'tests/Fixtures/Extensions/Others/VersionedFixture/'
-            .'VersionedFixture.php'
+            . 'VersionedFixture.php'
         );
 
         $method = new \ReflectionMethod(
@@ -109,7 +109,7 @@ PHP
             schemaActivationStarted: false
         );
 
-        $this->assertSame('old', File::get($destination.'/state.txt'));
+        $this->assertSame('old', File::get($destination . '/state.txt'));
         $this->assertDirectoryDoesNotExist($backup);
     }
 
@@ -125,7 +125,7 @@ PHP
             schemaActivationStarted: true
         );
 
-        $this->assertSame('old', File::get($destination.'/state.txt'));
+        $this->assertSame('old', File::get($destination . '/state.txt'));
         $this->assertDirectoryDoesNotExist($backup);
     }
 
@@ -147,12 +147,12 @@ PHP
      */
     private function activationFixture(): array
     {
-        $destination = $this->fixtureDirectory.'/destination';
-        $backup = $this->fixtureDirectory.'/backup';
+        $destination = $this->fixtureDirectory . '/destination';
+        $backup = $this->fixtureDirectory . '/backup';
         File::ensureDirectoryExists($destination);
         File::ensureDirectoryExists($backup);
-        File::put($destination.'/state.txt', 'new');
-        File::put($backup.'/state.txt', 'old');
+        File::put($destination . '/state.txt', 'new');
+        File::put($backup . '/state.txt', 'old');
 
         return [$destination, $backup];
     }

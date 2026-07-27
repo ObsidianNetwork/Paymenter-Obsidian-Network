@@ -6,9 +6,9 @@ use App\Admin\Actions\AuditAction;
 use App\Admin\Resources\InvoiceResource;
 use App\Classes\PDF;
 use App\Models\Invoice;
-use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Invoice\CancelInvoiceService;
 use App\Services\Invoice\CapacityInvoicePaymentService;
+use App\Services\Invoice\MarkInvoicePaidService;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
 use Filament\Resources\Pages\EditRecord;
@@ -25,6 +25,7 @@ class EditInvoice extends EditRecord
             && $record->status !== Invoice::STATUS_PAID;
         $cancel = ($data['status'] ?? null) === Invoice::STATUS_CANCELLED
             && $record->status !== Invoice::STATUS_CANCELLED;
+
         return DB::transaction(function () use ($record, $data, $markPaid, $cancel) {
             if ($markPaid || $cancel) {
                 unset($data['status']);

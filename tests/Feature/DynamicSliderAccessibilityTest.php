@@ -58,8 +58,8 @@ class DynamicSliderAccessibilityTest extends TestCase
         $this->assertStringContainsString(':aria-valuemax="max"', $html);
         $this->assertStringContainsString(':aria-valuenow="value"', $html);
         $this->assertStringContainsString(':aria-valuetext="formattedValue"', $html);
-        $this->assertStringContainsString('aria-labelledby="slider-label-'.$option->id.'"', $html);
-        $this->assertStringContainsString('aria-describedby="slider-price-'.$option->id.' slider-hint-'.$option->id.'"', $html);
+        $this->assertStringContainsString('aria-labelledby="slider-label-' . $option->id . '"', $html);
+        $this->assertStringContainsString('aria-describedby="slider-price-' . $option->id . ' slider-hint-' . $option->id . '"', $html);
         $this->assertStringContainsString('role="status"', $html);
         $this->assertStringContainsString('aria-live="polite"', $html);
         $this->assertStringContainsString('class="sr-only"', $html);
@@ -121,7 +121,7 @@ class DynamicSliderAccessibilityTest extends TestCase
 
         $name = "configOptions.{$option->id}";
         $errorId = "slider-error-{$option->id}";
-        $errors = (new ViewErrorBag())->put(
+        $errors = (new ViewErrorBag)->put(
             'default',
             new MessageBag([
                 $name => ['Choose a whole value on the configured step.'],
@@ -137,16 +137,16 @@ class DynamicSliderAccessibilityTest extends TestCase
 
         $this->assertStringContainsString('aria-invalid="true"', $html);
         $this->assertStringContainsString(
-            'aria-errormessage="'.$errorId.'"',
+            'aria-errormessage="' . $errorId . '"',
             $html
         );
         $this->assertStringContainsString(
-            'aria-describedby="slider-price-'.$option->id
-                .' slider-hint-'.$option->id.' '.$errorId.'"',
+            'aria-describedby="slider-price-' . $option->id
+                . ' slider-hint-' . $option->id . ' ' . $errorId . '"',
             $html
         );
         $this->assertStringContainsString(
-            'id="'.$errorId.'" role="alert"',
+            'id="' . $errorId . '" role="alert"',
             $html
         );
         $this->assertStringContainsString(

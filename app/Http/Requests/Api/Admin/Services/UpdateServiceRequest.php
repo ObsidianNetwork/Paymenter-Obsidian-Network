@@ -6,6 +6,7 @@ use App\Http\Requests\Api\Admin\AdminApiRequest;
 use App\Models\Plan;
 use App\Models\Product;
 use App\Models\Service;
+use App\Models\ServiceUpgrade;
 use App\Services\Service\DurableFulfillmentService;
 
 class UpdateServiceRequest extends AdminApiRequest
@@ -22,22 +23,13 @@ class UpdateServiceRequest extends AdminApiRequest
                 function ($attribute, $value, $fail): void {
                     $this->validateDynamicQuantity((int) $value, $fail);
                     $service = $this->route('service');
-                    if (! $service instanceof Service) {
+                    if (!$service instanceof Service) {
                         return;
                     }
-                    $currentDynamic = $service->product?->usesDynamicResources() ?? false;
-                    $targetDynamic = Product::query()
-                        ->find((int) $value)
-                        ?->usesDynamicResources() ?? false;
                     if (
                         (int) $service->product_id !== (int) $value
-                        && (
-                            $currentDynamic
-                            || $targetDynamic
-                            || $this->reservationBacked()
-                        )
                     ) {
-                        $fail('Converting to or from a dynamic resource product requires the capacity-aware upgrade coordinator.');
+                        $fail('Existing service products must be changed through the upgrade fulfillment coordinator.');
                     }
                 },
             ],
@@ -50,9 +42,8 @@ class UpdateServiceRequest extends AdminApiRequest
                     if (
                         $service instanceof Service
                         && (int) $service->plan_id !== (int) $value
-                        && $this->reservationBacked()
                     ) {
-                        $fail('Reservation-backed service identity is immutable outside the capacity-aware upgrade coordinator.');
+                        $fail('Existing service plans must be changed through the upgrade fulfillment coordinator.');
                     }
                     $productId = $this->input('product_id');
                     if ($productId && !Plan::where('id', $value)->where('priceable_type', Product::class)->where('priceable_id', $productId)->exists()) {
@@ -96,9 +87,8 @@ class UpdateServiceRequest extends AdminApiRequest
                     if (
                         $service instanceof Service
                         && (int) $service->quantity !== (int) $value
-                        && $this->reservationBacked()
                     ) {
-                        $fail('Reservation-backed service quantity requires the capacity-aware upgrade coordinator.');
+                        $fail('Existing service quantity must be changed through the upgrade fulfillment coordinator.');
                     }
                 },
             ],
@@ -111,19 +101,21 @@ class UpdateServiceRequest extends AdminApiRequest
                 'in:pending,provisioning,provisioning_failed,active,cancellation_pending,cancelled,suspended',
                 function ($attribute, $value, $fail): void {
                     $service = $this->route('service');
-                    $productId = (int) $this->input(
-                        'product_id',
-                        $service instanceof Service ? $service->product_id : 0
-                    );
                     if (
-                        Product::query()->find($productId)?->usesDynamicResources()
-                        || $this->reservationBacked()
+                        $service instanceof Service
+                        && (string) $service->status !== (string) $value
                     ) {
-                        $fail('Dynamic service status is controlled by the fulfillment state machine.');
+                        $fail('Existing service status is controlled by the fulfillment state machine.');
                     }
                 },
             ],
-            'expires_at' => 'sometimes|nullable|date|after_or_equal:today',
+            'expires_at' => [
+                'sometimes',
+                'nullable',
+                'date',
+                'after_or_equal:today',
+                $this->rejectBillingAnchorDuringUpgrade(),
+            ],
             /**
              * @example USD
              */
@@ -144,8 +136,19 @@ class UpdateServiceRequest extends AdminApiRequest
                     }
                 },
             ],
-            'price' => 'sometimes|required|numeric|min:0',
-            'coupon_id' => 'sometimes|nullable|exists:coupons,id',
+            'price' => [
+                'sometimes',
+                'required',
+                'numeric',
+                'min:0',
+                $this->rejectBillingAnchorDuringUpgrade(),
+            ],
+            'coupon_id' => [
+                'sometimes',
+                'nullable',
+                'exists:coupons,id',
+                $this->rejectBillingAnchorDuringUpgrade(),
+            ],
             'subscription_id' => 'sometimes|nullable|string|max:255',
             'order_id' => 'sometimes|nullable|exists:orders,id',
         ];
@@ -176,5 +179,35 @@ class UpdateServiceRequest extends AdminApiRequest
         return $service instanceof Service
             && app(DurableFulfillmentService::class)
                 ->isReservationBacked($service);
+    }
+
+    private function rejectBillingAnchorDuringUpgrade(): \Closure
+    {
+        return function ($attribute, $value, $fail): void {
+            $service = $this->route('service');
+            if (!$service instanceof Service) {
+                return;
+            }
+            $candidate = $service->newInstance()
+                ->forceFill([$attribute => $value]);
+            if (
+                $candidate->getAttribute($attribute)
+                == $service->getAttribute($attribute)
+            ) {
+                return;
+            }
+            if (
+                $service->upgrade()
+                    ->whereIn(
+                        'status',
+                        ServiceUpgrade::activeStatuses()
+                    )
+                    ->exists()
+            ) {
+                $fail(
+                    'Service expiration, price, and coupon cannot change while an upgrade is active.'
+                );
+            }
+        };
     }
 }

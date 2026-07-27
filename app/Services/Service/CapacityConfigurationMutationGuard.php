@@ -6,6 +6,7 @@ use App\Models\ConfigOption;
 use App\Models\Plan;
 use App\Models\Price;
 use App\Models\Product;
+use App\Models\ServiceUpgrade;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -22,7 +23,7 @@ class CapacityConfigurationMutationGuard
         ConfigOption $option
     ): void {
         if (
-            ! $this->isDynamicResourceOption($option)
+            !$this->isDynamicResourceOption($option)
             || $this->isDynamicResourceOption($option, original: true)
         ) {
             return;
@@ -58,7 +59,7 @@ class CapacityConfigurationMutationGuard
             ->first();
         if (
             $option === null
-            || ! $this->isDynamicResourceOption($option)
+            || !$this->isDynamicResourceOption($option)
         ) {
             return;
         }
@@ -70,9 +71,9 @@ class CapacityConfigurationMutationGuard
         Product $product
     ): void {
         if (
-            ! $product->exists
-            || ! $product->isDirty('server_id')
-            || ! Schema::hasTable('extensions')
+            !$product->exists
+            || !$product->isDirty('server_id')
+            || !Schema::hasTable('extensions')
             || DB::table('extensions')
                 ->where('id', (int) $product->server_id)
                 ->where('type', 'server')
@@ -92,13 +93,69 @@ class CapacityConfigurationMutationGuard
             ->where('hidden', false)
             ->get()
             ->contains(
-                fn (ConfigOption $option): bool =>
-                    $this->isDynamicResourceOption($option)
+                fn (ConfigOption $option): bool => $this->isDynamicResourceOption($option)
             );
         if ($hasDynamicResource) {
             $this->assertProductsCanUseDynamicResources(
                 [(int) $product->id],
                 requirePterodactyl: false
+            );
+        }
+    }
+
+    public function assertProductStockMutationFresh(Product $product): void
+    {
+        if (!$product->exists || !$product->isDirty('stock')) {
+            return;
+        }
+        if (DB::transactionLevel() === 0) {
+            throw new \LogicException(
+                'Product stock changes must run inside a database transaction.'
+            );
+        }
+
+        $current = DB::table('products')
+            ->where('id', $product->id)
+            ->lockForUpdate()
+            ->first(['stock']);
+        if ($current === null) {
+            throw new \RuntimeException(
+                'The product disappeared while stock was being updated.'
+            );
+        }
+
+        $stored = $current->stock === null
+            ? null
+            : (int) $current->stock;
+        $original = $product->getRawOriginal('stock') === null
+            ? null
+            : (int) $product->getRawOriginal('stock');
+        if ($stored !== $original) {
+            throw new \RuntimeException(
+                'Product stock changed after this edit was opened. Reload the product and apply the stock change again.'
+            );
+        }
+        if (($original === null) !== ($product->stock === null)) {
+            $serviceId = DB::table('services')
+                ->where('product_id', $product->id)
+                ->whereNull('product_stock_released_at')
+                ->where(function ($query): void {
+                    $query->whereNull('status')
+                        ->orWhere('status', '!=', 'cancelled');
+                })
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->value('id');
+            if ($serviceId !== null) {
+                throw new \RuntimeException(
+                    "Product stock cannot switch between finite and unlimited while service {$serviceId} owns an unreleased stock claim. Cancel or migrate every active service first."
+                );
+            }
+
+            $this->assertProductsMutable(
+                [(int) $product->id],
+                'product stock mode',
+                destructive: true
             );
         }
     }
@@ -123,8 +180,8 @@ class CapacityConfigurationMutationGuard
             ->values();
         if (
             $productIds->isEmpty()
-            || ! Schema::hasTable('products')
-            || ! Schema::hasTable('services')
+            || !Schema::hasTable('products')
+            || !Schema::hasTable('services')
         ) {
             return;
         }
@@ -136,7 +193,7 @@ class CapacityConfigurationMutationGuard
             ->get();
 
         if ($requirePterodactyl) {
-            if (! Schema::hasTable('extensions')) {
+            if (!Schema::hasTable('extensions')) {
                 return;
             }
             $productIds = DB::table('products')
@@ -157,6 +214,35 @@ class CapacityConfigurationMutationGuard
             if ($productIds->isEmpty()) {
                 return;
             }
+        }
+
+        if (
+            Schema::hasTable('service_upgrades')
+            && DB::table('service_upgrades as upgrade')
+                ->join(
+                    'services as upgrade_service',
+                    'upgrade_service.id',
+                    '=',
+                    'upgrade.service_id'
+                )
+                ->whereIn(
+                    'upgrade.status',
+                    ServiceUpgrade::activeStatuses()
+                )
+                ->where(function ($query) use ($productIds): void {
+                    $query->whereIn(
+                        'upgrade.product_id',
+                        $productIds->all()
+                    )->orWhereIn(
+                        'upgrade_service.product_id',
+                        $productIds->all()
+                    );
+                })
+                ->exists()
+        ) {
+            throw new \RuntimeException(
+                'Dynamic resource stock cannot be enabled while an active service upgrade references this product. Complete or cancel the upgrade first.'
+            );
         }
 
         $legacyServices = DB::table('services as service')
@@ -206,8 +292,7 @@ class CapacityConfigurationMutationGuard
     public function assertConfigOptionMutable(
         ConfigOption $option,
         bool $destructive = false
-    ): void
-    {
+    ): void {
         $rootIds = collect([
             $option->parent_id ?: $option->id,
             $option->getOriginal('parent_id')
@@ -234,8 +319,7 @@ class CapacityConfigurationMutationGuard
     public function assertPlanMutable(
         Plan $plan,
         bool $destructive = false
-    ): void
-    {
+    ): void {
         $planIds = collect([$plan->id, $plan->getOriginal('id')])
             ->filter()
             ->map(fn ($id): int => (int) $id)
@@ -253,11 +337,11 @@ class CapacityConfigurationMutationGuard
                 $plan->getOriginal('priceable_id'),
             ],
         ] as [$type, $id]) {
-            if ($type === (new Product())->getMorphClass() && $id !== null) {
+            if ($type === (new Product)->getMorphClass() && $id !== null) {
                 $productIds->push((int) $id);
             }
             if (
-                $type === (new ConfigOption())->getMorphClass()
+                $type === (new ConfigOption)->getMorphClass()
                 && $id !== null
             ) {
                 $option = ConfigOption::query()->find((int) $id);
@@ -283,8 +367,7 @@ class CapacityConfigurationMutationGuard
     public function assertPriceMutable(
         Price $price,
         bool $destructive = false
-    ): void
-    {
+    ): void {
         $planIds = collect([$price->plan_id, $price->getOriginal('plan_id')])
             ->filter()
             ->map(fn ($id): int => (int) $id)
@@ -303,7 +386,7 @@ class CapacityConfigurationMutationGuard
         ConfigOption $option,
         bool $original = false
     ): bool {
-        if ($original && ! $option->exists) {
+        if ($original && !$option->exists) {
             return false;
         }
 
@@ -329,7 +412,7 @@ class CapacityConfigurationMutationGuard
 
         return $type === 'dynamic_slider'
             && $parentId === null
-            && ! (bool) $hidden
+            && !(bool) $hidden
             && in_array($resource, ['memory', 'cpu', 'disk'], true);
     }
 
@@ -343,16 +426,6 @@ class CapacityConfigurationMutationGuard
         array $planIds = [],
         bool $destructive = false
     ): void {
-        if (
-            ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumn(
-                'ptero_resource_reservations',
-                'product_id'
-            )
-        ) {
-            return;
-        }
-
         $productIds = collect($productIds)
             ->map(fn ($id): int => (int) $id)
             ->filter(fn (int $id): bool => $id > 0)
@@ -378,54 +451,112 @@ class CapacityConfigurationMutationGuard
             ->lockForUpdate()
             ->get();
 
-        if (! $destructive) {
+        if (!$destructive) {
             return;
         }
 
-        $active = DB::table(
-            'ptero_resource_reservations as reservation'
-        )
-            ->leftJoin(
-                'services as service',
-                'service.id',
-                '=',
-                'reservation.service_id'
+        $activeCapacity = false;
+        if (
+            Schema::hasTable('ptero_resource_reservations')
+            && Schema::hasColumn(
+                'ptero_resource_reservations',
+                'product_id'
             )
-            ->where(function ($query): void {
-                $query->whereIn(
-                    'reservation.status',
-                    self::UNRESOLVED_STATUSES
-                )->orWhere(function ($query): void {
-                    $query->where('reservation.status', 'confirmed')
-                        ->where(function ($query): void {
-                            $query->whereNull('service.status')
-                                ->orWhere(
-                                    'service.status',
-                                    '!=',
-                                    'cancelled'
-                                );
-                        });
-                });
-            })
-            ->where(function ($query) use ($productIds, $planIds): void {
-                if ($productIds->isNotEmpty()) {
+        ) {
+            $activeCapacity = DB::table(
+                'ptero_resource_reservations as reservation'
+            )
+                ->leftJoin(
+                    'services as service',
+                    'service.id',
+                    '=',
+                    'reservation.service_id'
+                )
+                ->where(function ($query): void {
                     $query->whereIn(
-                        'reservation.product_id',
-                        $productIds->all()
-                    );
-                }
-                if ($planIds->isNotEmpty()) {
-                    $method = $productIds->isNotEmpty()
-                        ? 'orWhereIn'
-                        : 'whereIn';
-                    $query->{$method}(
-                        'reservation.plan_id',
-                        $planIds->all()
-                    );
-                }
-            })
-            ->exists();
-        if ($active) {
+                        'reservation.status',
+                        self::UNRESOLVED_STATUSES
+                    )->orWhere(function ($query): void {
+                        $query->where('reservation.status', 'confirmed')
+                            ->where(function ($query): void {
+                                $query->whereNull('service.status')
+                                    ->orWhere(
+                                        'service.status',
+                                        '!=',
+                                        'cancelled'
+                                    );
+                            });
+                    });
+                })
+                ->where(function ($query) use (
+                    $productIds,
+                    $planIds
+                ): void {
+                    if ($productIds->isNotEmpty()) {
+                        $query->whereIn(
+                            'reservation.product_id',
+                            $productIds->all()
+                        );
+                    }
+                    if ($planIds->isNotEmpty()) {
+                        $method = $productIds->isNotEmpty()
+                            ? 'orWhereIn'
+                            : 'whereIn';
+                        $query->{$method}(
+                            'reservation.plan_id',
+                            $planIds->all()
+                        );
+                    }
+                })
+                ->exists();
+        }
+
+        $activeUpgrade = false;
+        if (
+            Schema::hasTable('service_upgrades')
+            && Schema::hasTable('services')
+        ) {
+            $activeUpgrade = DB::table('service_upgrades as upgrade')
+                ->join(
+                    'services as service',
+                    'service.id',
+                    '=',
+                    'upgrade.service_id'
+                )
+                ->whereIn(
+                    'upgrade.status',
+                    ServiceUpgrade::activeStatuses()
+                )
+                ->where(function ($query) use (
+                    $productIds,
+                    $planIds
+                ): void {
+                    if ($productIds->isNotEmpty()) {
+                        $query->whereIn(
+                            'upgrade.product_id',
+                            $productIds->all()
+                        )->orWhereIn(
+                            'service.product_id',
+                            $productIds->all()
+                        );
+                    }
+                    if ($planIds->isNotEmpty()) {
+                        $method = $productIds->isNotEmpty()
+                            ? 'orWhereIn'
+                            : 'whereIn';
+                        $query->{$method}(
+                            'upgrade.plan_id',
+                            $planIds->all()
+                        )->orWhereIn(
+                            'service.plan_id',
+                            $planIds->all()
+                        );
+                    }
+                })
+                ->exists();
+        }
+
+        if ($activeCapacity || $activeUpgrade) {
             throw new \RuntimeException(
                 "This {$subject} identity is required by an unresolved or active capacity commitment. Cancel, expire, or fully cancel the service before removing or reassigning it."
             );

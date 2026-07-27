@@ -19,7 +19,7 @@ class DynamicSliderValueRuleTest extends TestCase
         $this->assertNull(StrictInteger::parse('1e100'));
         $this->assertNull(StrictInteger::parse('01000'));
         $this->assertNull(StrictInteger::parse('-0'));
-        $this->assertNull(StrictInteger::parse((string) PHP_INT_MAX.'0'));
+        $this->assertNull(StrictInteger::parse((string) PHP_INT_MAX . '0'));
     }
 
     public function test_stored_decimal_parser_only_accepts_exact_persistable_whole_values(): void
@@ -143,7 +143,7 @@ class DynamicSliderValueRuleTest extends TestCase
     private function metadataErrors(array $metadata): array
     {
         $errors = [];
-        (new DynamicSliderMetadataRule())->validate(
+        (new DynamicSliderMetadataRule)->validate(
             'metadata',
             $metadata,
             function (string $message) use (&$errors): void {

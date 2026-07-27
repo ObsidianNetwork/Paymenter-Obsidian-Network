@@ -5,8 +5,11 @@ namespace App\Observers;
 use App\Events\Service as ServiceEvent;
 use App\Models\Product;
 use App\Models\Service;
+use App\Models\ServiceUpgrade;
+use App\Services\Invoice\BillingChargeAttemptService;
 use App\Services\Service\CapacityServiceCreationCoordinator;
 use App\Services\Service\FulfillmentStatusTransitionService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -18,7 +21,7 @@ class ServiceObserver
             Product::query()
                 ->find($service->product_id)
                 ?->usesDynamicResources()
-            && ! CapacityServiceCreationCoordinator::isCoordinating()
+            && !CapacityServiceCreationCoordinator::isCoordinating()
         ) {
             throw new \RuntimeException(
                 'Dynamic resource services cannot be created directly. Use customer checkout or an explicit capacity-aware import coordinator.'
@@ -28,52 +31,82 @@ class ServiceObserver
 
     public function updating(Service $service): void
     {
-        $currentProduct = Product::query()->find($service->getOriginal('product_id'));
-        $targetProduct = Product::query()->find($service->product_id);
-        $touchesDynamicProduct = (bool) (
-            $currentProduct?->usesDynamicResources()
-            || $targetProduct?->usesDynamicResources()
-        );
-        $reservationBacked = $this->hasCheckoutReservation($service);
         if (
-            (
-                $service->isDirty('product_id')
-                || $service->isDirty('plan_id')
-                || $service->isDirty('quantity')
-                || (
-                    $reservationBacked
-                    && (
-                        $service->isDirty('user_id')
-                        || $service->isDirty('currency_code')
-                    )
-                )
+            $service->isDirty('status')
+            && $service->status === Service::STATUS_CANCELLED
+        ) {
+            app(BillingChargeAttemptService::class)
+                ->assertServiceTerminationAllowed($service);
+        }
+        $reservationBacked = $this->hasCheckoutReservation($service);
+        $activeUpgrade = $this->hasActiveUpgrade($service);
+        $identityChanged = $service->isDirty([
+            'product_id',
+            'plan_id',
+            'quantity',
+        ]);
+        $billingAnchorChanged = $service->isDirty([
+            'expires_at',
+            'price',
+            'period_base_price',
+            'current_period_price',
+            'pricing_ledger_started_at',
+            'pricing_ledger_verified_at',
+            'billing_cycles_completed',
+            'coupon_id',
+        ]);
+        if (
+            $identityChanged
+            && !FulfillmentStatusTransitionService::isCoordinating(
+                $service
             )
-            && ($touchesDynamicProduct || $reservationBacked)
-            && ! FulfillmentStatusTransitionService::isCoordinating($service)
         ) {
             throw new \RuntimeException(
-                'Reservation-backed service identity changes require the capacity-aware fulfillment coordinator.'
+                'Existing service product, plan, and quantity changes require the capacity-aware fulfillment coordinator and upgrade flow.'
+            );
+        }
+        if (
+            ($reservationBacked || $activeUpgrade)
+            && (
+                $service->isDirty('user_id')
+                || $service->isDirty('currency_code')
+            )
+            && !FulfillmentStatusTransitionService::isCoordinating($service)
+        ) {
+            throw new \RuntimeException(
+                'A service with durable fulfillment or an active upgrade cannot change owner or currency outside the capacity-aware fulfillment coordinator.'
+            );
+        }
+
+        if (
+            $billingAnchorChanged
+            && !FulfillmentStatusTransitionService::isCoordinating($service)
+            && !ServiceBillingAnchorMutationCoordinator::isCoordinating(
+                $service
+            )
+        ) {
+            throw new \RuntimeException(
+                'Service expiration, price, and coupon changes must be serialized with the fulfillment state machine.'
             );
         }
 
         if (
             $service->isDirty('status')
-            && ($touchesDynamicProduct || $reservationBacked)
-            && ! FulfillmentStatusTransitionService::isCoordinating($service)
+            && !FulfillmentStatusTransitionService::isCoordinating($service)
         ) {
             throw new \RuntimeException(
-                'Dynamic service status is controlled by the fulfillment state machine.'
+                'Existing service status is controlled by the fulfillment state machine.'
             );
         }
     }
 
     public function deleting(Service $service): void
     {
-        if ($this->hasCheckoutReservation($service)) {
-            throw new \RuntimeException(
-                'Reservation-backed services must be cancelled through the fulfillment state machine and retained as fulfillment records.'
-            );
-        }
+        app(BillingChargeAttemptService::class)
+            ->assertServiceTerminationAllowed($service);
+        throw new \RuntimeException(
+            'Service fulfillment records cannot be hard deleted. Cancel and verify termination through the fulfillment state machine, then retain the record for stock and payment history.'
+        );
     }
 
     /**
@@ -102,7 +135,7 @@ class ServiceObserver
 
     private function hasCheckoutReservation(Service $service): bool
     {
-        if (! Schema::hasTable('ptero_resource_reservations')) {
+        if (!Schema::hasTable('ptero_resource_reservations')) {
             return false;
         }
 
@@ -113,5 +146,20 @@ class ServiceObserver
         }
 
         return $query->exists();
+    }
+
+    private function hasActiveUpgrade(Service $service): bool
+    {
+        if (!Schema::hasTable('service_upgrades')) {
+            return false;
+        }
+
+        return DB::table('service_upgrades')
+            ->where('service_id', $service->id)
+            ->whereIn(
+                'status',
+                ServiceUpgrade::activeStatuses()
+            )
+            ->exists();
     }
 }

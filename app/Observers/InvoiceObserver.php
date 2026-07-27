@@ -53,7 +53,7 @@ class InvoiceObserver
             && $invoice->status === Invoice::STATUS_PAID
             && app(CapacityInvoicePaymentService::class)
                 ->requiresFulfillmentCoordinator($invoice)
-            && ! MarkInvoicePaidService::isCoordinating($invoice)
+            && !MarkInvoicePaidService::isCoordinating($invoice)
         ) {
             throw new \RuntimeException(
                 'Invoices must be marked paid through the fulfillment coordinator.'
@@ -64,7 +64,7 @@ class InvoiceObserver
             && $invoice->status === Invoice::STATUS_CANCELLED
             && app(CapacityInvoicePaymentService::class)
                 ->requiresFulfillmentCoordinator($invoice)
-            && ! CancelInvoiceService::isCoordinating($invoice)
+            && !CancelInvoiceService::isCoordinating($invoice)
         ) {
             throw new \RuntimeException(
                 'Capacity-backed and capacity-renewal invoices must be cancelled through the fulfillment coordinator.'

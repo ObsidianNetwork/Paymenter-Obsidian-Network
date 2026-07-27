@@ -22,8 +22,8 @@ class Migrate extends Command
         $name = (string) $this->argument('name');
 
         if (
-            ! preg_match('/^[a-z][a-z0-9_-]*$/', $type)
-            || ! preg_match('/^[A-Za-z][A-Za-z0-9_-]*$/', $name)
+            !preg_match('/^[a-z][a-z0-9_-]*$/', $type)
+            || !preg_match('/^[A-Za-z][A-Za-z0-9_-]*$/', $name)
         ) {
             $this->error('The extension type or name contains invalid characters.');
 
@@ -32,8 +32,8 @@ class Migrate extends Command
 
         if (
             app()->environment('production')
-            && ! $this->option('force')
-            && ! $this->confirm("Run migrations for {$type}/{$name}?")
+            && !$this->option('force')
+            && !$this->confirm("Run migrations for {$type}/{$name}?")
         ) {
             return Command::FAILURE;
         }
@@ -57,8 +57,8 @@ class Migrate extends Command
             if (Artisan::call('queue:restart') !== 0) {
                 throw new \RuntimeException(
                     'Extension migrations/readiness completed, but queue '
-                    .'workers could not be signalled to restart. Keep '
-                    .'Paymenter in maintenance and restart them manually.'
+                    . 'workers could not be signalled to restart. Keep '
+                    . 'Paymenter in maintenance and restart them manually.'
                 );
             }
         } catch (\Throwable $exception) {

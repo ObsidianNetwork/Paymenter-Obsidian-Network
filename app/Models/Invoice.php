@@ -171,6 +171,11 @@ class Invoice extends Model implements Auditable
         return $this->hasMany(InvoiceTransaction::class);
     }
 
+    public function billingChargeAttempt()
+    {
+        return $this->hasOne(BillingChargeAttempt::class);
+    }
+
     public function snapshot()
     {
         return $this->hasOne(InvoiceSnapshot::class);

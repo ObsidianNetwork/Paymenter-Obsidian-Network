@@ -77,7 +77,7 @@ class InvoiceTransactionObserver
         if (
             $invoice->isDirty('status')
             && $this->wasProcessingCapacityEvidence($invoice)
-            && ! app(CapacityInvoicePaymentService::class)
+            && !app(CapacityInvoicePaymentService::class)
                 ->isRecordingPaymentEvidence(
                     (int) $invoice->getRawOriginal('invoice_id')
                 )
@@ -146,7 +146,7 @@ class InvoiceTransactionObserver
                 )
             && (
                 DB::transactionLevel() === 0
-                || ! app(CapacityInvoicePaymentService::class)
+                || !app(CapacityInvoicePaymentService::class)
                     ->isRecordingPaymentEvidence(
                         (int) $transaction->invoice_id
                     )

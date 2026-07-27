@@ -5,21 +5,29 @@ namespace App\Jobs\Server;
 use App\Exceptions\PermanentProvisioningException;
 use App\Helpers\ExtensionHelper;
 use App\Models\ServiceUpgrade;
+use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
+use App\Services\ServiceUpgrade\UpgradeProvisionerIdentityService;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 
-class UpgradeJob implements ShouldQueue
+class UpgradeJob implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public $timeout = 120;
 
     public $tries = 5;
+
+    /**
+     * Cover all five attempts, their configured backoffs, and runtime.
+     */
+    public $uniqueFor = 7200;
 
     private ?string $ownedReservationLeaseId = null;
 
@@ -33,11 +41,16 @@ class UpgradeJob implements ShouldQueue
         return [60, 300, 900, 3600];
     }
 
+    public function uniqueId(): string
+    {
+        return (string) $this->serviceUpgrade->getKey();
+    }
+
     public function middleware(): array
     {
         return [
             (new WithoutOverlapping(
-                'server-fulfillment:'.$this->serviceUpgrade->service_id
+                'server-fulfillment:' . $this->serviceUpgrade->service_id
             ))
                 ->shared()
                 ->releaseAfter(30)
@@ -49,6 +62,8 @@ class UpgradeJob implements ShouldQueue
     {
         $upgrade = $this->serviceUpgrade;
         $leaseId = null;
+        $remoteAttempted = false;
+        $dynamic = false;
 
         try {
             $upgrade = $upgrades->beginProvisioning($this->serviceUpgrade);
@@ -57,7 +72,15 @@ class UpgradeJob implements ShouldQueue
             }
 
             $properties = (array) data_get($upgrade->target_snapshot, 'properties', []);
-            if ($this->usesDynamicCapacity($upgrade)) {
+            $userIdentity = data_get(
+                $upgrade->target_snapshot,
+                'provisioner.user_identity'
+            );
+            if (is_array($userIdentity)) {
+                $properties['_provisioner_user_identity'] = $userIdentity;
+            }
+            $dynamic = $this->usesDynamicCapacity($upgrade);
+            if ($dynamic) {
                 $reservation = $this->capacityService()->beginProvisioning($upgrade);
                 $leaseId = (string) $reservation['provisioning_lease_id'];
                 $this->ownedReservationLeaseId = $leaseId;
@@ -67,16 +90,11 @@ class UpgradeJob implements ShouldQueue
                     'panel_identity' => $reservation['panel_identity'],
                     'node_id' => (int) $reservation['node_id'],
                     'external_server_id' => (int) $reservation['external_server_id'],
-                    'external_server_uuid' =>
-                        (string) $reservation['external_server_uuid'],
-                    'external_server_identifier' =>
-                        (string) $reservation['external_server_identifier'],
-                    'external_server_external_id' =>
-                        (string) $reservation['external_server_external_id'],
-                    'external_user_id' =>
-                        (int) $reservation['external_user_id'],
-                    'user_external_id' =>
-                        (string) $reservation['user_external_id'],
+                    'external_server_uuid' => (string) $reservation['external_server_uuid'],
+                    'external_server_identifier' => (string) $reservation['external_server_identifier'],
+                    'external_server_external_id' => (string) $reservation['external_server_external_id'],
+                    'external_user_id' => (int) $reservation['external_user_id'],
+                    'user_external_id' => (string) $reservation['user_external_id'],
                     'user_email' => (string) $reservation['user_email'],
                     'nest_id' => (int) $reservation['nest_id'],
                     'egg_id' => (int) $reservation['egg_id'],
@@ -93,21 +111,28 @@ class UpgradeJob implements ShouldQueue
                 ];
             }
 
-            try {
-                ExtensionHelper::upgradeServer(
+            app(UpgradeProvisionerIdentityService::class)
+                ->assertCurrent($upgrade);
+            $provisionerMode = data_get(
+                $upgrade->target_snapshot,
+                'provisioner.mode'
+            );
+            if ($provisionerMode === 'external') {
+                $remoteAttempted = true;
+                $result = ExtensionHelper::upgradeServer(
                     $upgrade->service,
                     $upgrade->product,
                     $properties
                 );
-            } catch (\Throwable $exception) {
-                if (
-                    ! $this->usesDynamicCapacity($upgrade)
-                    && $exception->getMessage() === 'No server assigned to this product'
-                ) {
-                    // Legacy configuration-only products have no external server.
-                } else {
-                    throw $exception;
+                if ($result === false) {
+                    throw new PermanentProvisioningException(
+                        'The server provisioner rejected the upgrade without applying it.'
+                    );
                 }
+            } elseif ($provisionerMode !== 'serverless') {
+                throw new PermanentProvisioningException(
+                    'The signed upgrade has no valid provisioner mode.'
+                );
             }
 
             $upgrades->complete($upgrade, $leaseId);
@@ -117,7 +142,10 @@ class UpgradeJob implements ShouldQueue
 
             return;
         } catch (\Throwable $exception) {
-            if ($this->isPermanentClientFailure($exception)) {
+            if (
+                ($remoteAttempted && !$dynamic)
+                || $this->isPermanentClientFailure($exception)
+            ) {
                 $upgrades->recordFailure($upgrade, $exception, true, $leaseId);
                 $this->fail($exception);
 
@@ -146,14 +174,14 @@ class UpgradeJob implements ShouldQueue
 
     private function usesDynamicCapacity(ServiceUpgrade $upgrade): bool
     {
-        return $upgrade->service->product->usesDynamicResources()
-            || $upgrade->product->usesDynamicResources();
+        return app(CapacityUpgradeReservationIdentity::class)
+            ->requiresCoordinator($upgrade);
     }
 
     private function capacityService(): object
     {
         $class = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\UpgradeReservationService';
-        if (! class_exists($class)) {
+        if (!class_exists($class)) {
             throw new \RuntimeException(
                 'Dynamic upgrade reservation support is unavailable.'
             );
@@ -168,6 +196,6 @@ class UpgradeJob implements ShouldQueue
 
         return $status >= 400
             && $status < 500
-            && ! in_array($status, [408, 409, 425, 429], true);
+            && !in_array($status, [408, 409, 425, 429], true);
     }
 }

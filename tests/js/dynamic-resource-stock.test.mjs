@@ -3,6 +3,8 @@ import test from 'node:test'
 
 import dynamicResourceStock, {
     isCompleteResourceQuote,
+    retryAfterDelaySeconds,
+    retryWaitSecondsUntil,
     snapToStep,
 } from '../../themes/default/js/dynamic-resource-stock.js'
 
@@ -211,6 +213,72 @@ test('inventory failures keep checkout locked and expose only a safe message', a
         'Live resource availability is temporarily unavailable. Please try again.',
     )
     assert.equal(events.at(-1).type, 'dynamic-capacity-failed')
+})
+
+test('rate limits honor Retry-After and block immediate retry amplification', async () => {
+    const events = installBrowserGlobals()
+    globalThis.fetch = async () => ({
+        ok: false,
+        status: 429,
+        headers: {
+            get: (name) => name === 'Retry-After' ? '30' : null,
+        },
+        json: async () => ({
+            message: 'internal limiter details must not be exposed',
+        }),
+    })
+
+    const stock = controller()
+    await stock.requestQuote()
+
+    assert.equal(stock.canCheckout, false)
+    assert.equal(stock.canRetry, false)
+    assert.equal(stock.retryWaitSeconds, 30)
+    assert.equal(
+        stock.quoteError,
+        'Availability checks are temporarily rate-limited. Retry in 30 seconds.',
+    )
+    assert.equal(events.at(-1).detail.retry_after, 30)
+
+    let queued = false
+    stock.queueQuote = () => {
+        queued = true
+    }
+    stock.retryQuote()
+    assert.equal(queued, false)
+    window.clearTimeout(stock._retryCooldownTimer)
+})
+
+test('Retry-After parsing accepts dates and safely bounds bad values', () => {
+    const now = Date.parse('2026-07-27T00:00:00Z')
+    assert.equal(
+        retryAfterDelaySeconds({
+            headers: {
+                get: () => 'Mon, 27 Jul 2026 00:00:12 GMT',
+            },
+        }, now),
+        12,
+    )
+    assert.equal(
+        retryAfterDelaySeconds({
+            headers: { get: () => '999999' },
+        }, now),
+        300,
+    )
+    assert.equal(
+        retryAfterDelaySeconds({
+            headers: { get: () => 'not-a-date' },
+        }, now),
+        5,
+    )
+})
+
+test('rate-limit retry countdown advances against the absolute deadline', () => {
+    assert.equal(retryWaitSecondsUntil(31_000, 1_000), 30)
+    assert.equal(retryWaitSecondsUntil(31_000, 2_001), 29)
+    assert.equal(retryWaitSecondsUntil(31_000, 30_999), 1)
+    assert.equal(retryWaitSecondsUntil(31_000, 31_000), 0)
+    assert.equal(retryWaitSecondsUntil(Number.NaN, 1_000), 0)
 })
 
 test('changing a selection locks checkout before the debounced quote starts', () => {

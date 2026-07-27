@@ -71,8 +71,7 @@
                     <h3 class="text-lg font-semibold mb-2">
                         @if($service->plan->type == 'recurring')
                         {{ __('services.price_every_period', [
-                            'price' => $service->product->price(null, $service->plan->billing_period, $service->plan->billing_unit,
-                            $service->currency_code),
+                            'price' => $service->plan->price($service->currency_code),
                             'period' => $service->plan->billing_period > 1 ? $service->plan->billing_period : '',
                             'unit' => strtolower(trans_choice(__('services.billing_cycles.' . $service->plan->billing_unit), $service->plan->billing_period))
                         ]) }}
@@ -86,6 +85,9 @@
                 </label>
             </div>
             @foreach ($this->selectableProductUpgrades() as $product)
+            @php
+                $upgradePlan = $this->planForUpgradeProduct($product);
+            @endphp
             <div>
                 <input type="radio" name="upgrade" value="{{ $product->id }}" wire:model.live="upgrade"
                     class="hidden peer" id="product-{{ $product->id }}">
@@ -114,14 +116,13 @@
                     <h3 class="text-lg font-semibold mb-2">
                         @if($service->plan->type == 'recurring')
                         {{ __('services.price_every_period', [
-                            'price' => $product->price(null, $service->plan->billing_period, $service->plan->billing_unit,
-                            $service->currency_code),
+                            'price' => $upgradePlan?->price($service->currency_code),
                             'period' => $service->plan->billing_period > 1 ? $service->plan->billing_period : '',
                             'unit' => trans_choice(__('services.billing_cycles.' . $service->plan->billing_unit), $service->plan->billing_period)
                         ]) }}
                         @else
                         {{ __('services.price_one_time', [
-                            'price' => $product->price(null, null, null, $service->currency_code),
+                            'price' => $upgradePlan?->price($service->currency_code),
                         ]) }}
                         @endif
                     </h3>
@@ -132,16 +133,25 @@
             <div class="col-span-2 flex flex-col gap-4">
                 @foreach ($this->upgradeConfigOptions() as $configOption)
                 @php
-                    $availableChildren = $configOption->availableChildren()->get();
-                    $showPriceTag = $availableChildren->filter(fn ($value) => !$value->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->is_free)->count() > 0;
+                    $targetBillingPlan = (int) $upgradeProduct->id === (int) $service->product_id
+                        ? $service->plan
+                        : $this->planForUpgradeProduct($upgradeProduct);
+                    $availableChildren = $this->availableUpgradeValues($configOption);
+                    $showPriceTag = $availableChildren->filter(
+                        fn ($value) => !$value->price(
+                            billing_period: $targetBillingPlan->billing_period,
+                            billing_unit: $targetBillingPlan->billing_unit,
+                            currency: $service->currency_code
+                        )->is_free
+                    )->count() > 0;
                 @endphp
-                <x-form.configoption :config="$configOption" :name="'configOptions.' . $configOption->id" :showPriceTag="$showPriceTag" :plan="$service->plan">
+                <x-form.configoption :config="$configOption" :name="'configOptions.' . $configOption->id" :showPriceTag="$showPriceTag" :plan="$targetBillingPlan">
                     {{-- If the config option is a select, show the options --}}
                     @if ($configOption->type == 'select')
                         @foreach ($availableChildren as $configOptionValue)
                             <option value="{{ $configOptionValue->id }}">
                                 {{ $configOptionValue->name }}
-                                {{ ($showPriceTag && $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit) : '' }}
+                                {{ ($showPriceTag && $configOptionValue->price(billing_period: $targetBillingPlan->billing_period, billing_unit: $targetBillingPlan->billing_unit, currency: $service->currency_code)->available) ? ' - ' . $configOptionValue->price(billing_period: $targetBillingPlan->billing_period, billing_unit: $targetBillingPlan->billing_unit, currency: $service->currency_code) : '' }}
                             </option>
                         @endforeach
                     @elseif($configOption->type == 'radio')
@@ -152,7 +162,7 @@
                                     value="{{ $configOptionValue->id }}" />
                                 <label for="{{ $configOptionValue->id }}">
                                     {{ $configOptionValue->name }}
-                                    {{ ($showPriceTag && $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $service->plan->billing_period, billing_unit: $service->plan->billing_unit) : '' }}
+                                    {{ ($showPriceTag && $configOptionValue->price(billing_period: $targetBillingPlan->billing_period, billing_unit: $targetBillingPlan->billing_unit, currency: $service->currency_code)->available) ? ' - ' . $configOptionValue->price(billing_period: $targetBillingPlan->billing_period, billing_unit: $targetBillingPlan->billing_unit, currency: $service->currency_code) : '' }}
                                 </label>
                             </div>
                         @endforeach
@@ -179,6 +189,8 @@
                         <span x-text="quoteError"></span>
                         <button
                             type="button"
+                            x-bind:disabled="!canRetry"
+                            x-bind:aria-disabled="(!canRetry).toString()"
                             x-on:click="
                                 retryQuote();
                                 $nextTick(() => $root.querySelector('.dynamic-slider-input')?.focus());
@@ -186,7 +198,13 @@
                             aria-controls="dynamic-upgrade-stock-status"
                             class="rounded underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
                         >
-                            Retry upgrade availability check
+                            <span x-show="canRetry">
+                                Retry upgrade availability check
+                            </span>
+                            <span
+                                x-show="!canRetry"
+                                x-text="`Retry available in ${retryWaitSeconds} seconds`"
+                            ></span>
                         </button>
                     </div>
                 @endif

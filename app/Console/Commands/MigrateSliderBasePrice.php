@@ -33,7 +33,7 @@ class MigrateSliderBasePrice extends Command
      */
     public function handle(): int
     {
-        $isDryRun = ! $this->option('force');
+        $isDryRun = !$this->option('force');
 
         if ($isDryRun) {
             $this->warn('DRY RUN — pass --force to apply changes.');
@@ -123,7 +123,7 @@ class MigrateSliderBasePrice extends Command
                 }
                 $sharedBase = round($monthlyBase * $multiplier, 2);
                 if (
-                    ! is_finite($sharedBase)
+                    !is_finite($sharedBase)
                     || $sharedBase < 0
                     || $sharedBase > 99_999_999.99
                 ) {
@@ -178,7 +178,7 @@ class MigrateSliderBasePrice extends Command
             return Command::FAILURE;
         }
 
-        if (! $isDryRun) {
+        if (!$isDryRun) {
             DB::transaction(function () use ($operations): void {
                 foreach ($operations as $operation) {
                     foreach ($operation['plans'] as $planOperation) {

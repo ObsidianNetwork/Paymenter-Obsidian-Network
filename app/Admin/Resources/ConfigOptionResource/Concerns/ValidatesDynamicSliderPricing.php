@@ -33,7 +33,7 @@ trait ValidatesDynamicSliderPricing
         }
 
         $errors = [];
-        (new DynamicSliderMetadataRule())->validate(
+        (new DynamicSliderMetadataRule)->validate(
             'metadata',
             $metadata,
             function (string $message) use (&$errors) {

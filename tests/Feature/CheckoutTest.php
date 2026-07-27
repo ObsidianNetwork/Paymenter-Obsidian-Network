@@ -2,9 +2,16 @@
 
 namespace Tests\Feature;
 
+use App\Classes\Price;
 use App\Models\Cart;
 use App\Models\ConfigOption;
+use App\Models\Coupon;
+use App\Models\Invoice;
+use App\Models\Order;
+use App\Models\Service;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Once;
 use Livewire\Livewire;
@@ -147,7 +154,147 @@ class CheckoutTest extends TestCase
             ->assertSee('$10.00')
             ->set('plan_id', $plan->id)
             ->call('checkout')
-            ->assertHasErrors(['plan_id' => 'exists']);
+            ->assertHasErrors(['plan_id' => 'in']);
+    }
+
+    public function test_checkout_atomically_consumes_the_cart_and_cannot_be_replayed(): void
+    {
+        config([
+            'settings.mail_must_verify' => false,
+            'settings.tos' => false,
+        ]);
+        $user = User::factory()->create();
+        $cart = Cart::create([
+            'user_id' => $user->id,
+            'currency_code' => 'USD',
+        ]);
+        $cart->items()->create([
+            'product_id' => $this->product->product->id,
+            'plan_id' => $this->product->plan->id,
+            'config_options' => [],
+            'checkout_config' => [],
+            'quantity' => 1,
+        ]);
+        Cookie::queue('cart', $cart->ulid);
+        app('request')->cookies->set('cart', $cart->ulid);
+        Once::flush();
+
+        Livewire::actingAs($user)
+            ->test('cart')
+            ->call('checkout');
+
+        $this->assertDatabaseMissing('carts', ['id' => $cart->id]);
+        $this->assertDatabaseMissing('cart_items', ['cart_id' => $cart->id]);
+        $this->assertSame(1, Order::query()->count());
+        $this->assertSame(1, Service::query()->count());
+
+        // Recreate the stale browser cookie that a concurrent request already
+        // carried before the first checkout committed.
+        app('request')->cookies->set('cart', $cart->ulid);
+        Once::flush();
+        Livewire::actingAs($user)
+            ->test('cart')
+            ->call('checkout');
+
+        $this->assertSame(1, Order::query()->count());
+        $this->assertSame(1, Service::query()->count());
+    }
+
+    public function test_checkout_uses_the_locked_cart_coupon_for_every_price(): void
+    {
+        config([
+            'settings.mail_must_verify' => false,
+            'settings.tos' => false,
+        ]);
+        $user = User::factory()->create();
+        $firstCycleCoupon = Coupon::create([
+            'type' => 'percentage',
+            'applies_to' => 'all',
+            'code' => 'FIRST-CYCLE',
+            'value' => 50,
+            'recurring' => 1,
+        ]);
+        $recurringCoupon = Coupon::create([
+            'type' => 'percentage',
+            'applies_to' => 'all',
+            'code' => 'RECURRING',
+            'value' => 50,
+            'recurring' => 2,
+        ]);
+        $cart = Cart::create([
+            'user_id' => $user->id,
+            'currency_code' => 'USD',
+            'coupon_id' => $firstCycleCoupon->id,
+        ]);
+        $cart->items()->create([
+            'product_id' => $this->product->product->id,
+            'plan_id' => $this->product->plan->id,
+            'config_options' => [],
+            'checkout_config' => [],
+            'quantity' => 1,
+        ]);
+        Cookie::queue('cart', $cart->ulid);
+        app('request')->cookies->set('cart', $cart->ulid);
+        Once::flush();
+
+        $component = Livewire::actingAs($user)->test('cart');
+        $this->assertSame(
+            $firstCycleCoupon->id,
+            $component->get('coupon')->id
+        );
+
+        // Simulate another tab changing the persisted cart after this
+        // component mounted. Checkout must use the row reloaded under lock.
+        Cart::query()->whereKey($cart->id)->update([
+            'coupon_id' => $recurringCoupon->id,
+        ]);
+        $component->call('checkout');
+
+        $service = Service::query()->sole();
+        $invoice = Invoice::query()->sole();
+        $this->assertSame(
+            $recurringCoupon->id,
+            $service->coupon_id
+        );
+        $this->assertSame('5.00', (string) $service->price);
+        $this->assertSame(
+            '5.00',
+            (string) $invoice->items()->sole()->price
+        );
+    }
+
+    public function test_coupon_validation_refreshes_the_locked_coupon_model(): void
+    {
+        $coupon = Coupon::create([
+            'type' => 'percentage',
+            'applies_to' => 'all',
+            'code' => 'LOCKED-COUPON',
+            'value' => 50,
+            'recurring' => 1,
+        ]);
+        $cart = Cart::create([
+            'currency_code' => 'USD',
+            'coupon_id' => $coupon->id,
+        ]);
+        $cart->load('coupon');
+        $this->assertSame(50.0, $cart->coupon->value);
+
+        // Model an administrator update that commits after the relation was
+        // loaded but before checkout obtains the coupon row lock.
+        DB::table('coupons')->where('id', $coupon->id)->update([
+            'value' => 25,
+            'recurring' => 2,
+            'updated_at' => now(),
+        ]);
+
+        $this->assertTrue(
+            \App\Classes\Cart::validateAndRefreshCoupon(
+                $cart,
+                false
+            )
+        );
+        $this->assertSame(25.0, $cart->coupon->value);
+        $this->assertSame(2, (int) $cart->coupon->recurring);
     }
 
     public function test_dynamic_resource_values_must_be_integers_on_an_anchored_step(): void
@@ -218,7 +365,7 @@ class CheckoutTest extends TestCase
         $instance->configOptions[$option->id] = 'invalid';
         $instance->updatePricing();
         $this->assertInstanceOf(
-            \App\Classes\Price::class,
+            Price::class,
             $instance->total
         );
     }

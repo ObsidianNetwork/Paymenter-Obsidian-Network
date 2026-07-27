@@ -5,80 +5,35 @@ namespace App\Admin\Resources\ServiceResource\Pages;
 use App\Admin\Actions\AuditAction;
 use App\Admin\Resources\ServiceResource;
 use App\Helpers\ExtensionHelper;
-use App\Jobs\Server\CreateJob;
 use App\Models\Service;
 use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
+use App\Services\Service\ServiceCancellationRequestService;
+use App\Services\Service\ServiceJobDispatchService;
 use Exception;
 use Filament\Actions\Action;
-use Filament\Actions\DeleteAction;
 use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
+use Illuminate\Database\Eloquent\Model;
 
 class EditService extends EditRecord
 {
     protected static string $resource = ServiceResource::class;
 
+    protected function handleRecordUpdate(
+        Model $record,
+        array $data
+    ): Model {
+        return app(
+            ServiceBillingAnchorMutationCoordinator::class
+        )->update($record, $data);
+    }
+
     protected function getHeaderActions(): array
     {
         return [
-            DeleteAction::make()
-                ->form(function (DeleteAction $action) {
-                    $status = !in_array($this->record->status, [Service::STATUS_PENDING, Service::STATUS_CANCELLED]) && $this->record->product->server_id !== null;
-                    if (!$status) {
-                        return [];
-                    }
-
-                    return [
-                        Checkbox::make('deleteExtensionServer')
-                            ->label('Also trigger deletion of server')
-                            ->default(true),
-                    ];
-                })
-                ->action(function (array $data, Service $record, DeleteAction $action): void {
-                    $fulfillment = app(DurableFulfillmentService::class);
-                    if ($fulfillment->isReservationBacked($record)) {
-                        try {
-                            $fulfillment->requestCancellation($record);
-                        } catch (\RuntimeException $exception) {
-                            Notification::make('Cancellation blocked')
-                                ->title('The service cannot be cancelled yet')
-                                ->body($exception->getMessage())
-                                ->danger()
-                                ->send();
-                            $action->halt();
-
-                            return;
-                        }
-                        Notification::make('Cancellation queued')
-                            ->title('Durable cancellation was requested')
-                            ->body('The service record will be retained. It can only become cancelled after the external server is verified absent.')
-                            ->warning()
-                            ->send();
-                        $action->halt();
-
-                        return;
-                    }
-
-                    try {
-                        if (($data['deleteExtensionServer'] ?? false)) {
-                            ExtensionHelper::terminateServer($record);
-                        }
-                    } catch (Exception $e) {
-                        report($e);
-
-                        Notification::make('Error')
-                            ->title('Error occured while deleting the related server:')
-                            ->body($e->getMessage())
-                            ->danger()
-                            ->send();
-                        $action->halt();
-
-                        return;
-                    }
-                    $record->delete();
-                }),
             Action::make('changeStatus')
                 ->label('Trigger Extension Action')
                 ->schema([
@@ -102,7 +57,11 @@ class EditService extends EditRecord
 
                         switch ($data['action']) {
                             case 'create':
-                                CreateJob::dispatch($record, (bool) $data['sendNotification']);
+                                app(ServiceJobDispatchService::class)
+                                    ->requestCreate(
+                                        $record,
+                                        (bool) $data['sendNotification']
+                                    );
                                 break;
                             case 'suspend':
                                 $sdata = ExtensionHelper::suspendServer($record);
@@ -111,14 +70,18 @@ class EditService extends EditRecord
                                 $sdata = ExtensionHelper::unsuspendServer($record);
                                 break;
                             case 'terminate':
-                                if ($reservationBacked) {
-                                    $fulfillment->requestCancellation(
-                                        $record,
-                                        (bool) $data['sendNotification']
+                                if ($record->cancellation()->exists()) {
+                                    throw new \RuntimeException(
+                                        'This service already has a cancellation request.'
                                     );
-                                } else {
-                                    $sdata = ExtensionHelper::terminateServer($record);
                                 }
+                                app(
+                                    ServiceCancellationRequestService::class
+                                )->create([
+                                    'service_id' => $record->id,
+                                    'type' => 'immediate',
+                                    'reason' => 'Immediate cancellation requested by an administrator.',
+                                ]);
                                 break;
                             case 'upgrade':
                                 if ($reservationBacked) {

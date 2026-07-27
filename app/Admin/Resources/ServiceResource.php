@@ -14,9 +14,8 @@ use App\Helpers\ExtensionHelper;
 use App\Models\Currency;
 use App\Models\Product;
 use App\Models\Service;
+use App\Models\ServiceUpgrade;
 use Filament\Actions\Action;
-use Filament\Actions\BulkActionGroup;
-use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
@@ -92,6 +91,14 @@ class ServiceResource extends Resource
         };
     }
 
+    private static function hasActiveUpgrade(?Service $service): bool
+    {
+        return $service?->exists === true
+            && $service->upgrade()
+                ->whereIn('status', ServiceUpgrade::activeStatuses())
+                ->exists();
+    }
+
     protected static ?string $cluster = Services::class;
 
     public static function form(Schema $schema): Schema
@@ -110,6 +117,7 @@ class ServiceResource extends Resource
                     ->searchable()
                     ->live()
                     ->preload()
+                    ->disabledOn('edit')
                     ->placeholder('Select the product'),
                 Select::make('plan_id')
                     ->label('Plan')
@@ -117,24 +125,35 @@ class ServiceResource extends Resource
                     ->relationship('plan', 'name', fn (Builder $query, Get $get) => $query->where('priceable_id', $get('product_id'))->where('priceable_type', Product::class))
                     ->searchable()
                     ->preload()
-                    ->disabled(fn (Get $get) => !$get('product_id'))
+                    ->disabled(
+                        fn (Get $get, ?Service $record): bool => $record?->exists === true
+                            || !$get('product_id')
+                    )
                     ->placeholder('Select the plan'),
                 UserComponent::make('user_id'),
                 Select::make('status')
                     ->label('Status')
                     ->required()
                     ->options(self::statusOptions())
+                    ->disabledOn('edit')
                     ->default('pending'),
                 TextInput::make('quantity')
                     ->label('Quantity')
                     ->required()
+                    ->disabledOn('edit')
                     ->placeholder('Enter the quantity'),
                 DatePicker::make('expires_at')
                     ->label('Expires At')
+                    ->disabled(
+                        fn (?Service $record): bool => self::hasActiveUpgrade($record)
+                    )
                     ->required(fn (Get $get) => $get('plan')?->type != 'one-time' && $get('plan')?->type != 'free' && $get('status') !== 'pending')
                     ->placeholder('Select the expiration date'),
                 Select::make('coupon_id')
                     ->label('Coupon')
+                    ->disabled(
+                        fn (?Service $record): bool => self::hasActiveUpgrade($record)
+                    )
                     ->relationship('coupon', 'code')
                     ->searchable()
                     ->preload()
@@ -159,6 +178,9 @@ class ServiceResource extends Resource
                 TextInput::make('price')
                     ->required()
                     ->label('Price')
+                    ->disabled(
+                        fn (?Service $record): bool => self::hasActiveUpgrade($record)
+                    )
                     // Suffix based on chosen currency
                     ->prefix(fn (Get $get) => Currency::where('code', $get('currency_code'))->first()?->prefix)
                     ->suffix(fn (Get $get) => Currency::where('code', $get('currency_code'))->first()?->suffix)
@@ -288,11 +310,7 @@ class ServiceResource extends Resource
             ->recordActions([
                 EditAction::make(),
             ])
-            ->toolbarActions([
-                BulkActionGroup::make([
-                    DeleteBulkAction::make(),
-                ]),
-            ]);
+            ->toolbarActions([]);
     }
 
     public static function getRelations(): array

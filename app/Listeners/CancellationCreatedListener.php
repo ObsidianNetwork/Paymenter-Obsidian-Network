@@ -3,11 +3,12 @@
 namespace App\Listeners;
 
 use App\Events\ServiceCancellation\Created;
-use App\Jobs\Server\TerminateJob;
 use App\Models\Service;
 use App\Services\Invoice\CancelInvoiceService;
 use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\Service\ProductStockService;
+use App\Services\Service\ServiceJobDispatchService;
 use Illuminate\Support\Facades\DB;
 
 class CancellationCreatedListener
@@ -49,16 +50,25 @@ class CancellationCreatedListener
                         Service::STATUS_ACTIVE,
                         Service::STATUS_SUSPENDED,
                     ], true)) {
-                        DB::afterCommit(fn () => TerminateJob::dispatch($service));
                         $externalTerminationQueued = true;
                     }
-                    $service->status = Service::STATUS_CANCELLED;
-                    $service->save();
+                    FulfillmentStatusTransitionService::run(
+                        $service,
+                        function () use ($service): void {
+                            $service->status =
+                                Service::STATUS_CANCELLED;
+                            $service->save();
+                        }
+                    );
+                    if ($externalTerminationQueued) {
+                        app(ServiceJobDispatchService::class)
+                            ->requestTerminate($service);
+                    }
                 }
 
                 if (
-                    ! $dynamicCancellation
-                    && ! $externalTerminationQueued
+                    !$dynamicCancellation
+                    && !$externalTerminationQueued
                     && $service->product->stock !== null
                 ) {
                     app(ProductStockService::class)->release($service);

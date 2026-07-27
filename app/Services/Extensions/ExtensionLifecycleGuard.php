@@ -29,9 +29,9 @@ class ExtensionLifecycleGuard
         }
 
         if (
-            ! Schema::hasTable('config_options')
-            || ! Schema::hasTable('plans')
-            || ! Schema::hasColumn('plans', 'dynamic_slider_base_price')
+            !Schema::hasTable('config_options')
+            || !Schema::hasTable('plans')
+            || !Schema::hasColumn('plans', 'dynamic_slider_base_price')
         ) {
             throw new \RuntimeException(
                 'Dynamic slider plan-level pricing migrations are incomplete.'
@@ -57,11 +57,11 @@ class ExtensionLifecycleGuard
 
         throw new \RuntimeException(
             'Dynamic Pterodactyl cannot be activated while dynamic slider '
-            .'options retain legacy per-slider base prices (option IDs: '
-            .implode(', ', array_slice($invalid, 0, 20))
-            .(count($invalid) > 20 ? ', …' : '')
-            .'). Run paymenter:migrate-slider-base-price --force, resolve any '
-            .'reported conflicts, and retry activation.'
+            . 'options retain legacy per-slider base prices (option IDs: '
+            . implode(', ', array_slice($invalid, 0, 20))
+            . (count($invalid) > 20 ? ', …' : '')
+            . '). Run paymenter:migrate-slider-base-price --force, resolve any '
+            . 'reported conflicts, and retry activation.'
         );
     }
 
@@ -81,12 +81,12 @@ class ExtensionLifecycleGuard
 
         throw new \RuntimeException(
             'Dynamic Pterodactyl cannot be disabled, replaced, or uninstalled '
-            .'while durable fulfillment work is unresolved ('
-            .collect($counts)
+            . 'while durable fulfillment work is unresolved ('
+            . collect($counts)
                 ->filter(fn (int $count): bool => $count > 0)
                 ->map(fn (int $count, string $type): string => "{$type}: {$count}")
                 ->implode(', ')
-            .'). Drain, cancel, or reconcile these records first.'
+            . '). Drain, cancel, or reconcile these records first.'
         );
     }
 
@@ -106,12 +106,12 @@ class ExtensionLifecycleGuard
         }
         if (
             array_sum($this->activeCommitmentCounts()) > 0
-            && ! app()->isDownForMaintenance()
+            && !app()->isDownForMaintenance()
         ) {
             throw new \RuntimeException(
                 'Dynamic Pterodactyl has live durable services. Put Paymenter '
-                .'into deployment maintenance before upgrading it, run the '
-                .'strict migrations/readiness gate, then restart queue workers.'
+                . 'into deployment maintenance before upgrading it, run the '
+                . 'strict migrations/readiness gate, then restart queue workers.'
             );
         }
     }
@@ -121,7 +121,7 @@ class ExtensionLifecycleGuard
      */
     public function activeCommitmentCounts(): array
     {
-        if (! Schema::hasTable('ptero_resource_reservations')) {
+        if (!Schema::hasTable('ptero_resource_reservations')) {
             return [
                 'reservations' => 0,
                 'upgrades' => 0,

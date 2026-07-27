@@ -11,6 +11,4 @@ use App\Classes\Extension\Extension;
     version: '1.2.3',
     author: 'Paymenter Tests'
 )]
-class VersionedFixture extends Extension
-{
-}
+class VersionedFixture extends Extension {}

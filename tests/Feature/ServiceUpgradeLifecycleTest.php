@@ -3,17 +3,20 @@
 namespace Tests\Feature;
 
 use App\Enums\InvoiceTransactionStatus;
+use App\Exceptions\DisplayException;
+use App\Exceptions\PermanentProvisioningException;
 use App\Models\ConfigOption;
 use App\Models\ConfigOptionProduct;
 use App\Models\Coupon;
 use App\Models\Invoice;
+use App\Models\Server;
 use App\Models\Service;
 use App\Models\ServiceConfig;
 use App\Models\ServiceUpgrade;
-use App\Models\Server;
 use App\Models\User;
 use App\Services\Service\CapacityServiceCreationCoordinator;
 use App\Services\Service\FulfillmentStatusTransitionService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
 use App\Services\ServiceUpgrade\UpgradeFailureAlertService;
 use App\Services\ServiceUpgrade\UpgradeGuaranteeService;
@@ -204,24 +207,24 @@ class ServiceUpgradeLifecycleTest extends TestCase
         );
     }
 
-    public function test_non_pterodactyl_slider_upgrade_is_not_retired_as_dynamic_stock(): void
+    public function test_non_pterodactyl_slider_upgrade_without_signed_quote_is_retired(): void
     {
         [$upgrade, $invoice] = $this->legacyDynamicUpgrade('CustomServer');
 
         LegacyServiceUpgradeMigration::reconcile();
 
         $this->assertSame(
-            ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            ServiceUpgrade::STATUS_CANCELLED,
             $upgrade->fresh()->status
         );
-        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
         $this->assertSame(
-            $upgrade->service_id,
-            $upgrade->fresh()->active_service_guard_id
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
         );
+        $this->assertNull($upgrade->fresh()->active_service_guard_id);
     }
 
-    public function test_gateway_named_pterodactyl_is_not_dynamic_stock(): void
+    public function test_gateway_named_pterodactyl_upgrade_without_signed_quote_is_retired(): void
     {
         [$upgrade, $invoice] = $this->legacyDynamicUpgrade(
             'Pterodactyl',
@@ -231,10 +234,13 @@ class ServiceUpgradeLifecycleTest extends TestCase
         LegacyServiceUpgradeMigration::reconcile();
 
         $this->assertSame(
-            ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            ServiceUpgrade::STATUS_CANCELLED,
             $upgrade->fresh()->status
         );
-        $this->assertSame(Invoice::STATUS_PENDING, $invoice->fresh()->status);
+        $this->assertSame(
+            Invoice::STATUS_CANCELLED,
+            $invoice->fresh()->status
+        );
     }
 
     public function test_soft_deleted_pterodactyl_host_still_retires_unsafe_upgrade(): void
@@ -277,7 +283,7 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'expires_at' => $from->copy()->addDays(6),
         ]);
 
-        $this->expectException(\App\Exceptions\DisplayException::class);
+        $this->expectException(DisplayException::class);
         $this->expectExceptionMessage('full seven-day');
 
         app(UpgradeGuaranteeService::class)->deadline($service, $from);
@@ -475,15 +481,18 @@ class ServiceUpgradeLifecycleTest extends TestCase
         $upgrade->save();
         $originalPrice = (string) $service->fresh()->price;
 
-        $service->expires_at = $service->expires_at->copy()->addDay();
-        $service->save();
+        DB::table('services')
+            ->where('id', $service->id)
+            ->update([
+                'expires_at' => $service->expires_at->copy()->addDay(),
+            ]);
 
         try {
             app(ServiceUpgradeService::class)->complete($upgrade);
             $this->fail(
                 'Expected the final billing-anchor proof to reject drift.'
             );
-        } catch (\App\Exceptions\PermanentProvisioningException $exception) {
+        } catch (PermanentProvisioningException $exception) {
             $this->assertStringContainsString(
                 'changed after remote upgrade provisioning',
                 $exception->getMessage()
@@ -499,6 +508,116 @@ class ServiceUpgradeLifecycleTest extends TestCase
             $service->fresh()->product_id
         );
         $this->assertSame($originalPrice, (string) $service->fresh()->price);
+    }
+
+    public function test_billing_anchor_edit_is_serialized_with_active_upgrade(): void
+    {
+        $fixture = $this->createProduct();
+        $service = Service::factory()->create([
+            'user_id' => User::factory()->create()->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => Service::STATUS_ACTIVE,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'price' => 10,
+            'expires_at' => now()->addMonth()->startOfDay(),
+        ]);
+        ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $fixture->product->id,
+            'plan_id' => $fixture->plan->id,
+            'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
+            'type' => 'product',
+            'active_service_guard_id' => $service->id,
+            'quoted_amount' => 0,
+            'currency_code' => 'USD',
+        ]);
+
+        try {
+            app(
+                ServiceBillingAnchorMutationCoordinator::class
+            )->update($service, ['price' => '11.00']);
+            $this->fail(
+                'An administrator changed a billing anchor during an active upgrade.'
+            );
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'cannot change while an upgrade is active',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertSame('10.00', (string) $service->fresh()->price);
+    }
+
+    public function test_upgrade_completion_never_reprices_an_issued_renewal_invoice(): void
+    {
+        $source = $this->createProduct();
+        $target = $this->createProduct();
+        $target->plan->prices()->update(['price' => 20]);
+        $target->plan->load('prices');
+        $user = User::factory()->create();
+        $service = Service::factory()->create([
+            'user_id' => $user->id,
+            'product_id' => $source->product->id,
+            'plan_id' => $source->plan->id,
+            'status' => Service::STATUS_ACTIVE,
+            'quantity' => 1,
+            'currency_code' => 'USD',
+            'price' => 10,
+            'expires_at' => now()->addMonth()->startOfDay(),
+        ]);
+        $renewal = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'currency_code' => 'USD',
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => $service->expires_at,
+        ]);
+        $renewalItem = $renewal->items()->create([
+            'reference_id' => $service->id,
+            'reference_type' => Service::class,
+            'description' => 'Issued renewal',
+            'quantity' => 1,
+            'price' => 10,
+        ]);
+        $upgrade = ServiceUpgrade::create([
+            'service_id' => $service->id,
+            'product_id' => $target->product->id,
+            'plan_id' => $target->plan->id,
+            'status' => ServiceUpgrade::STATUS_PROVISIONING,
+            'type' => 'product',
+            'active_service_guard_id' => $service->id,
+            'provisioning_attempts' => 1,
+            'quoted_amount' => 0,
+            'currency_code' => 'USD',
+        ]);
+        $upgrade->load([
+            'service.product.server.settings',
+            'service.product.settings',
+            'service.plan.prices',
+            'service.configs.configOption',
+            'service.configs.configValue',
+            'product.server.settings',
+            'product.settings',
+            'plan.prices',
+            'configs.configOption',
+            'configs.configValue',
+        ]);
+        $upgrade->captureSnapshots();
+        $upgrade->save();
+
+        app(ServiceUpgradeService::class)->complete($upgrade);
+
+        $this->assertSame('20.00', (string) $service->fresh()->price);
+        $this->assertSame(
+            '10.00',
+            (string) $renewalItem->fresh()->price
+        );
+        $this->assertSame(
+            Invoice::STATUS_PENDING,
+            $renewal->fresh()->status
+        );
     }
 
     public function test_upgrade_completion_keeps_service_upgrade_reservation_lock_order(): void
@@ -612,8 +731,7 @@ class ServiceUpgradeLifecycleTest extends TestCase
         string $serverExtension = 'Pterodactyl',
         string $extensionType = 'server',
         bool $softDeleteServer = false
-    ): array
-    {
+    ): array {
         $fixture = $this->createProduct();
         $server = Server::create([
             'name' => $serverExtension,
@@ -658,6 +776,13 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'invoice_id' => $invoice->id,
             'status' => ServiceUpgrade::STATUS_PENDING,
             'type' => 'product',
+        ]);
+        $invoice->items()->create([
+            'description' => 'Legacy upgrade',
+            'price' => '1.00',
+            'quantity' => 1,
+            'reference_id' => $upgrade->id,
+            'reference_type' => ServiceUpgrade::class,
         ]);
 
         return [$upgrade, $invoice];

@@ -2,7 +2,6 @@
 
 namespace App\Services\Service;
 
-use App\Jobs\Server\TerminateJob;
 use App\Models\Invoice;
 use App\Models\Service;
 use App\Models\ServiceUpgrade;
@@ -22,6 +21,8 @@ class DurableFulfillmentService
     private const RESERVATION_SERVICE = 'Paymenter\\Extensions\\Others\\DynamicPterodactyl\\Services\\ReservationService';
 
     private const RENEWAL_BLOCKING_UPGRADE_STATUSES = [
+        ServiceUpgrade::STATUS_PENDING,
+        ServiceUpgrade::STATUS_AWAITING_PAYMENT,
         ServiceUpgrade::STATUS_PAID_COMMITTED,
         ServiceUpgrade::STATUS_PROVISIONING,
         ServiceUpgrade::STATUS_RETRYABLE_FAILED,
@@ -60,7 +61,7 @@ class DurableFulfillmentService
 
     public function isReservationBacked(Service $service): bool
     {
-        if (! Schema::hasTable('ptero_resource_reservations')) {
+        if (!Schema::hasTable('ptero_resource_reservations')) {
             return false;
         }
 
@@ -82,7 +83,7 @@ class DurableFulfillmentService
     {
         $reservationBacked = $this->isReservationBacked($service);
         $currentlyDynamic = $service->product?->usesDynamicResources() ?? false;
-        if (! $reservationBacked && ! $currentlyDynamic) {
+        if (!$reservationBacked && !$currentlyDynamic) {
             return false;
         }
 
@@ -94,7 +95,7 @@ class DurableFulfillmentService
         }
 
         $committed = $reservationService->commitPaidService($service, $invoice);
-        if (! $committed) {
+        if (!$committed) {
             throw new \RuntimeException(
                 'The durable fulfillment extension did not commit the reservation-backed service.'
             );
@@ -109,7 +110,7 @@ class DurableFulfillmentService
     ): ?string {
         $reservationBacked = $this->isReservationBacked($service);
         $currentlyDynamic = $service->product?->usesDynamicResources() ?? false;
-        if (! $reservationBacked && ! $currentlyDynamic) {
+        if (!$reservationBacked && !$currentlyDynamic) {
             return null;
         }
 
@@ -130,7 +131,7 @@ class DurableFulfillmentService
         $reservationService = $this->reservationService();
         if (
             $reservationService === null
-            || ! method_exists($reservationService, 'preflightPaidService')
+            || !method_exists($reservationService, 'preflightPaidService')
         ) {
             return "Capacity-backed service {$service->id} cannot be paid because its durable fulfillment runtime is unavailable.";
         }
@@ -195,16 +196,16 @@ class DurableFulfillmentService
     public function cancellationIsDurablyComplete(Service $service): bool
     {
         if (
-            ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumn(
+            !Schema::hasTable('ptero_resource_reservations')
+            || !Schema::hasColumn(
                 'ptero_resource_reservations',
                 'purpose'
             )
-            || ! Schema::hasColumn(
+            || !Schema::hasColumn(
                 'ptero_resource_reservations',
                 'product_stock_released_at'
             )
-            || ! Schema::hasColumn('services', 'product_stock_released_at')
+            || !Schema::hasColumn('services', 'product_stock_released_at')
         ) {
             return false;
         }
@@ -250,7 +251,7 @@ class DurableFulfillmentService
      */
     public function completeCancellation(Service $service): bool
     {
-        if (! $this->isReservationBacked($service)) {
+        if (!$this->isReservationBacked($service)) {
             return false;
         }
 
@@ -260,7 +261,7 @@ class DurableFulfillmentService
                 'The durable fulfillment extension became unavailable before cancellation completed.'
             );
         }
-        if (! $reservationService->completeServiceCancellation($service)) {
+        if (!$reservationService->completeServiceCancellation($service)) {
             throw new \RuntimeException(
                 'The reservation-backed cancellation did not reach its durable terminal state.'
             );
@@ -272,8 +273,8 @@ class DurableFulfillmentService
     public function reservedServerExtensionId(Service|int $service): ?int
     {
         if (
-            ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumn(
+            !Schema::hasTable('ptero_resource_reservations')
+            || !Schema::hasColumn(
                 'ptero_resource_reservations',
                 'server_extension_id'
             )
@@ -294,32 +295,104 @@ class DurableFulfillmentService
 
     public function assertServerHostMutable(int $serverId): void
     {
+        $active = false;
         if (
-            ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumn(
+            Schema::hasTable('ptero_resource_reservations')
+            && Schema::hasColumn(
                 'ptero_resource_reservations',
                 'server_extension_id'
             )
         ) {
-            return;
+            $active = DB::table(
+                'ptero_resource_reservations as reservation'
+            )
+                ->leftJoin(
+                    'services as service',
+                    'service.id',
+                    '=',
+                    'reservation.service_id'
+                )
+                ->where(
+                    'reservation.server_extension_id',
+                    $serverId
+                )
+                ->whereIn('reservation.status', [
+                    'pending',
+                    'paid_committed',
+                    'confirmed',
+                ])
+                ->where(function ($query): void {
+                    $query->whereNull('service.status')
+                        ->orWhere(
+                            'service.status',
+                            '!=',
+                            Service::STATUS_CANCELLED
+                        );
+                })
+                ->exists();
         }
-
-        $active = DB::table('ptero_resource_reservations as reservation')
-            ->leftJoin('services as service', 'service.id', '=', 'reservation.service_id')
-            ->where('reservation.server_extension_id', $serverId)
-            ->whereIn('reservation.status', [
-                'pending',
-                'paid_committed',
-                'confirmed',
-            ])
-            ->where(function ($query): void {
-                $query->whereNull('service.status')
-                    ->orWhere('service.status', '!=', Service::STATUS_CANCELLED);
-            })
-            ->exists();
+        if (
+            !$active
+            && Schema::hasTable('service_upgrades')
+            && Schema::hasTable('products')
+        ) {
+            $active = DB::table('service_upgrades as upgrade')
+                ->join(
+                    'services as service',
+                    'service.id',
+                    '=',
+                    'upgrade.service_id'
+                )
+                ->join(
+                    'products as source_product',
+                    'source_product.id',
+                    '=',
+                    'service.product_id'
+                )
+                ->join(
+                    'products as target_product',
+                    'target_product.id',
+                    '=',
+                    'upgrade.product_id'
+                )
+                ->whereIn(
+                    'upgrade.status',
+                    ServiceUpgrade::activeStatuses()
+                )
+                ->where(function ($query) use ($serverId): void {
+                    $query->where(
+                        'source_product.server_id',
+                        $serverId
+                    )->orWhere(
+                        'target_product.server_id',
+                        $serverId
+                    );
+                })
+                ->exists();
+        }
+        if (
+            !$active
+            && Schema::hasTable('services')
+            && Schema::hasTable('products')
+        ) {
+            $active = DB::table('services as service')
+                ->join(
+                    'products as product',
+                    'product.id',
+                    '=',
+                    'service.product_id'
+                )
+                ->where('product.server_id', $serverId)
+                ->where(
+                    'service.status',
+                    '!=',
+                    Service::STATUS_CANCELLED
+                )
+                ->exists();
+        }
         if ($active) {
             throw new \RuntimeException(
-                'This Pterodactyl panel host is pinned by active capacity commitments. Drain or migrate those services before changing or removing it.'
+                'This server provisioner identity is pinned by active services or upgrade commitments. Drain or explicitly migrate them before changing or removing it.'
             );
         }
     }
@@ -332,7 +405,7 @@ class DurableFulfillmentService
         Service $service,
         bool $sendNotification = true
     ): bool {
-        if (! $this->isReservationBacked($service)) {
+        if (!$this->isReservationBacked($service)) {
             return false;
         }
         $this->assertRuntimeAvailable($service);
@@ -351,7 +424,7 @@ class DurableFulfillmentService
             ->get()
             ->sortBy('invoice_id')
             ->each(function (ServiceUpgrade $upgrade): void {
-                if ($upgrade->invoice?->status === \App\Models\Invoice::STATUS_PENDING) {
+                if ($upgrade->invoice?->status === Invoice::STATUS_PENDING) {
                     app(CancelInvoiceService::class)->handle(
                         $upgrade->invoice,
                         'Service cancellation superseded this unpaid upgrade.'
@@ -399,12 +472,11 @@ class DurableFulfillmentService
             $lockedService->refresh();
 
             if ($lockedService->status === Service::STATUS_CANCELLATION_PENDING) {
-                DB::afterCommit(
-                    fn () => TerminateJob::dispatch(
+                app(ServiceJobDispatchService::class)
+                    ->requestTerminate(
                         $lockedService,
                         $sendNotification
-                    )
-                );
+                    );
             }
 
             return true;
@@ -417,7 +489,7 @@ class DurableFulfillmentService
      */
     protected function reservationService(): ?object
     {
-        if (! class_exists(self::RESERVATION_SERVICE)) {
+        if (!class_exists(self::RESERVATION_SERVICE)) {
             return null;
         }
 
@@ -455,7 +527,7 @@ class DurableFulfillmentService
                 ->whereKey($service->id)
                 ->lockForUpdate()
                 ->firstOrFail();
-            if (! in_array($lockedService->status, [
+            if (!in_array($lockedService->status, [
                 Service::STATUS_ACTIVE,
                 Service::STATUS_SUSPENDED,
             ], true)) {
@@ -483,7 +555,7 @@ class DurableFulfillmentService
             }
 
             foreach (self::CONFIRMED_COMMITMENT_COLUMNS as $column) {
-                if (! Schema::hasColumn(
+                if (!Schema::hasColumn(
                     'ptero_resource_reservations',
                     $column
                 )) {
@@ -613,12 +685,12 @@ class DurableFulfillmentService
             || $commitment->product_stock_released_at !== null
             || (int) $commitment->external_server_id <= 0
             || (int) $commitment->external_user_id <= 0
-            || ! is_string($commitment->external_server_uuid)
-            || ! Str::isUuid($commitment->external_server_uuid)
-            || ! is_string($commitment->external_server_identifier)
+            || !is_string($commitment->external_server_uuid)
+            || !Str::isUuid($commitment->external_server_uuid)
+            || !is_string($commitment->external_server_identifier)
             || trim($commitment->external_server_identifier) === ''
             || (int) $commitment->server_extension_id <= 0
-            || ! is_string($commitment->panel_identity)
+            || !is_string($commitment->panel_identity)
             || preg_match(
                 '/^[a-f0-9]{64}$/D',
                 $commitment->panel_identity
@@ -636,7 +708,7 @@ class DurableFulfillmentService
                     512,
                     JSON_THROW_ON_ERROR
                 );
-            if (! is_array($payload)) {
+            if (!is_array($payload)) {
                 throw new \JsonException(
                     'The reservation payload is not an object.'
                 );
@@ -675,12 +747,12 @@ class DurableFulfillmentService
 
         $resources = (array) ($payload['resources'] ?? []);
         if (
-            ! is_string($commitment->configuration_fingerprint)
+            !is_string($commitment->configuration_fingerprint)
             || preg_match(
                 '/^[a-f0-9]{64}$/D',
                 $commitment->configuration_fingerprint
             ) !== 1
-            || ! hash_equals(
+            || !hash_equals(
                 $commitment->configuration_fingerprint,
                 $fingerprint
             )
@@ -696,7 +768,7 @@ class DurableFulfillmentService
                 !== strtoupper((string) $commitment->currency_code)
             || (int) ($payload['server_extension_id'] ?? 0)
                 !== (int) $commitment->server_extension_id
-            || ! hash_equals(
+            || !hash_equals(
                 (string) $commitment->panel_identity,
                 (string) ($payload['panel_identity'] ?? '')
             )
@@ -739,7 +811,7 @@ class DurableFulfillmentService
             }
         }
 
-        if (! array_is_list($value)) {
+        if (!array_is_list($value)) {
             ksort($value);
         }
 

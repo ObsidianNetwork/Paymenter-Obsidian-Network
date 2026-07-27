@@ -73,7 +73,7 @@ class CapacityInvoicePaymentService
 
     public function requiresAttention(Invoice|int $invoice): bool
     {
-        if (! Schema::hasColumn('invoices', 'payment_attention_required_at')) {
+        if (!Schema::hasColumn('invoices', 'payment_attention_required_at')) {
             return false;
         }
 
@@ -95,6 +95,10 @@ class CapacityInvoicePaymentService
         if ($this->paymentEvidenceRecoveryReason($invoiceId) !== null) {
             return;
         }
+        app(BillingChargeAttemptService::class)
+            ->assertNewPaymentAttemptAllowed($invoice);
+        app(InvoicePaymentInitiationService::class)
+            ->assertNewPaymentAttemptAllowed($invoice);
         if ($this->requiresAttention($invoice)) {
             throw new \RuntimeException(
                 'This invoice requires manual payment review. New payment attempts are disabled.'
@@ -104,25 +108,40 @@ class CapacityInvoicePaymentService
 
     public function incomingEvidenceAttentionReason(
         Invoice $invoice,
-        InvoiceTransactionStatus $status
+        InvoiceTransactionStatus $status,
+        ?int $gatewayId = null,
+        ?string $transactionId = null,
+        mixed $amount = null,
+        ?int $billingChargeAttemptId = null
     ): ?string {
         if (
-            ! in_array($status, [
+            !in_array($status, [
                 InvoiceTransactionStatus::Processing,
                 InvoiceTransactionStatus::Succeeded,
             ], true)
-            || ! $this->requiresFulfillmentCoordinator($invoice)
+            || !$this->requiresFulfillmentCoordinator($invoice)
         ) {
             return null;
         }
         if ($invoice->status === Invoice::STATUS_CANCELLED) {
-            return 'Payment evidence was recorded after the capacity-backed invoice was cancelled. Capacity remains released; do not provision, and perform refund or account-credit review.';
+            return 'Payment evidence was recorded after the invoice was cancelled. Do not fulfill it, and perform refund or account-credit review.';
         }
-        if ($this->deadlineExpired($invoice)) {
+        if (
+            $invoice->status === Invoice::STATUS_PENDING
+            && $this->deadlineExpired($invoice)
+        ) {
             return 'Payment evidence was recorded at or after the capacity guarantee deadline. Capacity remains released; do not provision, and perform refund or account-credit review.';
         }
 
-        return null;
+        return app(BillingChargeAttemptService::class)
+            ->incomingEvidenceAttentionReason(
+                $invoice,
+                $gatewayId,
+                $transactionId,
+                $amount,
+                $status,
+                $billingChargeAttemptId
+            );
     }
 
     public function recoverPaymentEvidence(
@@ -134,8 +153,8 @@ class CapacityInvoicePaymentService
             ? (int) $invoice->id
             : $invoice;
         if (
-            ! $this->requiresFulfillmentCoordinator($invoiceId)
-            && ! $this->requiresAttention($invoiceId)
+            !$this->requiresFulfillmentCoordinator($invoiceId)
+            && !$this->requiresAttention($invoiceId)
         ) {
             throw new \RuntimeException(
                 'Payment-evidence recovery is limited to capacity-backed or already-attentioned invoices.'
@@ -166,8 +185,8 @@ class CapacityInvoicePaymentService
     public function isCapacityBacked(Invoice|int $invoice): bool
     {
         if (
-            ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumn('ptero_resource_reservations', 'invoice_id')
+            !Schema::hasTable('ptero_resource_reservations')
+            || !Schema::hasColumn('ptero_resource_reservations', 'invoice_id')
         ) {
             return false;
         }
@@ -188,13 +207,28 @@ class CapacityInvoicePaymentService
     public function requiresFulfillmentCoordinator(
         Invoice|int $invoice
     ): bool {
+        if (
+            app(InvoicePaymentInitiationService::class)
+                ->hasClaim($invoice)
+        ) {
+            return true;
+        }
+        if (
+            app(BillingChargeAttemptService::class)
+                ->hasAttempt($invoice)
+        ) {
+            return true;
+        }
+        if ($this->hasServiceUpgradeObligation($invoice)) {
+            return true;
+        }
         if ($this->isCapacityBacked($invoice)) {
             return true;
         }
         if (
-            ! Schema::hasTable('invoice_items')
-            || ! Schema::hasTable('ptero_resource_reservations')
-            || ! Schema::hasColumn(
+            !Schema::hasTable('invoice_items')
+            || !Schema::hasTable('ptero_resource_reservations')
+            || !Schema::hasColumn(
                 'ptero_resource_reservations',
                 'service_id'
             )
@@ -231,6 +265,33 @@ class CapacityInvoicePaymentService
         return $query->exists();
     }
 
+    public function hasServiceUpgradeObligation(
+        Invoice|int $invoice
+    ): bool {
+        if (
+            !Schema::hasTable('invoice_items')
+            || !Schema::hasTable('service_upgrades')
+        ) {
+            return false;
+        }
+
+        $invoiceId = $invoice instanceof Invoice
+            ? (int) $invoice->id
+            : $invoice;
+        if ($invoiceId <= 0) {
+            return false;
+        }
+
+        return DB::table('invoice_items')
+            ->where('invoice_id', $invoiceId)
+            ->where('reference_type', ServiceUpgrade::class)
+            ->whereNotNull('reference_id')
+            ->exists()
+            || ServiceUpgrade::query()
+                ->where('invoice_id', $invoiceId)
+                ->exists();
+    }
+
     public function deadlineExpired(Invoice $invoice): bool
     {
         $deadline = $this->effectiveDeadline($invoice);
@@ -240,17 +301,27 @@ class CapacityInvoicePaymentService
 
     public function effectiveDeadline(Invoice $invoice): ?CarbonInterface
     {
-        if (! $this->isCapacityBacked($invoice)) {
+        $capacityBacked = $this->isCapacityBacked($invoice);
+        if (
+            !$capacityBacked
+            && !$this->hasServiceUpgradeObligation($invoice)
+        ) {
             return null;
         }
 
-        $reservationDeadline = DB::table('ptero_resource_reservations')
-            ->where('invoice_id', $invoice->id)
-            ->selectRaw('MIN(COALESCE(guaranteed_until, expires_at)) AS deadline')
-            ->value('deadline');
+        $reservationDeadline = $capacityBacked
+            ? DB::table('ptero_resource_reservations')
+                ->where('invoice_id', $invoice->id)
+                ->selectRaw(
+                    'MIN(COALESCE(guaranteed_until, expires_at)) AS deadline'
+                )
+                ->value('deadline')
+            : null;
         $deadlines = collect([
             $invoice->due_at,
-            $reservationDeadline !== null ? Carbon::parse($reservationDeadline) : null,
+            $reservationDeadline !== null
+                ? Carbon::parse($reservationDeadline)
+                : null,
         ])->filter();
 
         return $deadlines->sortBy(fn (CarbonInterface $date) => $date->getTimestamp())

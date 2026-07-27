@@ -13,9 +13,7 @@ final class StrictDecimal
 
     public const MAX_VALUE = 99_999_999_999_999.99;
 
-    private function __construct()
-    {
-    }
+    private function __construct() {}
 
     public static function parseNonNegative(
         mixed $value,
@@ -29,7 +27,7 @@ final class StrictDecimal
 
         if (is_float($value)) {
             if (
-                ! is_finite($value)
+                !is_finite($value)
                 || $value < 0
                 || $value > $maximum
                 || abs($value - round($value, self::MAX_SCALE)) > 1e-10
@@ -41,9 +39,9 @@ final class StrictDecimal
         }
 
         if (
-            ! is_string($value)
+            !is_string($value)
             || preg_match(
-                '/^(?:0|[1-9]\d*)(?:\.\d{1,'.self::MAX_SCALE.'})?$/D',
+                '/^(?:0|[1-9]\d*)(?:\.\d{1,' . self::MAX_SCALE . '})?$/D',
                 $value
             ) !== 1
         ) {

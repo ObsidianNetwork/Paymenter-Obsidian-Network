@@ -144,22 +144,22 @@ class DynamicSliderReservationFlowTest extends TestCase
         $this->assertSame($user->id, $cart->fresh()->user_id);
     }
 
-    public function test_free_service_dispatch_is_deferred_until_commit(): void
+    public function test_free_service_dispatch_is_durably_recorded(): void
     {
         $contents = file_get_contents(app_path('Livewire/Cart.php'));
 
         $this->assertStringContainsString(
-            'DB::afterCommit(fn () => CreateJob::dispatch($service))',
+            '->requestCreate($service)',
             $contents
         );
     }
 
-    public function test_paid_service_dispatch_is_deferred_until_payment_commit(): void
+    public function test_paid_service_dispatch_is_durably_recorded(): void
     {
         $contents = file_get_contents(app_path('Services/Service/RenewServiceService.php'));
 
         $this->assertStringContainsString(
-            'CreateJob::dispatch($service)->afterCommit()',
+            '->requestCreate($service)',
             $contents
         );
     }
