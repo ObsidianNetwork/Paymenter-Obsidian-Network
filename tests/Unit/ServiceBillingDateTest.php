@@ -6,7 +6,7 @@ use App\Models\Plan;
 use App\Models\Product;
 use App\Models\Service;
 use Carbon\CarbonImmutable;
-use PHPUnit\Framework\TestCase;
+use Tests\TestCase;
 
 class ServiceBillingDateTest extends TestCase
 {

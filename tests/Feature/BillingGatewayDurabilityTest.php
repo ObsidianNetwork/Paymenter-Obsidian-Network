@@ -43,6 +43,7 @@ class BillingGatewayDurabilityTest extends TestCase
                 static fn () => null
             )->name('account.payment-methods');
         }
+        app('router')->getRoutes()->refreshNameLookups();
         Http::fake(function (HttpRequest $request) {
             if (
                 str_ends_with(

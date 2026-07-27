@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Enums\InvoiceTransactionStatus;
 use App\Exceptions\DisplayException;
 use App\Exceptions\PermanentProvisioningException;
+use App\Helpers\ExtensionHelper;
+use App\Jobs\Server\UpgradeJob;
 use App\Models\ConfigOption;
 use App\Models\ConfigOptionProduct;
 use App\Models\Coupon;
@@ -17,13 +19,16 @@ use App\Models\User;
 use App\Services\Service\CapacityServiceCreationCoordinator;
 use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
+use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
 use App\Services\ServiceUpgrade\ServiceUpgradeService;
 use App\Services\ServiceUpgrade\UpgradeFailureAlertService;
 use App\Services\ServiceUpgrade\UpgradeGuaranteeService;
 use App\Support\LegacyServiceUpgradeMigration;
 use Carbon\Carbon;
+use Illuminate\Bus\UniqueLock;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Mockery\MockInterface;
 use Tests\TestCase;
 
@@ -51,7 +56,7 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'currency_code' => 'USD',
             'quantity' => 1,
             'price' => 7,
-            'expires_at' => null,
+            'expires_at' => now()->addMonth()->startOfDay(),
         ]);
         FulfillmentStatusTransitionService::run(
             $service,
@@ -548,15 +553,20 @@ class ServiceUpgradeLifecycleTest extends TestCase
             );
         }
 
-        $this->assertSame('10.00', (string) $service->fresh()->price);
+        $this->assertSame(
+            '10.00',
+            number_format((float) $service->fresh()->price, 2, '.', '')
+        );
     }
 
     public function test_upgrade_completion_never_reprices_an_issued_renewal_invoice(): void
     {
+        Queue::fake();
         $source = $this->createProduct();
         $target = $this->createProduct();
         $target->plan->prices()->update(['price' => 20]);
         $target->plan->load('prices');
+        $source->product->upgrades()->attach($target->product->id);
         $user = User::factory()->create();
         $service = Service::factory()->create([
             'user_id' => $user->id,
@@ -568,29 +578,15 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'price' => 10,
             'expires_at' => now()->addMonth()->startOfDay(),
         ]);
-        $renewal = Invoice::factory()->create([
-            'user_id' => $user->id,
-            'currency_code' => 'USD',
-            'status' => Invoice::STATUS_PENDING,
-            'due_at' => $service->expires_at,
-        ]);
-        $renewalItem = $renewal->items()->create([
-            'reference_id' => $service->id,
-            'reference_type' => Service::class,
-            'description' => 'Issued renewal',
-            'quantity' => 1,
-            'price' => 10,
-        ]);
         $upgrade = ServiceUpgrade::create([
             'service_id' => $service->id,
             'product_id' => $target->product->id,
             'plan_id' => $target->plan->id,
-            'status' => ServiceUpgrade::STATUS_PROVISIONING,
+            'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
-            'provisioning_attempts' => 1,
-            'quoted_amount' => 0,
             'currency_code' => 'USD',
+            'capacity_mode' => ServiceUpgrade::CAPACITY_MODE_STATIC,
         ]);
         $upgrade->load([
             'service.product.server.settings',
@@ -605,11 +601,56 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'configs.configValue',
         ]);
         $upgrade->captureSnapshots();
-        $upgrade->save();
+        $upgrade->quoted_amount = $upgrade->signedUpgradePrice()->price;
+        $upgrade->credit_amount = $upgrade->signedCreditAmount();
+        ServiceUpgradeMutationCoordinator::save($upgrade);
+        $upgradeInvoice = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'currency_code' => 'USD',
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => now()->addDays(7),
+        ]);
+        $upgradeInvoice->items()->create([
+            'reference_id' => $upgrade->id,
+            'reference_type' => ServiceUpgrade::class,
+            'description' => 'Product upgrade',
+            'quantity' => 1,
+            'price' => $upgrade->quoted_amount,
+        ]);
+        $upgrade->invoice_id = $upgradeInvoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
+        ExtensionHelper::addPayment(
+            $upgradeInvoice,
+            null,
+            $upgrade->quoted_amount,
+            transactionId: 'immutable-renewal-upgrade'
+        );
+        (new UniqueLock(app('cache')->store()))
+            ->release(new UpgradeJob($upgrade));
+
+        $renewal = Invoice::factory()->create([
+            'user_id' => $user->id,
+            'currency_code' => 'USD',
+            'status' => Invoice::STATUS_PENDING,
+            'due_at' => $service->expires_at,
+        ]);
+        $renewalItem = $renewal->items()->create([
+            'reference_id' => $service->id,
+            'reference_type' => Service::class,
+            'description' => 'Issued renewal',
+            'quantity' => 1,
+            'price' => 10,
+        ]);
+        $upgrade = app(ServiceUpgradeService::class)
+            ->beginProvisioning($upgrade->fresh());
+        $this->assertNotNull($upgrade);
 
         app(ServiceUpgradeService::class)->complete($upgrade);
 
-        $this->assertSame('20.00', (string) $service->fresh()->price);
+        $this->assertSame(
+            '20.00',
+            number_format((float) $service->fresh()->price, 2, '.', '')
+        );
         $this->assertSame(
             '10.00',
             (string) $renewalItem->fresh()->price
@@ -773,7 +814,6 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'service_id' => $service->id,
             'product_id' => $fixture->product->id,
             'plan_id' => $fixture->plan->id,
-            'invoice_id' => $invoice->id,
             'status' => ServiceUpgrade::STATUS_PENDING,
             'type' => 'product',
         ]);
@@ -784,6 +824,8 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'reference_id' => $upgrade->id,
             'reference_type' => ServiceUpgrade::class,
         ]);
+        $upgrade->invoice_id = $invoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
 
         return [$upgrade, $invoice];
     }

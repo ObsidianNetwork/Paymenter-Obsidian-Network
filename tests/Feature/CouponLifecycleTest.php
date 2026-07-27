@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Coupon;
 use App\Models\Service;
+use App\Models\User;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -62,6 +63,7 @@ class CouponLifecycleTest extends TestCase
         $coupon = $this->coupon();
         $service = Service::factory()->create([
             'coupon_id' => $coupon->id,
+            'user_id' => User::factory()->create()->id,
         ]);
 
         return [$coupon, $service];

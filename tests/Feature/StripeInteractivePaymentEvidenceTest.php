@@ -465,7 +465,7 @@ class StripeInteractivePaymentEvidenceTest extends TestCase
             ]);
         }
         DB::table('extensions')
-            ->whereKey($gateway->id)
+            ->where('id', $gateway->id)
             ->update(['enabled' => true]);
 
         return $gateway->fresh();

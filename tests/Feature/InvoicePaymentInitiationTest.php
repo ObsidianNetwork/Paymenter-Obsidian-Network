@@ -44,6 +44,11 @@ namespace Paymenter\Extensions\Gateways\ClaimFake {
             return true;
         }
 
+        public function paymentInitiationIdempotencyRetryWindowSeconds(): int
+        {
+            return 60 * 60;
+        }
+
         public function payInvoiceInitiation(
             InvoicePaymentInitiation $initiation
         ): mixed {
@@ -359,7 +364,7 @@ namespace Tests\Feature {
                     $fixture['invoice']->fresh(),
                     $fixture['agreement']->fresh()
                 ),
-                'payment review'
+                'not eligible'
             );
         }
 
@@ -542,9 +547,15 @@ namespace Tests\Feature {
                 providerCurrency: 'USD',
                 providerResourceReference: (string) $claim->provider_reference
             );
+            $invoice = $fixture['invoice']->fresh();
+            $claim = $claim->fresh();
             $this->assertNotNull(
-                $fixture['invoice']->fresh()
-                    ->payment_attention_required_at
+                $invoice->payment_attention_required_at
+            );
+            $this->assertTrue($claim->attention_reconcilable);
+            $this->assertSame(
+                $claim->attention_reason,
+                $invoice->payment_attention_reason
             );
 
             ClaimFake::$reconciliationStatus = 'failed';
@@ -572,6 +583,121 @@ namespace Tests\Feature {
                     ->status
             );
             $this->assertNull($claim->fresh()->active_invoice_id);
+        }
+
+        public function test_failed_callback_cannot_steal_or_clear_unrelated_attention(): void
+        {
+            $fixture = $this->createFixture();
+            ExtensionHelper::pay(
+                $fixture['gateway'],
+                $fixture['invoice']
+            );
+            $claim = InvoicePaymentInitiation::query()
+                ->where('invoice_id', $fixture['invoice']->id)
+                ->sole();
+            $fixture['invoice']->forceFill([
+                'payment_attention_required_at' => now(),
+                'payment_attention_reason' => 'Unrelated operator review.',
+                'payment_attention_alerted_at' => now(),
+            ])->save();
+
+            ExtensionHelper::addFailedPayment(
+                $fixture['invoice']->id,
+                $fixture['gateway'],
+                '10.00',
+                transactionId: 'unrelated-attention-failure',
+                providerCurrency: 'USD',
+                providerResourceReference: (string) $claim->provider_reference
+            );
+
+            $invoice = $fixture['invoice']->fresh();
+            $claim = $claim->fresh();
+            $this->assertSame(
+                'Unrelated operator review.',
+                $invoice->payment_attention_reason
+            );
+            $this->assertFalse($claim->attention_reconcilable);
+
+            ClaimFake::$reconciliationStatus = 'failed';
+            ClaimFake::$providerStatus = 'canceled';
+            ClaimFake::$reconciliationTransactionId =
+                'unrelated-attention-failure';
+            $this->assertSame(
+                'skipped',
+                app(InvoicePaymentInitiationService::class)
+                    ->reconcile($claim, true)
+            );
+
+            $invoice->refresh();
+            $this->assertNotNull(
+                $invoice->payment_attention_required_at
+            );
+            $this->assertSame(
+                'Unrelated operator review.',
+                $invoice->payment_attention_reason
+            );
+            $this->assertSame(
+                $invoice->id,
+                $claim->fresh()->active_invoice_id
+            );
+        }
+
+        public function test_succeeded_conflicting_callback_preserves_unrelated_attention(): void
+        {
+            $fixture = $this->createFixture();
+            ExtensionHelper::pay(
+                $fixture['gateway'],
+                $fixture['invoice']
+            );
+            $claim = InvoicePaymentInitiation::query()
+                ->where('invoice_id', $fixture['invoice']->id)
+                ->sole();
+            $fixture['invoice']->forceFill([
+                'payment_attention_required_at' => now(),
+                'payment_attention_reason' => 'Unrelated operator review.',
+                'payment_attention_alerted_at' => now(),
+            ])->save();
+
+            ExtensionHelper::addPayment(
+                $fixture['invoice']->id,
+                $fixture['gateway'],
+                '11.00',
+                transactionId: 'unrelated-attention-success',
+                providerCurrency: 'USD',
+                providerResourceReference: (string) $claim->provider_reference
+            );
+
+            $invoice = $fixture['invoice']->fresh();
+            $claim = $claim->fresh();
+            $this->assertSame(
+                Invoice::STATUS_PENDING,
+                $invoice->status
+            );
+            $this->assertSame(
+                'Unrelated operator review.',
+                $invoice->payment_attention_reason
+            );
+            $this->assertFalse($claim->attention_reconcilable);
+            $this->assertSame(
+                InvoiceTransactionStatus::Succeeded,
+                $invoice->transactions()
+                    ->where(
+                        'transaction_id',
+                        'unrelated-attention-success'
+                    )
+                    ->sole()
+                    ->status
+            );
+            $this->assertSame(
+                'skipped',
+                app(InvoicePaymentInitiationService::class)
+                    ->reconcile($claim, true)
+            );
+            $this->assertSame(
+                'Unrelated operator review.',
+                $invoice->fresh()
+                    ->payment_attention_reason
+            );
         }
 
         public function test_conflicting_provider_evidence_is_persisted_without_settling_the_invoice(): void
@@ -1150,7 +1276,7 @@ namespace Tests\Feature {
                 'user_id' => $user->id,
                 'gateway_id' => $gateway->id,
                 'name' => 'Saved method',
-                'external_reference' => 'saved-method',
+                'external_reference' => "saved-method-{$user->id}",
                 'type' => 'card',
             ]);
             $invoice = $this->createInvoice($user);

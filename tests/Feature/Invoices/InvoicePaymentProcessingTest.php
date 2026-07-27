@@ -18,6 +18,7 @@ use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Service\DurableFulfillmentService;
 use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
+use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
 use App\Services\ServiceUpgrade\ServiceUpgradePricingService;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Database\QueryException;
@@ -965,7 +966,9 @@ class InvoicePaymentProcessingTest extends TestCase
         $this->assertOrderedSourceMarkers($cancelled, [
             '$services = Service::query()',
             '$upgrades = ServiceUpgrade::query()',
-            '$reservations = DB::table(',
+            '$reservations = Schema::hasTable(',
+            "? DB::table('ptero_resource_reservations')",
+            '->lockForUpdate()',
             '$items = $invoice->items()',
         ]);
         $this->assertStringContainsString(
@@ -1693,6 +1696,10 @@ class InvoicePaymentProcessingTest extends TestCase
         $user = User::factory()->create();
         $source = $this->createProduct();
         $target = $this->createProduct();
+        $target->plan->prices()
+            ->where('currency_code', 'USD')
+            ->update(['price' => '20.00']);
+        $source->product->upgrades()->attach($target->product->id);
         $service = Service::factory()->create([
             'user_id' => $user->id,
             'product_id' => $source->product->id,
@@ -1701,6 +1708,7 @@ class InvoicePaymentProcessingTest extends TestCase
             'quantity' => 1,
             'currency_code' => 'USD',
             'price' => 10,
+            'expires_at' => now()->addMonth()->startOfDay(),
         ]);
         $invoice = Invoice::factory()->create([
             'user_id' => $user->id,
@@ -1712,7 +1720,6 @@ class InvoicePaymentProcessingTest extends TestCase
             'service_id' => $service->id,
             'product_id' => $target->product->id,
             'plan_id' => $target->plan->id,
-            'invoice_id' => $invoice->id,
             'status' => $upgradeStatus,
             'type' => 'product',
             'active_service_guard_id' => in_array($upgradeStatus, [
@@ -1721,18 +1728,22 @@ class InvoicePaymentProcessingTest extends TestCase
             ], true)
                 ? $service->id
                 : null,
-            'quoted_amount' => 10,
             'currency_code' => 'USD',
+            'capacity_mode' => ServiceUpgrade::CAPACITY_MODE_STATIC,
         ]);
         $upgrade->captureSnapshots();
+        $upgrade->quoted_amount = $upgrade->signedUpgradePrice()->price;
+        $upgrade->credit_amount = $upgrade->signedCreditAmount();
         $upgrade->save();
         $invoice->items()->create([
             'reference_type' => ServiceUpgrade::class,
             'reference_id' => $upgrade->id,
-            'price' => 10,
+            'price' => $upgrade->quoted_amount,
             'quantity' => 1,
             'description' => 'Resource upgrade',
         ]);
+        $upgrade->invoice_id = $invoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
 
         return [$invoice->fresh('items'), $upgrade];
     }
@@ -1746,7 +1757,11 @@ class InvoicePaymentProcessingTest extends TestCase
     ): void {
         $previous = -1;
         foreach ($markers as $marker) {
-            $position = strpos($source, $marker);
+            $position = strpos(
+                $source,
+                $marker,
+                $previous + 1
+            );
             $this->assertNotFalse(
                 $position,
                 "Missing lock-order marker: {$marker}"

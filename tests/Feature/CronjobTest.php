@@ -17,10 +17,12 @@ use App\Models\User;
 use App\Services\Invoice\CancelInvoiceService;
 use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
+use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Symfony\Component\Console\Output\NullOutput;
 use Tests\TestCase;
 
 class CronjobTest extends TestCase
@@ -82,7 +84,10 @@ class CronjobTest extends TestCase
             '5.00',
             (string) $firstRenewal->items()->firstOrFail()->price
         );
-        $this->assertSame('5.00', (string) $service->fresh()->price);
+        $this->assertSame(
+            '5.00',
+            number_format((float) $service->fresh()->price, 2, '.', '')
+        );
 
         DB::table('invoices')
             ->where('id', $firstRenewal->id)
@@ -104,7 +109,10 @@ class CronjobTest extends TestCase
             '10.00',
             (string) $secondRenewal->items()->firstOrFail()->price
         );
-        $this->assertSame('10.00', (string) $service->fresh()->price);
+        $this->assertSame(
+            '10.00',
+            number_format((float) $service->fresh()->price, 2, '.', '')
+        );
 
         $legacyService = Service::factory()->create([
             'user_id' => $user->id,
@@ -216,7 +224,10 @@ class CronjobTest extends TestCase
             '10.00',
             (string) $cycleThree->items()->firstOrFail()->price
         );
-        $this->assertSame('10.00', (string) $service->fresh()->price);
+        $this->assertSame(
+            '10.00',
+            number_format((float) $service->fresh()->price, 2, '.', '')
+        );
         $this->assertSame(
             2,
             $service->fresh()->billing_cycles_completed,
@@ -228,6 +239,7 @@ class CronjobTest extends TestCase
     public function test_failed_cron_row_rolls_back_without_blocking_later_rows(): void
     {
         $command = app(CronJob::class);
+        $command->setOutput(new NullOutput);
         $runner = new \ReflectionMethod(CronJob::class, 'runCronRow');
         $runner->setAccessible(true);
 
@@ -355,7 +367,7 @@ class CronjobTest extends TestCase
             'quantity' => 1,
             'description' => 'Renewal',
         ]);
-        $renewedUntil = now()->addMonth()->startOfSecond();
+        $renewedUntil = now()->addMonthNoOverflow()->startOfDay();
         $this->mock(CancelInvoiceService::class)
             ->shouldReceive('handle')
             ->once()
@@ -549,7 +561,7 @@ class CronjobTest extends TestCase
                 'service_id' => $service->id,
                 'product_id' => $product->product->id,
                 'plan_id' => $product->plan->id,
-                'invoice_id' => $upgradeInvoice->id,
+                'invoice_id' => null,
                 'status' => $status,
                 'type' => 'product',
                 'active_service_guard_id' => $service->id,
@@ -561,6 +573,8 @@ class CronjobTest extends TestCase
                 'reference_type' => ServiceUpgrade::class,
                 'reference_id' => $upgrade->id,
             ]);
+            $upgrade->invoice_id = $upgradeInvoice->id;
+            ServiceUpgradeMutationCoordinator::save($upgrade);
             $fixtures[] = [$service, $upgradeInvoice];
         }
 
@@ -879,7 +893,7 @@ class CronjobTest extends TestCase
             'service_id' => $service->id,
             'product_id' => $product->product->id,
             'plan_id' => $product->plan->id,
-            'invoice_id' => $upgradeInvoice->id,
+            'invoice_id' => null,
             'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
@@ -891,6 +905,8 @@ class CronjobTest extends TestCase
             'reference_type' => ServiceUpgrade::class,
             'reference_id' => $upgrade->id,
         ]);
+        $upgrade->invoice_id = $upgradeInvoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
         Queue::fake();
 
         $this->artisan('app:cron-job')->assertExitCode(0);
@@ -949,7 +965,7 @@ class CronjobTest extends TestCase
             'service_id' => $service->id,
             'product_id' => $product->product->id,
             'plan_id' => $product->plan->id,
-            'invoice_id' => $upgradeInvoice->id,
+            'invoice_id' => null,
             'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
@@ -961,6 +977,8 @@ class CronjobTest extends TestCase
             'reference_type' => ServiceUpgrade::class,
             'reference_id' => $upgrade->id,
         ]);
+        $upgrade->invoice_id = $upgradeInvoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
         $upgradeInvoice->transactions()->create([
             'gateway_id' => null,
             'amount' => '5.00',
@@ -1200,7 +1218,7 @@ class CronjobTest extends TestCase
             'service_id' => $service->id,
             'product_id' => $product->product->id,
             'plan_id' => $product->plan->id,
-            'invoice_id' => $invoice->id,
+            'invoice_id' => null,
             'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
@@ -1212,6 +1230,8 @@ class CronjobTest extends TestCase
             'reference_type' => ServiceUpgrade::class,
             'reference_id' => $upgrade->id,
         ]);
+        $upgrade->invoice_id = $invoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
 
         return [$invoice, $upgrade];
     }

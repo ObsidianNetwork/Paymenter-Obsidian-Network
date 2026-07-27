@@ -9,6 +9,7 @@ use App\Jobs\Server\UnsuspendJob;
 use App\Models\Service;
 use App\Models\ServiceJobDispatch;
 use App\Models\User;
+use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\Service\ServiceJobDispatchService;
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -30,8 +31,13 @@ class ServiceJobDispatchRecoveryTest extends TestCase
 
         try {
             DB::transaction(function () use ($service): void {
-                $service->status = Service::STATUS_SUSPENDED;
-                $service->save();
+                FulfillmentStatusTransitionService::run(
+                    $service,
+                    function () use ($service): void {
+                        $service->status = Service::STATUS_SUSPENDED;
+                        $service->save();
+                    }
+                );
                 app(ServiceJobDispatchService::class)
                     ->requestSuspend($service);
 
@@ -105,8 +111,13 @@ class ServiceJobDispatchRecoveryTest extends TestCase
         $dispatches->requestSuspend($service);
         $staleSuspend = Queue::pushed(SuspendJob::class)->first();
 
-        $service->status = Service::STATUS_ACTIVE;
-        $service->save();
+        FulfillmentStatusTransitionService::run(
+            $service,
+            function () use ($service): void {
+                $service->status = Service::STATUS_ACTIVE;
+                $service->save();
+            }
+        );
         $dispatches->requestUnsuspend($service);
         $currentUnsuspend = Queue::pushed(UnsuspendJob::class)->first();
 
@@ -137,8 +148,13 @@ class ServiceJobDispatchRecoveryTest extends TestCase
         $dispatches->requestCreate($service);
         $staleCreate = Queue::pushed(CreateJob::class)->first();
 
-        $service->status = Service::STATUS_CANCELLED;
-        $service->save();
+        FulfillmentStatusTransitionService::run(
+            $service,
+            function () use ($service): void {
+                $service->status = Service::STATUS_CANCELLED;
+                $service->save();
+            }
+        );
         $dispatches->requestTerminate($service);
         $currentTerminate = Queue::pushed(TerminateJob::class)->first();
 
@@ -174,8 +190,13 @@ class ServiceJobDispatchRecoveryTest extends TestCase
                 $dispatches,
                 $service
             ): void {
-                $service->status = Service::STATUS_SUSPENDED;
-                $service->save();
+                FulfillmentStatusTransitionService::run(
+                    $service,
+                    function () use ($service): void {
+                        $service->status = Service::STATUS_SUSPENDED;
+                        $service->save();
+                    }
+                );
                 $dispatches->requestSuspend($service);
             });
             $this->fail(

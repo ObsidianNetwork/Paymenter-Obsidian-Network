@@ -315,7 +315,8 @@ class InvoicePaymentInitiationService
                     || $initiation->created_at->copy()
                         ->addSeconds(
                             $this->idempotencyRetryWindow(
-                                $initiation
+                                $initiation,
+                                $gateway
                             )
                         )
                         ->isPast()
@@ -1820,17 +1821,34 @@ class InvoicePaymentInitiationService
                         $providerResourceReference
                     );
                 if ($attentionReason !== null) {
+                    $claimOwnsAttention =
+                        $invoice
+                            ->payment_attention_required_at === null
+                        || $this->claimOwnsReconciliationAttention(
+                            $invoice,
+                            $initiation
+                        );
+                    $preserveExistingAttention =
+                        !$claimOwnsAttention;
                     $reconcilable =
                         $status ===
                             InvoiceTransactionStatus::Failed
                         && (int) $initiation
-                            ->active_invoice_id === $invoiceId;
+                            ->active_invoice_id === $invoiceId
+                        && !$preserveExistingAttention;
                     $this->markAttentionLocked(
                         $invoice,
                         $initiation,
                         $attentionReason,
                         $reconcilable
                     );
+                    $recoveryReason = trim(
+                        (string) $invoice
+                            ->payment_attention_reason
+                    );
+                    if ($recoveryReason === '') {
+                        $recoveryReason = $attentionReason;
+                    }
                     if (
                         (int) $initiation->active_invoice_id
                             !== $invoiceId
@@ -1859,8 +1877,9 @@ class InvoicePaymentInitiationService
                         CapacityInvoicePaymentService::class
                     )->recoverPaymentEvidence(
                         $invoiceId,
-                        $attentionReason,
-                        $persist
+                        $recoveryReason,
+                        $persist,
+                        preserveExistingAttention: $preserveExistingAttention
                     );
                     $this->assertPersistedEvidence(
                         $result,
@@ -2577,8 +2596,17 @@ class InvoicePaymentInitiationService
     }
 
     private function idempotencyRetryWindow(
-        InvoicePaymentInitiation $initiation
+        InvoicePaymentInitiation $initiation,
+        Gateway $gateway
     ): int {
+        $declaredWindow =
+            ExtensionHelper::paymentInitiationIdempotencyRetryWindowSeconds(
+                $gateway
+            );
+        if ($declaredWindow > 0) {
+            return $declaredWindow;
+        }
+
         return match (
             strtolower((string) $initiation->gateway_extension)
         ) {

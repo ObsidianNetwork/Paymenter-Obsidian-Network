@@ -316,6 +316,7 @@ class CreditInvoicePaymentServiceTest extends TestCase
         $component->amount = 10;
         $component->gateway = 999;
         $component->gateways = [['id' => 999]];
+        $transactionLevel = DB::transactionLevel();
 
         try {
             $component->addCredit();
@@ -327,7 +328,10 @@ class CreditInvoicePaymentServiceTest extends TestCase
             );
         }
 
-        $this->assertSame(0, DB::transactionLevel());
+        $this->assertSame(
+            $transactionLevel,
+            DB::transactionLevel()
+        );
         $this->assertSame(0, Invoice::query()->count());
         $this->assertSame(
             '95.00',

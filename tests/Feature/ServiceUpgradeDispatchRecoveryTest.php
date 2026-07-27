@@ -236,6 +236,9 @@ class ServiceUpgradeDispatchRecoveryTest extends TestCase
             'plan_id' => $fixture->plan->id,
             'status' => $status,
             'type' => 'product',
+            'provisioning_started_at' => $status === ServiceUpgrade::STATUS_PROVISIONING
+                    ? now()
+                    : null,
             'active_service_guard_id' => in_array(
                 $status,
                 [

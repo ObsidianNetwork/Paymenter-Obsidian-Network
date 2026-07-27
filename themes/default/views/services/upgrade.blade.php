@@ -19,6 +19,13 @@
         'enabled' => $usesDynamicStock,
         'expectedBoundIds' => $dynamicStockOptionIds,
     ];
+    $upgradeButtonAction = $this->upgradeConfigOptions()->count() > 0 && $step == 1
+        ? 'nextStep'
+        : 'doUpgrade';
+    $upgradeButtonLabel = $upgradeProduct && $this->upgradeConfigOptions()->count() > 0 && $step == 1
+        ? __('services.next_step')
+        : __('services.upgrade');
+    $dynamicUpgradeGate = $usesDynamicStock && $step > 1;
 @endphp
 <div
     class="container mt-14"
@@ -232,21 +239,23 @@
             </div>
 
             <div class="flex flex-row justify-end gap-2 mt-2">
-                <x-button.primary
-                    class="h-fit"
-                    :wire:click="($this->upgradeConfigOptions()->count() > 0 && $step == 1)? 'nextStep' : 'doUpgrade'"
-                    @if ($this->hasDynamicSliderOptions() && $step > 1)
+                @if ($dynamicUpgradeGate)
+                    <x-button.primary
+                        class="h-fit"
+                        :wire:click="$upgradeButtonAction"
                         x-bind:disabled="!canCheckout"
                         x-bind:aria-disabled="(!canCheckout).toString()"
-                    @endif
-                >
-                    {{-- If the next upgradeProduct supports config upgrades, show those --}}
-                    @if($upgradeProduct && $this->upgradeConfigOptions()->count() > 0 && $step == 1)
-                        <span>{{ __('services.next_step') }}</span>
-                    @else
-                        <span>{{ __('services.upgrade') }}</span>
-                    @endif
-                </x-button.primary>
+                    >
+                        <span>{{ $upgradeButtonLabel }}</span>
+                    </x-button.primary>
+                @else
+                    <x-button.primary
+                        class="h-fit"
+                        :wire:click="$upgradeButtonAction"
+                    >
+                        <span>{{ $upgradeButtonLabel }}</span>
+                    </x-button.primary>
+                @endif
             </div>
         </div>
     </div>

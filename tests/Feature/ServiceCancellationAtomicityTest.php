@@ -45,11 +45,13 @@ class ServiceCancellationAtomicityTest extends TestCase
             'reference_id' => $service->id,
         ]);
 
+        $queueManager = app('queue');
         Queue::shouldReceive('push')
             ->once()
             ->andThrow(new RuntimeException('Queue broker unavailable.'));
         $dispatch = app(ServiceJobDispatchService::class)
             ->requestCreate($service);
+        Queue::swap($queueManager);
         $this->mock(CancelInvoiceService::class)
             ->shouldReceive('handle')
             ->once()

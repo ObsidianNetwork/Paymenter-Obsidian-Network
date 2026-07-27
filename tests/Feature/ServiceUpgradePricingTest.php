@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Exceptions\DisplayException;
 use App\Models\ConfigOption;
+use App\Models\ConfigOptionProduct;
 use App\Models\Coupon;
 use App\Models\Invoice;
 use App\Models\Plan;
@@ -1332,7 +1333,10 @@ class ServiceUpgradePricingTest extends TestCase
             'hidden' => false,
             'upgradable' => true,
         ]);
-        $target->product->configOptions()->attach($parent);
+        ConfigOptionProduct::create([
+            'product_id' => $target->product->id,
+            'config_option_id' => $parent->id,
+        ]);
         $child = ConfigOption::create([
             'name' => 'Premium',
             'env_variable' => 'premium',

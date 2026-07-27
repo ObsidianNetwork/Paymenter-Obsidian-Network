@@ -11,7 +11,6 @@ use App\Models\Order;
 use App\Models\Service;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Once;
 use Livewire\Livewire;
@@ -175,8 +174,7 @@ class CheckoutTest extends TestCase
             'checkout_config' => [],
             'quantity' => 1,
         ]);
-        Cookie::queue('cart', $cart->ulid);
-        app('request')->cookies->set('cart', $cart->ulid);
+        Livewire::withCookie('cart', $cart->ulid);
         Once::flush();
 
         Livewire::actingAs($user)
@@ -190,7 +188,6 @@ class CheckoutTest extends TestCase
 
         // Recreate the stale browser cookie that a concurrent request already
         // carried before the first checkout committed.
-        app('request')->cookies->set('cart', $cart->ulid);
         Once::flush();
         Livewire::actingAs($user)
             ->test('cart')
@@ -233,8 +230,7 @@ class CheckoutTest extends TestCase
             'checkout_config' => [],
             'quantity' => 1,
         ]);
-        Cookie::queue('cart', $cart->ulid);
-        app('request')->cookies->set('cart', $cart->ulid);
+        Livewire::withCookie('cart', $cart->ulid);
         Once::flush();
 
         $component = Livewire::actingAs($user)->test('cart');

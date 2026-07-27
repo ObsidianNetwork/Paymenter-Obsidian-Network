@@ -485,7 +485,7 @@ class InteractiveGatewayReconciliationTest extends TestCase
             ]);
         }
         DB::table('extensions')
-            ->whereKey($gateway->id)
+            ->where('id', $gateway->id)
             ->update(['enabled' => true]);
         $gateway = $gateway->fresh();
         $invoice = Invoice::factory()->create([

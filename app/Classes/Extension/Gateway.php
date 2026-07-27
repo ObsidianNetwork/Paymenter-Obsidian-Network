@@ -120,6 +120,18 @@ abstract class Gateway extends Extension
         return false;
     }
 
+    /**
+     * The period for which the provider guarantees that replaying one
+     * interactive-payment idempotency key cannot create a second charge.
+     *
+     * Custom durable gateways must opt in explicitly before Paymenter will
+     * replay a lost or repeated provider-open request.
+     */
+    public function paymentInitiationIdempotencyRetryWindowSeconds(): int
+    {
+        return 0;
+    }
+
     public function payInvoiceInitiation(
         InvoicePaymentInitiation $initiation
     ): mixed {

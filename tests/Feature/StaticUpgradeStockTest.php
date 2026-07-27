@@ -63,11 +63,24 @@ class StaticUpgradeStockTest extends TestCase
 
     public function test_only_one_upgrade_can_reserve_the_last_target_unit(): void
     {
-        [$firstService, $firstUpgrade, $target] =
-            $this->upgradeFixture(targetStock: 1);
+        $target = $this->createProduct(['stock' => 1]);
+        $sourceAttributes = [
+            'stock' => 0,
+            'server_id' => $target->product->server_id,
+        ];
+        $firstSource = $this->createProduct($sourceAttributes);
+        $secondSource = $this->createProduct($sourceAttributes);
+        $firstSource->product->upgrades()
+            ->attach($target->product->id);
+        $secondSource->product->upgrades()
+            ->attach($target->product->id);
+        [$firstService, $firstUpgrade] = $this->upgradeFixture(
+            target: $target,
+            source: $firstSource
+        );
         [$secondService, $secondUpgrade] = $this->upgradeFixture(
             target: $target,
-            targetStock: 1
+            source: $secondSource
         );
         $stock = app(StaticUpgradeStockService::class);
 
@@ -528,9 +541,18 @@ class StaticUpgradeStockTest extends TestCase
     public function test_exact_paid_replay_after_deadline_remains_idempotent(): void
     {
         Queue::fake();
+        $target = $this->createProduct(['stock' => 1]);
+        $target->plan->prices()
+            ->where('currency_code', 'USD')
+            ->update(['price' => '15.00']);
         [$service, $upgrade] = $this->upgradeFixture(
+            target: $target,
             targetStock: 1,
             quotedAmount: 5
+        );
+        $this->assertSame(
+            '5.00',
+            data_get($upgrade->target_snapshot, 'upgrade_price')
         );
         DB::transaction(
             fn () => app(StaticUpgradeStockService::class)
@@ -634,6 +656,7 @@ class StaticUpgradeStockTest extends TestCase
             'quantity' => 1,
             'currency_code' => 'USD',
             'price' => '10.00',
+            'expires_at' => now()->addMonth()->startOfDay(),
         ]);
         $upgrade = ServiceUpgrade::create([
             'service_id' => $service->id,
@@ -775,7 +798,6 @@ class StaticUpgradeStockTest extends TestCase
 
     public function test_cross_product_completion_removes_obsolete_configs(): void
     {
-        [$service, $upgrade] = $this->upgradeFixture();
         $obsolete = ConfigOption::create([
             'name' => 'Legacy option',
             'env_variable' => 'legacy_option',
@@ -784,13 +806,15 @@ class StaticUpgradeStockTest extends TestCase
             'hidden' => false,
             'upgradable' => false,
         ]);
-        ServiceConfig::create([
-            'configurable_id' => $service->id,
-            'configurable_type' => Service::class,
-            'config_option_id' => $obsolete->id,
-            'config_value_id' => null,
-            'slider_value' => null,
-        ]);
+        [$service, $upgrade] = $this->upgradeFixture(
+            beforeQuote: fn (Service $service) => ServiceConfig::create([
+                'configurable_id' => $service->id,
+                'configurable_type' => Service::class,
+                'config_option_id' => $obsolete->id,
+                'config_value_id' => null,
+                'slider_value' => null,
+            ])
+        );
         DB::transaction(
             fn () => app(StaticUpgradeStockService::class)
                 ->reserve($upgrade, $service)
@@ -981,11 +1005,28 @@ class StaticUpgradeStockTest extends TestCase
         int $targetStock = 1,
         ?object $target = null,
         int $quantity = 1,
-        float $quotedAmount = 0
+        float $quotedAmount = 0,
+        ?callable $beforeQuote = null,
+        ?object $source = null
     ): array {
-        $source = $this->createProduct(['stock' => $sourceStock]);
+        if ($source === null) {
+            $sourceAttributes = ['stock' => $sourceStock];
+            if ($target?->product->server_id !== null) {
+                $sourceAttributes['server_id'] =
+                    (int) $target->product->server_id;
+            }
+            $source = $this->createProduct($sourceAttributes);
+        }
         $target ??= $this->createProduct(['stock' => $targetStock]);
-        $source->product->upgrades()->attach($target->product->id);
+        if (
+            !DB::table('product_upgrades')
+                ->where('product_id', $source->product->id)
+                ->where('upgrade_id', $target->product->id)
+                ->exists()
+        ) {
+            $source->product->upgrades()
+                ->attach($target->product->id);
+        }
         $service = Service::factory()->create([
             'user_id' => User::factory()->create()->id,
             'product_id' => $source->product->id,
@@ -996,6 +1037,9 @@ class StaticUpgradeStockTest extends TestCase
             'price' => 10,
             'expires_at' => now()->addMonth()->startOfDay(),
         ]);
+        if ($beforeQuote !== null) {
+            $beforeQuote($service);
+        }
         $upgrade = ServiceUpgrade::create([
             'service_id' => $service->id,
             'product_id' => $target->product->id,

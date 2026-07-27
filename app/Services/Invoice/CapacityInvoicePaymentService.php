@@ -147,7 +147,8 @@ class CapacityInvoicePaymentService
     public function recoverPaymentEvidence(
         Invoice|int $invoice,
         string $reason,
-        Closure $persist
+        Closure $persist,
+        bool $preserveExistingAttention = false
     ): mixed {
         $invoiceId = $invoice instanceof Invoice
             ? (int) $invoice->id
@@ -166,14 +167,39 @@ class CapacityInvoicePaymentService
             return DB::transaction(function () use (
                 $invoiceId,
                 $reason,
-                $persist
+                $persist,
+                $preserveExistingAttention
             ): mixed {
-                $result = $persist();
                 $lockedInvoice = Invoice::query()
                     ->whereKey($invoiceId)
                     ->lockForUpdate()
                     ->firstOrFail();
-                $this->requireAttention($lockedInvoice, $reason);
+                $preservedAttention =
+                    $preserveExistingAttention
+                    && $lockedInvoice
+                        ->payment_attention_required_at !== null
+                        ? [
+                            'payment_attention_required_at' => $lockedInvoice
+                                ->payment_attention_required_at,
+                            'payment_attention_reason' => $lockedInvoice
+                                ->payment_attention_reason,
+                            'payment_attention_alerted_at' => $lockedInvoice
+                                ->payment_attention_alerted_at,
+                        ]
+                        : null;
+
+                $result = $persist();
+                $lockedInvoice->refresh();
+                if ($preservedAttention !== null) {
+                    $lockedInvoice->forceFill(
+                        $preservedAttention
+                    )->save();
+                } else {
+                    $this->requireAttention(
+                        $lockedInvoice,
+                        $reason
+                    );
+                }
 
                 return $result;
             }, 5);

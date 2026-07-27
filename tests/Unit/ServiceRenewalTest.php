@@ -96,7 +96,10 @@ class ServiceRenewalTest extends TestCase
 
         $this->assertEquals('active', $service->status);
         $this->assertNotNull($service->expires_at);
-        $this->assertTrue($service->expires_at <= now()->addDays(21));
+        $this->assertSame(
+            now()->addMonthNoOverflow()->toDateString(),
+            $service->expires_at->toDateString()
+        );
     }
 
     public function test_service_duedate_is_set_from_now_when_suspended(): void

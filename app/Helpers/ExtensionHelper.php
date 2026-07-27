@@ -468,6 +468,22 @@ class ExtensionHelper
         )->supportsDurablePaymentInitiations();
     }
 
+    public static function paymentInitiationIdempotencyRetryWindowSeconds(
+        Gateway $gateway
+    ): int {
+        return max(
+            0,
+            min(
+                365 * 24 * 60 * 60,
+                self::getExtension(
+                    'gateway',
+                    $gateway->extension,
+                    $gateway->settings
+                )->paymentInitiationIdempotencyRetryWindowSeconds()
+            )
+        );
+    }
+
     /**
      * Re-read (and, after the abandonment window, safely cancel) the exact
      * provider object frozen by one durable interactive payment generation.

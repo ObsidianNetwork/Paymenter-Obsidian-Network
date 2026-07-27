@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Enums\InvoiceTransactionStatus;
-use App\Exceptions\DisplayException;
 use App\Exceptions\PermanentProvisioningException;
 use App\Jobs\Server\UpgradeJob;
 use App\Livewire\Services\Upgrade as UpgradeComponent;
@@ -106,17 +105,21 @@ class StaticUpgradeTargetContractTest extends TestCase
         $service = $this->serviceFor($fixture);
         $this->authenticate($service->user);
 
-        try {
-            Livewire::test(UpgradeComponent::class, [
-                'service' => $service,
-            ])->call('doUpgrade');
-            $this->fail('An unchanged upgrade created a commitment.');
-        } catch (DisplayException $exception) {
-            $this->assertStringContainsString(
-                'not changed any product or resource configuration',
-                $exception->getMessage()
+        Livewire::test(UpgradeComponent::class, [
+            'service' => $service,
+        ])
+            ->call('doUpgrade')
+            ->assertDispatched(
+                'notify',
+                function (string $event, array $parameters): bool {
+                    $payload = $parameters[0] ?? $parameters;
+
+                    return $event === 'notify'
+                        && ($payload['message'] ?? null)
+                            === 'You have not changed any product or resource configuration.'
+                        && ($payload['type'] ?? null) === 'error';
+                }
             );
-        }
 
         $this->assertDatabaseMissing('service_upgrades', [
             'service_id' => $service->id,
@@ -1123,7 +1126,6 @@ class StaticUpgradeTargetContractTest extends TestCase
             'service_id' => $service->id,
             'product_id' => $target->product->id,
             'plan_id' => $target->plan->id,
-            'invoice_id' => $invoice->id,
             'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
@@ -1144,6 +1146,8 @@ class StaticUpgradeTargetContractTest extends TestCase
                 'quantity' => 1,
             ]);
         }
+        $upgrade->invoice_id = $invoice->id;
+        ServiceUpgradeMutationCoordinator::save($upgrade);
         if ($paymentEvidence) {
             DB::table('invoice_transactions')->insert([
                 'invoice_id' => $invoice->id,

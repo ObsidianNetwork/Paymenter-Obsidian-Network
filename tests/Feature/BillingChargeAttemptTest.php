@@ -261,7 +261,7 @@ namespace Tests\Feature {
                     $fixture['gateway'],
                     $fixture['invoice']->fresh()
                 ),
-                'manual payment review'
+                'not eligible for provider payment initiation'
             );
         }
 
@@ -297,7 +297,7 @@ namespace Tests\Feature {
                 $attempt->status
             );
             $this->assertSame(
-                BillingChargeAttempt::PURPOSE_CUSTOMER_SAVED_METHOD,
+                BillingChargeAttempt::PURPOSE_AUTOMATIC_RENEWAL,
                 $attempt->purpose
             );
             $this->assertSame(0, $attempt->attempt_count);

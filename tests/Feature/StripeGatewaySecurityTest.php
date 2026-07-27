@@ -8,6 +8,7 @@ use App\Models\Gateway;
 use App\Models\Invoice;
 use App\Models\Service;
 use App\Models\User;
+use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -15,12 +16,32 @@ use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Route;
 use Paymenter\Extensions\Gateways\Stripe\Stripe;
 use Tests\TestCase;
 
 class StripeGatewaySecurityTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (
+            !Route::has(
+                'extensions.gateways.stripe.webhook'
+            )
+        ) {
+            Route::post(
+                '/test-stripe-webhook',
+                static fn () => null
+            )->name(
+                'extensions.gateways.stripe.webhook'
+            );
+        }
+        app('router')->getRoutes()->refreshNameLookups();
+    }
 
     public function test_empty_key_cannot_forge_a_stripe_webhook_signature(): void
     {
@@ -156,10 +177,10 @@ class StripeGatewaySecurityTest extends TestCase
                     ]],
                 ]);
             }
-            if (
-                $url
-                    === 'https://api.stripe.com/v1/subscription_schedules'
-            ) {
+            if (str_starts_with(
+                $url,
+                'https://api.stripe.com/v1/subscription_schedules'
+            )) {
                 if ($request->method() === 'GET') {
                     return Http::response([
                         'data' => [],
@@ -285,8 +306,10 @@ class StripeGatewaySecurityTest extends TestCase
                 return Http::response(['id' => 'cus_recovery_test']);
             }
             if (
-                $url
-                    === 'https://api.stripe.com/v1/subscription_schedules'
+                str_starts_with(
+                    $url,
+                    'https://api.stripe.com/v1/subscription_schedules'
+                )
                 && $request->method() === 'GET'
             ) {
                 if (
@@ -426,10 +449,10 @@ class StripeGatewaySecurityTest extends TestCase
                     ]],
                 ]);
             }
-            if (
-                $url
-                    === 'https://api.stripe.com/v1/subscription_schedules'
-            ) {
+            if (str_starts_with(
+                $url,
+                'https://api.stripe.com/v1/subscription_schedules'
+            )) {
                 if ($request->method() === 'GET') {
                     return Http::response([
                         'data' => [],
@@ -593,8 +616,14 @@ class StripeGatewaySecurityTest extends TestCase
 
         $invoice->status = Invoice::STATUS_PENDING;
         $invoice->save();
-        $service->status = Service::STATUS_PROVISIONING_FAILED;
-        $service->save();
+        FulfillmentStatusTransitionService::run(
+            $service,
+            function () use ($service): void {
+                $service->status =
+                    Service::STATUS_PROVISIONING_FAILED;
+                $service->save();
+            }
+        );
         try {
             $stripe->webhook($request);
             $this->fail(
@@ -615,7 +644,10 @@ class StripeGatewaySecurityTest extends TestCase
 
     public function test_canceled_schedule_clears_the_matching_subscription(): void
     {
+        $user = User::factory()->create();
         $service = Service::factory()->create([
+            'user_id' => $user->id,
+            'status' => Service::STATUS_ACTIVE,
             'subscription_id' => 'sub_canceled_test',
         ]);
         $service->properties()->create([
@@ -659,7 +691,10 @@ class StripeGatewaySecurityTest extends TestCase
 
     public function test_canceled_schedule_supports_legacy_subscription_identity(): void
     {
+        $user = User::factory()->create();
         $service = Service::factory()->create([
+            'user_id' => $user->id,
+            'status' => Service::STATUS_ACTIVE,
             'subscription_id' => 'sub_legacy_canceled_test',
         ]);
         $service->properties()->create([
