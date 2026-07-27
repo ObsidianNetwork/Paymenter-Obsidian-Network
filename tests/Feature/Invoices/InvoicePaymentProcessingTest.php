@@ -17,6 +17,7 @@ use App\Services\Invoice\CapacityInvoicePaymentService;
 use App\Services\Invoice\MarkInvoicePaidService;
 use App\Services\Service\DurableFulfillmentService;
 use App\Services\Service\FulfillmentStatusTransitionService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use App\Services\ServiceUpgrade\CapacityUpgradeReservationIdentity;
 use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
 use App\Services\ServiceUpgrade\ServiceUpgradePricingService;
@@ -1586,11 +1587,15 @@ class InvoicePaymentProcessingTest extends TestCase
             protected function beforePaidTransition(
                 Invoice $invoice
             ): void {
-                Service::query()
+                $service = Service::query()
                     ->whereKey($this->serviceId)
-                    ->firstOrFail()
-                    ->forceFill(['price' => 11])
-                    ->save();
+                    ->firstOrFail();
+                ServiceBillingAnchorMutationCoordinator::run(
+                    $service,
+                    fn () => $service
+                        ->forceFill(['price' => 11])
+                        ->save()
+                );
             }
         };
 

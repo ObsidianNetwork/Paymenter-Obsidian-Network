@@ -11,7 +11,6 @@ use App\Models\Invoice;
 use App\Models\User;
 use App\Services\Invoice\CreditInvoicePaymentService;
 use Illuminate\Database\QueryException;
-use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -225,9 +224,17 @@ class CreditInvoicePaymentServiceTest extends TestCase
 
     public function test_migration_consolidates_existing_balances_before_adding_unique_guard(): void
     {
-        Schema::table('credits', function (Blueprint $table): void {
-            $table->dropUnique('credits_user_currency_unique');
-        });
+        $migration = require database_path(
+            'migrations/2026_07_27_000130_enforce_unique_credit_balances.php'
+        );
+        $migration->down();
+        $this->assertTrue(
+            Schema::hasIndex('credits', 'credits_user_id_index')
+        );
+        $this->assertFalse(
+            Schema::hasIndex('credits', 'credits_user_currency_unique')
+        );
+
         $user = User::factory()->create();
         DB::table('credits')->insert([
             [
@@ -246,9 +253,6 @@ class CreditInvoicePaymentServiceTest extends TestCase
             ],
         ]);
 
-        $migration = require database_path(
-            'migrations/2026_07_27_000130_enforce_unique_credit_balances.php'
-        );
         $migration->up();
 
         $this->assertSame(1, $user->credits()->count());

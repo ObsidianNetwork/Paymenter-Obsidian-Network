@@ -559,7 +559,7 @@ class ServiceUpgradeLifecycleTest extends TestCase
         );
     }
 
-    public function test_upgrade_completion_never_reprices_an_issued_renewal_invoice(): void
+    public function test_newly_issued_renewal_invoice_invalidates_paid_upgrade_before_provisioning(): void
     {
         Queue::fake();
         $source = $this->createProduct();
@@ -641,14 +641,21 @@ class ServiceUpgradeLifecycleTest extends TestCase
             'quantity' => 1,
             'price' => 10,
         ]);
-        $upgrade = app(ServiceUpgradeService::class)
-            ->beginProvisioning($upgrade->fresh());
-        $this->assertNotNull($upgrade);
-
-        app(ServiceUpgradeService::class)->complete($upgrade);
+        try {
+            app(ServiceUpgradeService::class)
+                ->beginProvisioning($upgrade->fresh());
+            $this->fail(
+                'A paid upgrade ignored a newly issued renewal invoice.'
+            );
+        } catch (PermanentProvisioningException $exception) {
+            $this->assertStringContainsString(
+                'source snapshot',
+                $exception->getMessage()
+            );
+        }
 
         $this->assertSame(
-            '20.00',
+            '10.00',
             number_format((float) $service->fresh()->price, 2, '.', '')
         );
         $this->assertSame(
@@ -658,6 +665,10 @@ class ServiceUpgradeLifecycleTest extends TestCase
         $this->assertSame(
             Invoice::STATUS_PENDING,
             $renewal->fresh()->status
+        );
+        $this->assertSame(
+            ServiceUpgrade::STATUS_NEEDS_ATTENTION,
+            $upgrade->fresh()->status
         );
     }
 

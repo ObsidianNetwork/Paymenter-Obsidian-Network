@@ -19,9 +19,11 @@ use App\Services\Service\FulfillmentStatusTransitionService;
 use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use App\Services\ServiceUpgrade\ServiceUpgradeMutationCoordinator;
 use Carbon\Carbon;
+use Illuminate\Console\OutputStyle;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\NullOutput;
 use Tests\TestCase;
 
@@ -156,7 +158,12 @@ class CronjobTest extends TestCase
         );
         $this->assertSame(
             '10.00',
-            (string) $legacyService->fresh()->price
+            number_format(
+                (float) $legacyService->fresh()->price,
+                2,
+                '.',
+                ''
+            )
         );
     }
 
@@ -239,7 +246,9 @@ class CronjobTest extends TestCase
     public function test_failed_cron_row_rolls_back_without_blocking_later_rows(): void
     {
         $command = app(CronJob::class);
-        $command->setOutput(new NullOutput);
+        $command->setOutput(
+            new OutputStyle(new ArrayInput([]), new NullOutput)
+        );
         $runner = new \ReflectionMethod(CronJob::class, 'runCronRow');
         $runner->setAccessible(true);
 
@@ -897,6 +906,7 @@ class CronjobTest extends TestCase
             'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
+            'capacity_mode' => ServiceUpgrade::CAPACITY_MODE_STATIC,
         ]);
         $upgradeInvoice->items()->create([
             'description' => 'Pending upgrade',
@@ -1222,6 +1232,7 @@ class CronjobTest extends TestCase
             'status' => ServiceUpgrade::STATUS_AWAITING_PAYMENT,
             'type' => 'product',
             'active_service_guard_id' => $service->id,
+            'capacity_mode' => ServiceUpgrade::CAPACITY_MODE_STATIC,
         ]);
         $invoice->items()->create([
             'description' => 'Expired upgrade',

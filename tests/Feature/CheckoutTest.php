@@ -25,6 +25,7 @@ class CheckoutTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        session(['currency' => 'USD']);
         $this->product = $this->createProduct();
     }
 

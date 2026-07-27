@@ -9,6 +9,8 @@ return new class extends Migration
 {
     private const UNIQUE_INDEX = 'credits_user_currency_unique';
 
+    private const USER_INDEX = 'credits_user_id_index';
+
     private const MAX_CENTS = 99_999_999_999_999_999;
 
     public function up(): void
@@ -45,6 +47,15 @@ return new class extends Migration
     {
         if (!Schema::hasTable('credits')) {
             return;
+        }
+
+        // InnoDB may discard its implicit user_id index after the composite
+        // unique index is added, then use that unique index to support the
+        // foreign key. Restore a dedicated FK index before dropping it.
+        if (!Schema::hasIndex('credits', self::USER_INDEX)) {
+            Schema::table('credits', function (Blueprint $table): void {
+                $table->index('user_id', self::USER_INDEX);
+            });
         }
 
         Schema::table('credits', function (Blueprint $table): void {

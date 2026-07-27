@@ -384,8 +384,10 @@ class StripeGatewaySecurityTest extends TestCase
         );
         Http::assertSent(
             fn (HttpRequest $request): bool => $request->method() === 'GET'
-                && $request->url()
-                    === 'https://api.stripe.com/v1/subscription_schedules'
+                && str_starts_with(
+                    $request->url(),
+                    'https://api.stripe.com/v1/subscription_schedules'
+                )
                 && ($request->data()['starting_after'] ?? null)
                     === 'sub_sched_unrelated'
         );
@@ -526,7 +528,7 @@ class StripeGatewaySecurityTest extends TestCase
             fn (HttpRequest $request): bool => $request->method() === 'POST'
                 && $request->url()
                     === 'https://api.stripe.com/v1/subscription_schedules'
-        );
+        )->values();
         $this->assertCount(2, $scheduleRequests);
         $this->assertSame(
             $scheduleRequests[0][0]->data(),

@@ -1093,7 +1093,9 @@ class InvoicePaymentInitiationService
                 $cancelIfSafe
                 || $this->abandonmentDeadline($leased)->isPast()
                 || app(CapacityInvoicePaymentService::class)
-                    ->deadlineExpired((int) $leased->invoice_id);
+                    ->deadlineExpired(
+                        $leased->invoice()->firstOrFail()
+                    );
             $outcome = $this->normalizeReconciliationOutcome(
                 $leased,
                 ExtensionHelper::reconcileInvoicePaymentInitiation(

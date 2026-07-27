@@ -17,6 +17,11 @@ class InteractiveGatewayReconciliationTest extends TestCase
 {
     use RefreshDatabase;
 
+    /** @var array<string, array<string, mixed>> */
+    private array $payPalOrderResponses = [];
+
+    private bool $payPalHttpFakeInstalled = false;
+
     public function test_mollie_terminal_state_releases_only_after_exact_generation_proof(): void
     {
         [$invoice, $claim] = $this->createClaim(
@@ -520,7 +525,7 @@ class InteractiveGatewayReconciliationTest extends TestCase
      * @param  array{
      *   include_create_time?: bool,
      *   create_time?: string,
-     *   payments?: array<string, mixed>
+     *   payments?: mixed
      * }  $options
      */
     private function fakePayPalOrder(
@@ -529,12 +534,46 @@ class InteractiveGatewayReconciliationTest extends TestCase
         string $status,
         array $options = []
     ): void {
-        Http::fake(function (HttpRequest $request) use (
-            $invoice,
-            $claim,
-            $status,
-            $options
+        $order = [
+            'id' => $claim->provider_reference,
+            'intent' => 'CAPTURE',
+            'status' => $status,
+            'purchase_units' => [[
+                'invoice_id' => (string) $invoice->id,
+                'custom_id' => 'paymenter-initiation:'
+                    . $claim->id
+                    . ':'
+                    . $claim->idempotency_key,
+                'amount' => [
+                    'value' => '10.00',
+                    'currency_code' => 'USD',
+                ],
+            ]],
+        ];
+        if (
+            ($options['include_create_time'] ?? true) === true
         ) {
+            $order['create_time'] =
+                $options['create_time']
+                ?? now()->toIso8601String();
+        }
+        if (array_key_exists('payments', $options)) {
+            $order['purchase_units'][0]['payments'] =
+                $options['payments'];
+        }
+        $this->payPalOrderResponses[
+            'https://api-m.paypal.com/v2/checkout/orders/'
+                . rawurlencode(
+                    (string) $claim->provider_reference
+                )
+        ] = $order;
+
+        if ($this->payPalHttpFakeInstalled) {
+            return;
+        }
+        $this->payPalHttpFakeInstalled = true;
+
+        Http::fake(function (HttpRequest $request) {
             if (
                 $request->method() === 'POST'
                 && $request->url()
@@ -546,39 +585,16 @@ class InteractiveGatewayReconciliationTest extends TestCase
             }
             if (
                 $request->method() === 'GET'
-                && $request->url()
-                    === 'https://api-m.paypal.com/v2/checkout/orders/'
-                        . $claim->provider_reference
+                && array_key_exists(
+                    $request->url(),
+                    $this->payPalOrderResponses
+                )
             ) {
-                $order = [
-                    'id' => $claim->provider_reference,
-                    'intent' => 'CAPTURE',
-                    'status' => $status,
-                    'purchase_units' => [[
-                        'invoice_id' => (string) $invoice->id,
-                        'custom_id' => 'paymenter-initiation:'
-                            . $claim->id
-                            . ':'
-                            . $claim->idempotency_key,
-                        'amount' => [
-                            'value' => '10.00',
-                            'currency_code' => 'USD',
-                        ],
-                    ]],
-                ];
-                if (
-                    ($options['include_create_time'] ?? true) === true
-                ) {
-                    $order['create_time'] =
-                        $options['create_time']
-                        ?? now()->toIso8601String();
-                }
-                if (array_key_exists('payments', $options)) {
-                    $order['purchase_units'][0]['payments'] =
-                        $options['payments'];
-                }
-
-                return Http::response($order);
+                return Http::response(
+                    $this->payPalOrderResponses[
+                        $request->url()
+                    ]
+                );
             }
 
             return Http::response([

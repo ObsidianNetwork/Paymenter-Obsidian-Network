@@ -705,7 +705,7 @@ namespace Tests\Feature {
             $this->assertBlocked(
                 fn () => app(CancelInvoiceService::class)
                     ->handle($fixture['invoice']),
-                (string) $attemptId
+                "invoice {$fixture['invoice']->id}"
             );
             $this->assertBlocked(
                 fn () => $fixture['invoice']->delete(),

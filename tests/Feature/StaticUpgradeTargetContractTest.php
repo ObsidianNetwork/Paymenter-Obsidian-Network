@@ -102,6 +102,10 @@ class StaticUpgradeTargetContractTest extends TestCase
     {
         Queue::fake();
         $fixture = $this->createProduct();
+        $selectableTarget = $this->createProduct();
+        $fixture->product->upgrades()->attach(
+            $selectableTarget->product->id
+        );
         $service = $this->serviceFor($fixture);
         $this->authenticate($service->user);
 
@@ -1132,13 +1136,6 @@ class StaticUpgradeTargetContractTest extends TestCase
             'quoted_amount' => '5.00',
             'currency_code' => 'USD',
         ]);
-        $invoice->items()->create([
-            'description' => 'Unsigned legacy upgrade',
-            'price' => '5.00',
-            'quantity' => 1,
-            'reference_id' => $upgrade->id,
-            'reference_type' => ServiceUpgrade::class,
-        ]);
         if ($ambiguous) {
             $invoice->items()->create([
                 'description' => 'Ambiguous extra line',
@@ -1146,6 +1143,13 @@ class StaticUpgradeTargetContractTest extends TestCase
                 'quantity' => 1,
             ]);
         }
+        $invoice->items()->create([
+            'description' => 'Unsigned legacy upgrade',
+            'price' => '5.00',
+            'quantity' => 1,
+            'reference_id' => $upgrade->id,
+            'reference_type' => ServiceUpgrade::class,
+        ]);
         $upgrade->invoice_id = $invoice->id;
         ServiceUpgradeMutationCoordinator::save($upgrade);
         if ($paymentEvidence) {

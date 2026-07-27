@@ -12,12 +12,25 @@ use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\View;
 use Paymenter\Extensions\Gateways\Stripe\Stripe;
 use Tests\TestCase;
 
 class StripeInteractivePaymentEvidenceTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        View::addNamespace(
+            'gateways.stripe',
+            base_path(
+                'extensions/Gateways/Stripe/resources/views'
+            )
+        );
+    }
 
     public function test_interactive_request_and_evidence_use_exact_currency_exponents(): void
     {
