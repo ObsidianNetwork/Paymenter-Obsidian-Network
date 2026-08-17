@@ -1,12 +1,12 @@
 # Paymenter Project Context
 
-Live install of Paymenter **v1.4.7** at `/var/www/paymenter/`. Root IS a git checkout (branch `dynamic-slider/1.4.7`, fork with local patches). All app files owned by `www-data:www-data`.
+Obsidian Network's Paymenter fork, currently based on **v1.5.7**. This repository is a development checkout; production deployment state and filesystem ownership are managed separately.
 
 ## Stack
 
 - **Laravel 12** on **PHP 8.3+** (`^8.3 || ^8.4`)
-- **Filament 4.0** admin panel (installed under `app/Admin/`, not `app/Filament/`)
-- **Livewire 3** for the public-facing UI (auth, dashboard, cart, products, invoices, tickets) — see `app/Livewire/AGENTS.md`
+- **Filament 5.0** admin panel (installed under `app/Admin/`, not `app/Filament/`)
+- **Livewire 4** for the public-facing UI (auth, dashboard, cart, products, invoices, tickets) — see `app/Livewire/AGENTS.md`
 - **Tailwind CSS 4.1** via **Vite 7** with a custom `vite.js` wrapper that builds per-theme
 - `qirolab/laravel-themer` for swappable front-end themes — see `themes/AGENTS.md`
 - Laravel Passport (OAuth2 admin API), Socialite (+Discord provider), `owen-it/laravel-auditing`
@@ -17,7 +17,7 @@ Live install of Paymenter **v1.4.7** at `/var/www/paymenter/`. Root IS a git che
 ```
 /var/www/paymenter/
 ├── app/
-│   ├── Admin/              # Filament 4 panel (Resources/Pages/Clusters/Widgets/Actions) — see app/Admin/AGENTS.md
+│   ├── Admin/              # Filament 5 panel (Resources/Pages/Clusters/Widgets/Actions) — see app/Admin/AGENTS.md
 │   ├── Attributes/         # #[ExtensionMeta] class attribute for extensions
 │   ├── Classes/
 │   │   ├── Extension/      # Base classes: Extension, Gateway, Server (extensions subclass these)
@@ -37,7 +37,7 @@ Live install of Paymenter **v1.4.7** at `/var/www/paymenter/`. Root IS a git che
 ├── resources/css/filament/admin/   # Admin panel Tailwind theme (separate config + build)
 ├── resources/views/admin/  # Filament infolist/widget/page partials
 ├── routes/                 # web.php (Livewire routes), api.php (Passport), console.php (schedule)
-├── tests/                  # PHPUnit (Unit + Feature); DB = MariaDB `paymenter_test`
+├── tests/                  # PHPUnit 12 (Unit + Feature); SQLite and MariaDB 11/12 CI
 └── vite.js                 # Node shim: `node vite.js [theme]` builds, `node vite.js dev [theme]`
 ```
 
@@ -57,9 +57,9 @@ Live install of Paymenter **v1.4.7** at `/var/www/paymenter/`. Root IS a git che
 
 - Laravel 12 layout: no `app/Console/Kernel.php`, no `app/Http/Kernel.php` — everything in `bootstrap/app.php`. `channels.php` is intentionally **not** registered.
 - No `strict_types` declarations — match surrounding files.
-- **Pint** (`pint.json`): Laravel preset + `concat_space: one` + `not_operator_with_successor_space: false`. CI auto-commits Pint fixes to `master`.
+- **Pint** (`pint.json`): Laravel preset + `concat_space: one` + `not_operator_with_successor_space: false`. CI runs `pint --test` and never rewrites the branch.
 - **PHPStan**: larastan level 5, `app/` only (`phpstan.neon`). Not run in CI (commented out in `lint.yaml`).
-- **Tests**: PHPUnit 11 (not Pest). Feature tests use `RefreshDatabase`. Base `Tests\TestCase` has `$seed = true`. **Requires MariaDB** at `127.0.0.1:3306` with DB `paymenter_test`, user `root`.
+- **Tests**: PHPUnit 12 (not Pest). Feature tests use `RefreshDatabase`. Base `Tests\TestCase` has `$seed = true`. CI covers SQLite plus digest-pinned MariaDB 11 and 12 on PHP 8.3 and 8.4.
 - **Extensions** use the `Paymenter\Extensions\` PSR-4 root → `extensions/`. Extension classes carry `#[App\Attributes\ExtensionMeta(name, description, version, author, url, icon)]`.
 - Extensions are enabled/disabled at **runtime via the `extensions` DB table** — composer autoload alone doesn't boot them.
 
@@ -97,11 +97,11 @@ npm run build:admin
 ## Gotchas
 
 - **File ownership**: editing as `root` yields root-owned files the web worker can't read/write. Run `chown -R www-data:www-data <path>` after edits (especially anything under `storage/` or `bootstrap/cache/`).
-- **This is a fork** (`dynamic-slider/1.4.7`). `extensions/Others/DynamicPterodactyl/` has its own git repo and its own `CLAUDE.md` — don't commit changes there from the outer repo.
-- **Filament 4 ≠ 3**: APIs changed significantly. Don't paste v3 snippets from the docs without porting.
+- **This is a fork** whose default branch retains the historical name `dynamic-slider/1.4.7`; the current release baseline is v1.5.7. `extensions/Others/DynamicPterodactyl/` has its own git repo and its own `CLAUDE.md` — don't commit changes there from the outer repo.
+- **Filament 5 ≠ 4**: APIs changed significantly. Check the installed v5 contracts before porting older snippets.
 - **Settings cache**: `config('settings.*')` comes from the DB via `SettingsProvider` (runs before panel boot). If a setting read returns stale data, clear cache and re-query.
 - **Extension autoload vs enable**: adding files under `extensions/` is not enough — the row in the `extensions` table must have `enabled=1` and the correct `type`/`extension` before `boot()` fires.
-- **Release version lives in `composer.json`** (`"version": "1.4.7"`). CI/release scripts also sed this into `config/app.php` during build.
+- **Release version lives in `config/app.php`**. The release workflow replaces its `development` value with the tag version on the release branch.
 - **API docs** use the paid `dedoc/scramble` plugin in CI; local `composer install --no-dev` will skip it.
 
 ## Enforceable rules (CodeRabbit reads these)
