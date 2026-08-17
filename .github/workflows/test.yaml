@@ -75,16 +75,21 @@ jobs:
         run: php artisan test
 
   test-mariadb:
+    name: test-mariadb (${{ matrix.php }}, ${{ matrix.mariadb.version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         php: ['8.3', '8.4']
-        mariadb: ['11', '12']
+        mariadb:
+          - version: '11'
+            image: mariadb@sha256:d9f7eb2637296652f24b484afd5d246f759f49f5babcadc6a9e344c9acb75fbf # 11
+          - version: '12'
+            image: mariadb@sha256:759869cb6f003234a95c6384cdee245b4bce7de26913fe607a8110362c0c007d # 12
     
     services:
       mariadb:
-        image: mariadb:${{ matrix.mariadb }}
+        image: ${{ matrix.mariadb.image }}
         env:
           MYSQL_ROOT_PASSWORD: password
           MYSQL_DATABASE: paymenter_test
