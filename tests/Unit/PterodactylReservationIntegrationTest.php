@@ -29,6 +29,7 @@ use App\Support\PanelEndpointIdentity;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Foundation\Testing\RefreshDatabaseState;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
 use Paymenter\Extensions\Others\DynamicPterodactyl\Services\ReservationConfigurationService;
@@ -55,6 +56,45 @@ class PterodactylReservationIntegrationTest extends TestCase
             $source
         );
         $this->assertStringNotContainsString('->retry(', $source);
+    }
+
+    public function test_pterodactyl_request_failures_do_not_expose_upstream_details(): void
+    {
+        $provisioner = new Pterodactyl([
+            'host' => 'https://panel.example.com',
+            'api_key' => 'secret',
+        ]);
+        Http::fakeSequence()
+            ->push([
+                'errors' => [[
+                    'detail' => 'provider token=upstream-secret',
+                ]],
+            ], 422)
+            ->push([
+                'errors' => [[
+                    'detail' => 'provider token=upstream-secret',
+                ]],
+            ], 500);
+
+        foreach ([
+            [422, PermanentProvisioningException::class],
+            [500, \Exception::class],
+        ] as [$status, $expectedClass]) {
+            try {
+                $provisioner->request('/api/application/servers', 'post');
+                $this->fail("Expected a Pterodactyl {$status} failure.");
+            } catch (\Throwable $exception) {
+                $this->assertSame($expectedClass, $exception::class);
+                $this->assertSame(
+                    "Pterodactyl API request failed with status {$status}.",
+                    $exception->getMessage()
+                );
+                $this->assertStringNotContainsString(
+                    'upstream-secret',
+                    $exception->getMessage()
+                );
+            }
+        }
     }
 
     public function test_product_configuration_loads_every_option_page_in_order(): void

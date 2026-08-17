@@ -83,12 +83,11 @@ class Pterodactyl extends Server
             ->$method($req_url, $data);
 
         if (!$response->successful()) {
-            $detail = $response->json('errors.0.detail')
-                ?? "Pterodactyl API request failed with status {$response->status()}";
+            $message = "Pterodactyl API request failed with status {$response->status()}.";
             $exception = $response->clientError()
                 && !in_array($response->status(), [408, 409, 423, 425, 429], true)
-                ? new PermanentProvisioningException((string) $detail, $response->status())
-                : new Exception((string) $detail, $response->status());
+                ? new PermanentProvisioningException($message, $response->status())
+                : new Exception($message, $response->status());
 
             throw $exception;
         }
