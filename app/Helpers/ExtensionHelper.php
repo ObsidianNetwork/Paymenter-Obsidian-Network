@@ -22,9 +22,10 @@ use Illuminate\Database\Migrations\Migrator;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
-use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Livewire\Features\SupportFileUploads\TemporaryUploadedFile;
+use OwenIt\Auditing\Contracts\Auditable;
 use OwenIt\Auditing\Events\AuditCustom;
 use ReflectionClass;
 
@@ -237,7 +238,7 @@ class ExtensionHelper
                 throw $e;
             } else {
                 // If extension error is Not Found, don't report
-                if (\Str::doesntEndWith($e->getMessage(), 'not found')) {
+                if (Str::doesntEndWith($e->getMessage(), 'not found')) {
                     report($e);
                 }
             }
@@ -274,7 +275,7 @@ class ExtensionHelper
         $settings = [];
 
         try {
-            foreach (self::getConfig($type, $name, $config) as $key => $config) {
+            foreach (self::getConfig($type, $name, $config) as $config) {
                 $config['name'] = 'settings.' . $config['name'];
                 $settings[] = FilamentInput::convert($config);
             }
@@ -551,6 +552,26 @@ class ExtensionHelper
             $properties[$property->key] = $property->value;
         }
         foreach ($service->configs as $config) {
+            if (!$config->configOption) {
+                // Orphaned service_configs row — parent config_option deleted. Skip silently.
+                continue;
+            }
+
+            if ($config->configValue === null) {
+                // dynamic_slider (and any future option type without a child ConfigValue) keeps
+                // its value on the property bag (Cart::checkout dual-write). The property loop
+                // above already exposed it via env_variable. Log a warning if this is unexpected.
+                if ($config->configOption->type !== 'dynamic_slider') {
+                    Log::warning('service_configs row has null configValue for non-slider option', [
+                        'service_id' => $service->id,
+                        'config_option_id' => $config->config_option_id,
+                        'option_type' => $config->configOption->type,
+                    ]);
+                }
+
+                continue;
+            }
+
             $properties[$config->configOption->env_variable] = $config->configValue->env_variable ?? $config->configValue->name;
         }
 
@@ -573,7 +594,7 @@ class ExtensionHelper
         return $server;
     }
 
-    protected static function recordAudit(Model $model, string $action, array $oldValues = [], array $newValues = [])
+    protected static function recordAudit(Auditable $model, string $action, array $oldValues = [], array $newValues = [])
     {
         // Trigger audit log for server creation
         $model->auditEvent = $action;
