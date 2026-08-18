@@ -4,10 +4,12 @@ namespace App\Livewire\Products;
 
 use App\Classes\Cart;
 use App\Classes\Price;
+use App\Exceptions\DisplayException;
 use App\Helpers\ExtensionHelper;
 use App\Livewire\Component;
 use App\Models\Category;
 use App\Models\Plan;
+use App\Rules\DynamicSliderValueRule;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
 use Livewire\Attributes\Locked;
@@ -42,7 +44,7 @@ class Checkout extends Component
     public function mount($product)
     {
         $this->product = $this->category->products()->where('slug', $product)->firstOrFail();
-        if ($this->product->stock === 0) {
+        if ($this->product->stock === 0 || !$this->product->price()->available) {
             return $this->redirect(route('products.show', ['category' => $this->category, 'product' => $this->product]), true);
         }
 
@@ -77,7 +79,7 @@ class Checkout extends Component
                     return [$option->id => $this->configOptions[$option->id] ?? $default];
                 }
 
-                return [$option->id => $this->configOptions[$option->id] ?? $option->children->first()->id];
+                return [$option->id => $this->configOptions[$option->id] ?? $option->availableChildren->first()?->id];
             })->toArray();
             foreach ($this->getCheckoutConfig() as $config) {
                 if (in_array($config['type'], ['select', 'radio'])) {
@@ -99,6 +101,36 @@ class Checkout extends Component
 
     public function updatePricing()
     {
+        $dynamicSliderValues = [];
+        foreach ($this->product->configOptions->where('type', 'dynamic_slider') as $option) {
+            $value = $this->configOptions[$option->id]
+                ?? $option->getMetadata('default', 0);
+
+            try {
+                $dynamicSliderValues[$option->id] =
+                    $option->normalizeDynamicSliderValue($value);
+            } catch (\InvalidArgumentException) {
+                // Never price an invalid submitted value. A safe configured
+                // default keeps first render and plan changes usable while
+                // checkout validation retains the invalid input and attaches
+                // the actionable error to this slider.
+                try {
+                    $dynamicSliderValues[$option->id] =
+                        $option->normalizeDynamicSliderValue(
+                            $option->getMetadata(
+                                'default',
+                                $option->getMetadata('min', 0)
+                            )
+                        );
+                } catch (\InvalidArgumentException) {
+                    // Invalid product metadata must not crash checkout. The
+                    // slider contributes no marginal price and final
+                    // validation remains fail-closed.
+                    $dynamicSliderValues[$option->id] = null;
+                }
+            }
+        }
+
         $total = $this->plan->price()->price;
         $setup_fee = $this->plan->price()->setup_fee;
 
@@ -108,11 +140,11 @@ class Checkout extends Component
             $total += $this->plan->dynamicSliderBasePrice();
         }
 
-        $this->product->configOptions->each(function ($option) use (&$total, &$setup_fee) {
+        $this->product->configOptions->each(function ($option) use (&$total, &$setup_fee, $dynamicSliderValues) {
             // Check if checkbox is set, if so, add price if checked
             if ($option->type === 'checkbox' && (isset($this->configOptions[$option->id]) && $this->configOptions[$option->id])) {
-                $total += $option->children->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
-                $setup_fee += $option->children->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
+                $total += $option->availableChildren->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
+                $setup_fee += $option->availableChildren->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
 
                 return;
             }
@@ -125,15 +157,17 @@ class Checkout extends Component
             }
             // Calculate dynamic slider price using delta (marginal only, base price handled above)
             if ($option->type === 'dynamic_slider') {
-                $value = $this->configOptions[$option->id] ?? $option->getMetadata('default', 0);
-                $total += $option->calculateDynamicPriceDelta((float) $value, $this->plan->billing_period, $this->plan->billing_unit);
+                $value = $dynamicSliderValues[$option->id];
+                if ($value !== null) {
+                    $total += $option->calculateDynamicPriceDelta((float) $value, $this->plan->billing_period, $this->plan->billing_unit);
+                }
 
                 return;
             }
 
             // Add price of selected option
-            $total += $option->children->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
-            $setup_fee += $option->children->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
+            $total += $option->availableChildren->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->price;
+            $setup_fee += $option->availableChildren->where('id', $this->configOptions[$option->id])->first()?->price(billing_period: $this->plan->billing_period, billing_unit: $this->plan->billing_unit)->setup_fee;
         });
 
         $this->total = new Price([
@@ -163,7 +197,7 @@ class Checkout extends Component
 
     public function hasDynamicSliderOptions(): bool
     {
-        return $this->product->configOptions->contains(fn ($option) => $option->type === 'dynamic_slider');
+        return $this->product->usesDynamicResources();
     }
 
     public function getReservationLocationIdProperty(): ?int
@@ -182,7 +216,7 @@ class Checkout extends Component
         }
 
         $locationIds = is_array($locationSetting) ? $locationSetting : json_decode($locationSetting, true);
-        if (! is_array($locationIds)) {
+        if (!is_array($locationIds)) {
             return null;
         }
 
@@ -194,12 +228,12 @@ class Checkout extends Component
 
     public function rules()
     {
+        $availablePlanIds = $this->product->availablePlans()->pluck('id')->toArray();
+
         $rules = [
             'plan_id' => [
                 'required',
-                Rule::exists('plans', 'id')->where(function ($query) {
-                    $query->where('priceable_id', $this->product->id)->where('priceable_type', get_class($this->product));
-                }),
+                Rule::in($availablePlanIds),
             ],
         ];
         foreach ($this->product->configOptions as $option) {
@@ -208,13 +242,14 @@ class Checkout extends Component
             } elseif ($option->type === 'checkbox') {
                 // No validation needed for checkbox
             } elseif ($option->type === 'dynamic_slider') {
-                $min = $option->getMetadata('min', 0);
-                $max = $option->getMetadata('max', PHP_INT_MAX);
-                $rules["configOptions.{$option->id}"] = ['required', 'numeric', "min:{$min}", "max:{$max}"];
+                $rules["configOptions.{$option->id}"] = [
+                    'required',
+                    new DynamicSliderValueRule($option),
+                ];
             } else {
                 $rules["configOptions.{$option->id}"] = [
                     'required',
-                    Rule::in($option->children->pluck('id')->toArray()),
+                    Rule::in($option->availableChildren->pluck('id')->toArray()),
                 ];
             }
         }
@@ -296,7 +331,7 @@ class Checkout extends Component
                     'option_name' => $option->name,
                     'option_type' => $option->type,
                     'option_env_variable' => $option->env_variable,
-                    'value' => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? $option->children->first()->id : null,
+                    'value' => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? $option->availableChildren->first()?->id : null,
                     'value_name' => isset($this->configOptions[$option->id]) && in_array($this->configOptions[$option->id], [true, 'true'], true) ? 'Yes' : 'No',
                 ];
             }
@@ -329,11 +364,35 @@ class Checkout extends Component
                 'option_type' => $option->type,
                 'option_env_variable' => $option->env_variable,
                 'value' => $this->configOptions[$option->id],
-                'value_name' => $option->children->where('id', $this->configOptions[$option->id])->first()->name,
+                'value_name' => $option->availableChildren->where('id', $this->configOptions[$option->id])->firstOrFail()->name,
             ];
         });
 
-        Cart::add($this->product, $this->plan, $configOptions, $this->checkoutConfig, key: $this->cartProductKey);
+        // Ensure checkout config has only the allowed keys and values
+        $checkoutConfig = [];
+        foreach ($this->getCheckoutConfig() as $config) {
+            $checkoutConfig[$config['name']] = $this->checkoutConfig[$config['name']] ?? null;
+        }
+
+        try {
+            Cart::add(
+                $this->product,
+                $this->plan,
+                $configOptions,
+                $checkoutConfig,
+                key: $this->cartProductKey
+            );
+        } catch (DisplayException $exception) {
+            if ($this->hasDynamicSliderOptions()) {
+                // A quote is advisory until the cart mutation acquires the
+                // authoritative capacity lock. Invalidate it after any
+                // customer-safe cart rejection so a race cannot leave the
+                // checkout button enabled with stale bounds.
+                $this->dispatch('dynamic-stock-refresh-required');
+            }
+
+            throw $exception;
+        }
 
         $this->dispatch('cartUpdated');
 

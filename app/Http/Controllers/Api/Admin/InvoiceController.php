@@ -10,8 +10,11 @@ use App\Http\Requests\Api\Admin\Invoices\GetInvoicesRequest;
 use App\Http\Requests\Api\Admin\Invoices\UpdateInvoiceRequest;
 use App\Http\Resources\InvoiceResource;
 use App\Models\Invoice;
+use App\Services\Invoice\CancelInvoiceService;
+use App\Services\Invoice\MarkInvoicePaidService;
 use Dedoc\Scramble\Attributes\Group;
 use Dedoc\Scramble\Attributes\QueryParameter;
+use Illuminate\Support\Facades\DB;
 use Spatie\QueryBuilder\QueryBuilder;
 
 #[Group(name: 'Invoices', weight: 4)]
@@ -45,8 +48,18 @@ class InvoiceController extends ApiController
      */
     public function store(CreateInvoiceRequest $request)
     {
-        // Validate and create the invoice
-        $invoice = Invoice::create($request->validated());
+        $data = $request->validated();
+        $markPaid = $data['status'] === Invoice::STATUS_PAID;
+        if ($markPaid) {
+            $data['status'] = Invoice::STATUS_PENDING;
+        }
+        $invoice = DB::transaction(function () use ($data, $markPaid) {
+            $invoice = Invoice::create($data);
+
+            return $markPaid
+                ? app(MarkInvoicePaidService::class)->handle($invoice)
+                : $invoice;
+        }, 5);
 
         // Return the created invoice as a JSON response
         return new InvoiceResource($invoice);
@@ -70,8 +83,28 @@ class InvoiceController extends ApiController
      */
     public function update(UpdateInvoiceRequest $request, Invoice $invoice)
     {
-        // Validate and update the invoice
-        $invoice->update($request->validated());
+        $data = $request->validated();
+        $markPaid = ($data['status'] ?? null) === Invoice::STATUS_PAID
+            && $invoice->status !== Invoice::STATUS_PAID;
+        $cancel = ($data['status'] ?? null) === Invoice::STATUS_CANCELLED
+            && $invoice->status !== Invoice::STATUS_CANCELLED;
+        $invoice = DB::transaction(function () use ($invoice, $data, $markPaid, $cancel) {
+            if ($markPaid || $cancel) {
+                unset($data['status']);
+            }
+            if ($data !== []) {
+                $invoice->update($data);
+            }
+
+            if ($markPaid) {
+                return app(MarkInvoicePaidService::class)->handle($invoice);
+            }
+            if ($cancel) {
+                return app(CancelInvoiceService::class)->handle($invoice);
+            }
+
+            return $invoice;
+        }, 5);
 
         // Return the updated invoice as a JSON response
         return new InvoiceResource($invoice);
@@ -82,6 +115,8 @@ class InvoiceController extends ApiController
      */
     public function destroy(DeleteInvoiceRequest $request, Invoice $invoice)
     {
+        app(CancelInvoiceService::class)->assertCanDelete($invoice);
+
         // Delete the invoice
         $invoice->delete();
 

@@ -3,13 +3,15 @@
 namespace App\Models;
 
 use App\Classes\Price as PriceClass;
+use App\Models\Concerns\SerializesCapacityConfigurationMutations;
+use App\Services\Service\CapacityConfigurationMutationGuard;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use OwenIt\Auditing\Contracts\Auditable;
 
 class Plan extends Model implements Auditable
 {
-    use \App\Models\Traits\Auditable, HasFactory;
+    use HasFactory, SerializesCapacityConfigurationMutations, Traits\Auditable;
 
     public $timestamps = false;
 
@@ -18,12 +20,34 @@ class Plan extends Model implements Auditable
         'type',
         'billing_period',
         'billing_unit',
+        'dynamic_slider_base_price',
         'sort',
     ];
 
     protected $casts = [
         'billing_period' => 'integer',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(
+            fn (Plan $plan) => app(CapacityConfigurationMutationGuard::class)
+                ->assertPlanMutable(
+                    $plan,
+                    $plan->exists && $plan->isDirty([
+                        'priceable_type',
+                        'priceable_id',
+                        'type',
+                        'billing_period',
+                        'billing_unit',
+                    ])
+                )
+        );
+        static::deleting(
+            fn (Plan $plan) => app(CapacityConfigurationMutationGuard::class)
+                ->assertPlanMutable($plan, true)
+        );
+    }
 
     /**
      * Get the available prices of the plan.
@@ -43,13 +67,15 @@ class Plan extends Model implements Auditable
 
     /**
      * Get the price of the plan.
+     *
+     * @param  string|null  $currency  Optional currency code to get the price for. If not provided, it will use the current session currency or default currency.
      */
-    public function price()
+    public function price($currency = null): PriceClass
     {
         if ($this->type === 'free') {
-            return new PriceClass(['currency' => Currency::find(session('currency', config('settings.default_currency')))], free: true);
+            return new PriceClass(['currency' => Currency::find($currency ?? session('currency', config('settings.default_currency')))], free: true);
         }
-        $currency = session('currency', config('settings.default_currency'));
+        $currency = $currency ?? session('currency', config('settings.default_currency'));
         $price = $this->prices->where('currency_code', $currency)->first();
 
         return new PriceClass((object) [

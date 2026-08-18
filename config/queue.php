@@ -13,8 +13,7 @@ return [
     |
     */
 
-    // Hardcoded to make sure the queue is always set to database.
-    'default' => 'database',
+    'default' => env('QUEUE_CONNECTION', 'database'),
 
     /*
     |--------------------------------------------------------------------------
@@ -35,12 +34,30 @@ return [
             'driver' => 'sync',
         ],
 
+        'redis' => [
+            'driver' => 'redis',
+            'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
+            'queue' => env('REDIS_QUEUE', 'default'),
+            // Server fulfillment jobs may run for 120 seconds. Keep queue
+            // visibility comfortably above that timeout so another worker
+            // cannot receive the same job while the first worker is active.
+            'retry_after' => max(
+                180,
+                (int) env('REDIS_QUEUE_RETRY_AFTER', 300)
+            ),
+            'block_for' => null,
+            'after_commit' => true,
+        ],
+
         'database' => [
             'driver' => 'database',
             'connection' => env('DB_QUEUE_CONNECTION', null),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => env('DB_QUEUE_RETRY_AFTER', 90),
+            'retry_after' => max(
+                180,
+                (int) env('DB_QUEUE_RETRY_AFTER', 300)
+            ),
             'after_commit' => true,
         ],
     ],

@@ -6,9 +6,13 @@ use App\Classes\Cart;
 use App\Livewire\Component;
 use App\Models\Currency;
 
+/**
+ * @deprecated This component is deprecated, use LocaleSwitch instead
+ * @see LocaleSwitch
+ */
 class CurrencySwitch extends Component
 {
-    public $currentCurrency;
+    public string $currentCurrency;
 
     protected $currencies = [];
 

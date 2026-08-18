@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Paymenter\Extensions\Others\Affiliates\Services\AffiliateRewardCalculator;
 
 class Affiliate extends Model
 {
@@ -30,27 +31,25 @@ class Affiliate extends Model
         return $this->hasMany(AffiliateOrder::class);
     }
 
+    public function rewards(): HasMany
+    {
+        return $this->hasMany(AffiliateReward::class);
+    }
+
     /**
-     * Get the earnings made by this affiliate
-     *
-     * @return string
+     * Get the immutable earnings credited to this affiliate.
      */
     public function earnings(): Attribute
     {
         return Attribute::make(
-            get: function (): array {
-                $earnings = [];
-                $this->orders->each(function ($order) use (&$earnings) {
-                    foreach ($order->earnings as $currency => $total) {
-                        if (!isset($earnings[$currency])) {
-                            $earnings[$currency] = 0;
-                        }
-                        $earnings[$currency] += $total;
-                    }
-                });
-
-                return $earnings;
-            },
+            get: fn (): array => app(AffiliateRewardCalculator::class)
+                ->summarize(
+                    $this->rewards()
+                        ->with('currency')
+                        ->orderBy('currency_code')
+                        ->orderBy('id')
+                        ->get(['currency_code', 'amount'])
+                ),
         );
     }
 }

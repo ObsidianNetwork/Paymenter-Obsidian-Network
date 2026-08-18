@@ -3,12 +3,18 @@
 namespace App\Livewire\Invoices;
 
 use App\Classes\PDF;
+use App\Enums\InvoiceTransactionStatus;
 use App\Helpers\ExtensionHelper;
 use App\Livewire\Component;
+use App\Models\BillingAgreement;
 use App\Models\Gateway;
 use App\Models\Invoice;
 use App\Models\Service;
+use App\Services\Invoice\CapacityInvoicePaymentService;
+use App\Services\Invoice\CreditInvoicePaymentService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Request;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Locked;
@@ -34,17 +40,35 @@ class Show extends Component
 
     public function mount()
     {
-        if (Request::has('checkPayment') && $this->invoice->status === 'pending') {
+        if (
+            Request::has('checkPayment')
+            && $this->invoice->status === 'pending'
+            && !$this->paymentRequiresAttention()
+            && !$this->capacityPaymentDeadlineExpired()
+        ) {
             $this->checkPayment = true;
         }
-        if ($this->invoice->transactions()->where('status', \App\Enums\InvoiceTransactionStatus::Processing)->exists()) {
+        if (
+            !$this->paymentRequiresAttention()
+            && !$this->capacityPaymentDeadlineExpired()
+            && $this->invoice->transactions()
+                ->where('status', InvoiceTransactionStatus::Processing)
+                ->exists()
+        ) {
             $this->checkPayment = true;
         }
 
         // Load relations
         $this->invoice->load('transactions', 'transactions.gateway', 'transactions.invoice');
 
-        if ($this->showPayModal && $this->invoice->status !== 'pending') {
+        if (
+            $this->showPayModal
+            && (
+                $this->invoice->status !== 'pending'
+                || $this->paymentRequiresAttention()
+                || $this->capacityPaymentDeadlineExpired()
+            )
+        ) {
             $this->showPayModal = false;
         }
     }
@@ -58,13 +82,20 @@ class Show extends Component
     #[Computed]
     public function paymentMethods()
     {
-        return ExtensionHelper::getBillingAgreementGateways($this->invoice->currency_code);
+        return ExtensionHelper::getBillingAgreementGateways(true);
     }
 
     #[Computed]
     public function savedPaymentMethods()
     {
-        return Auth::user()->billingAgreements()->with('gateway')->get();
+        $durableGatewayIds = collect(
+            ExtensionHelper::getBillingAgreementGateways(true)
+        )->pluck('id');
+
+        return Auth::user()->billingAgreements()
+            ->whereIn('gateway_id', $durableGatewayIds)
+            ->with('gateway')
+            ->get();
     }
 
     #[Computed]
@@ -82,13 +113,41 @@ class Show extends Component
 
     public function updatedShowPayModal($value)
     {
-        if ($value && $this->invoice->status !== 'pending') {
+        if (
+            $value
+            && (
+                $this->invoice->status !== 'pending'
+                || $this->paymentRequiresAttention()
+                || $this->capacityPaymentDeadlineExpired()
+            )
+        ) {
             $this->showPayModal = false;
         }
     }
 
     public function processPayment()
     {
+        $this->invoice->refresh();
+        if ($this->invoice->status !== 'pending') {
+            return $this->notify(__('This invoice cannot be paid.'), 'error');
+        }
+        if ($this->paymentRequiresAttention()) {
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('This invoice requires manual payment review. New payment attempts are disabled.'),
+                'error'
+            );
+        }
+        if ($this->capacityPaymentDeadlineExpired()) {
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('This invoice can no longer be paid because its capacity guarantee expired.'),
+                'error'
+            );
+        }
+
         if (is_null($this->selectedMethod)) {
             return;
         }
@@ -103,20 +162,6 @@ class Show extends Component
             return $this->payWithMethod($gatewayId);
         }
 
-        if ($this->setAsDefault) {
-            $invoiceItems = $this->recurringServices()->get();
-            $agreement = Auth::user()->billingAgreements()->where('ulid', $this->selectedMethod)->first();
-
-            foreach ($invoiceItems as $invoiceItem) {
-                $service = $invoiceItem->reference;
-                $service->update(['billing_agreement_id' => $agreement->id]);
-            }
-
-            if ($invoiceItems->count() > 0) {
-                $this->notify('Default payment method has been updated for recurring services.', 'success');
-            }
-        }
-
         return $this->payWithSavedMethod($this->selectedMethod);
     }
 
@@ -124,10 +169,6 @@ class Show extends Component
     {
         if (!in_array($methodId, array_column($this->gateways, 'id'))) {
             return $this->notify(__('Invalid payment method.'), 'error');
-        }
-
-        if ($this->invoice->status !== 'pending') {
-            return $this->notify(__('This invoice cannot be paid.'), 'error');
         }
 
         $this->pay = ExtensionHelper::pay(Gateway::where('id', $methodId)->first(), $this->invoice);
@@ -139,24 +180,23 @@ class Show extends Component
 
     private function payWithCredit()
     {
-        $credit = Auth::user()->credits()->where('currency_code', $this->invoice->currency_code)->lockForUpdate()->first();
-        if ($credit && $credit->amount > 0) {
-            // Is it more credits or less credits than the total price?
-            if ($credit->amount >= $this->invoice->remaining) {
-                $credit->amount -= $this->invoice->remaining;
-                $credit->save();
-                ExtensionHelper::addPayment($this->invoice->id, null, amount: $this->invoice->remaining, isCreditTransaction: true);
+        $result = app(CreditInvoicePaymentService::class)
+            ->pay($this->invoice);
+        $this->invoice = $result['invoice'];
 
-                return $this->redirect(route('invoices.show', $this->invoice), true);
-            } else {
-                ExtensionHelper::addPayment($this->invoice->id, null, amount: $credit->amount, isCreditTransaction: true);
-                $credit->amount = 0;
-                $credit->save();
-
-                $this->invoice = $this->invoice->fresh();
-                $this->notify(__('Part of the invoice has been paid with credits. Please pay the remaining amount'));
-            }
+        if ($result['applied'] === '0.00') {
+            return null;
         }
+        if ($result['fully_paid']) {
+            return $this->redirect(
+                route('invoices.show', $this->invoice),
+                true
+            );
+        }
+
+        return $this->notify(
+            __('Part of the invoice has been paid with credits. Please pay the remaining amount')
+        );
     }
 
     private function payWithSavedMethod($agreementUlid)
@@ -166,23 +206,73 @@ class Show extends Component
             return $this->notify(__('Invalid payment method.'), 'error');
         }
 
-        if (!in_array($agreement->gateway->id, array_column($this->paymentMethods, 'id'))) {
+        if (!in_array(
+            $agreement->gateway->id,
+            array_column($this->paymentMethods, 'id')
+        )) {
             return $this->notify(__('This payment method cannot be used for this invoice.'), 'error');
-        }
-
-        if ($this->invoice->status !== 'pending') {
-            return $this->notify(__('This invoice cannot be paid.'), 'error');
         }
 
         $success = ExtensionHelper::charge($agreement->gateway, $this->invoice, $agreement);
 
         if ($success === true) {
-            $this->notify(__('Successfully charged the saved payment method.'), 'success');
+            if (
+                $this->setAsDefault
+                && $this->updateDefaultBillingAgreement($agreement) > 0
+            ) {
+                $this->notify(
+                    'Default payment method has been updated for recurring services.',
+                    'success'
+                );
+            }
+            $this->notify(
+                __('The saved payment method charge was submitted. Payment status will update after provider confirmation.'),
+                'success'
+            );
 
             return $this->redirect(route('invoices.show', $this->invoice) . '?checkPayment', true);
         } else {
             return $this->notify(__('Could not process payment. Please try again or use a different payment method.'), 'error');
         }
+    }
+
+    private function updateDefaultBillingAgreement(
+        BillingAgreement $agreement
+    ): int {
+        $serviceIds = $this->recurringServices()
+            ->pluck('reference_id')
+            ->map(static fn ($id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->sort()
+            ->values();
+        if ($serviceIds->isEmpty()) {
+            return 0;
+        }
+
+        return DB::transaction(function () use (
+            $agreement,
+            $serviceIds
+        ): int {
+            $services = Service::query()
+                ->whereKey($serviceIds)
+                ->where('user_id', $this->invoice->user_id)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+            foreach ($services as $service) {
+                ServiceBillingAnchorMutationCoordinator::run(
+                    $service,
+                    function () use ($service, $agreement): void {
+                        $service->billing_agreement_id =
+                            (int) $agreement->id;
+                        $service->save();
+                    }
+                );
+            }
+
+            return $services->count();
+        }, 5);
     }
 
     public function exitPay()
@@ -197,11 +287,31 @@ class Show extends Component
     public function checkPaymentStatus()
     {
         $this->invoice->refresh();
+        if ($this->paymentRequiresAttention()) {
+            $this->checkPayment = false;
+            $this->lastChecked = null;
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('Payment was received, but this invoice requires manual review before fulfillment.'),
+                'error'
+            );
+        }
+        if ($this->capacityPaymentDeadlineExpired()) {
+            $this->checkPayment = false;
+            $this->lastChecked = null;
+            $this->showPayModal = false;
+
+            return $this->notify(
+                __('This invoice can no longer be paid because its capacity guarantee expired.'),
+                'error'
+            );
+        }
 
         // Check for transactions that failed since lastChecked
         if ($this->lastChecked) {
             $failedSinceLastCheck = $this->invoice->transactions()
-                ->where('status', \App\Enums\InvoiceTransactionStatus::Failed)
+                ->where('status', InvoiceTransactionStatus::Failed)
                 ->where('updated_at', '>', $this->lastChecked)
                 ->exists();
 
@@ -236,6 +346,20 @@ class Show extends Component
             'title' => __('invoices.invoice', ['id' => $this->invoice->number]),
             'sidebar' => true,
         ]);
+    }
+
+    #[Computed]
+    public function capacityPaymentDeadlineExpired(): bool
+    {
+        return app(CapacityInvoicePaymentService::class)
+            ->deadlineExpired($this->invoice);
+    }
+
+    #[Computed]
+    public function paymentRequiresAttention(): bool
+    {
+        return app(CapacityInvoicePaymentService::class)
+            ->requiresAttention($this->invoice);
     }
 
     public function downloadPDF()

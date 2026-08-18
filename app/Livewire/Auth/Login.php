@@ -5,7 +5,7 @@ namespace App\Livewire\Auth;
 use App\Livewire\Component;
 use App\Models\User;
 use App\Traits\Captchable;
-use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Session;
 use Livewire\Attributes\Validate;
@@ -20,43 +20,48 @@ class Login extends Component
     #[Validate('required')]
     public string $password = '';
 
-    public $remember = false;
+    public bool $remember = false;
 
-    public function submit()
+    public function submit(\App\Actions\Auth\Login $loginAction)
     {
         $this->captcha();
         $this->validate();
 
-        if (RateLimiter::tooManyAttempts('login:' . $this->email, 5)) {
-            $this->addError('email', 'Too many login attempts. Please try again in 60 seconds.');
+        $emailKey = strtolower($this->email);
+
+        if (RateLimiter::tooManyAttempts('login:' . $emailKey . ':' . request()->ip(), 5)) {
+            $this->addError('email', __('auth.throttle', [
+                'seconds' => RateLimiter::availableIn('login:' . $emailKey . ':' . request()->ip()),
+            ]));
 
             return;
         }
 
-        RateLimiter::increment('login:' . $this->email);
+        RateLimiter::increment('login:' . $emailKey . ':' . request()->ip());
 
-        if (!Auth::attempt($this->only('email', 'password'), $this->remember)) {
-            $this->addError('email', 'These credentials do not match our records.');
+        // Manually validate credentials instead of Auth::attempt
+        $user = User::where('email', $this->email)->first();
+
+        if (!$user || !Hash::check($this->password, $user->password)) {
+            $this->addError('email', __('auth.failed'));
 
             return;
         }
 
         // Check 2FA
-        if (Auth::user()->tfa_secret) {
+        if ($user->tfa_secret) {
             Session::put('2fa', [
-                'user_id' => Auth::id(),
+                'user_id' => $user->id,
                 'remember' => $this->remember,
                 'expires' => now()->addMinutes(5),
             ]);
 
-            Auth::logout();
-
             return $this->redirect(route('2fa'), true);
         }
 
-        RateLimiter::clear('login:' . $this->email);
+        RateLimiter::clear('login:' . $emailKey . ':' . request()->ip());
 
-        event(new \App\Events\Auth\Login(User::find(Auth::id())));
+        $loginAction->execute($user, $this->remember);
 
         $intendedUrl = session()->pull('url.intended', default: route('dashboard'));
         $isAdminRoute = str_starts_with($intendedUrl, url('/admin'));

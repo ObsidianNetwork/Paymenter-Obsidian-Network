@@ -2,8 +2,12 @@
 
 namespace App\Observers;
 
+use App\Enums\InvoiceTransactionStatus;
 use App\Events\InvoiceTransaction as InvoiceTransactionEvent;
 use App\Models\InvoiceTransaction;
+use App\Services\Invoice\CapacityInvoicePaymentService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class InvoiceTransactionObserver
 {
@@ -12,6 +16,23 @@ class InvoiceTransactionObserver
      */
     public function creating(InvoiceTransaction $invoice): void
     {
+        if (
+            Schema::hasColumn(
+                'invoice_transactions',
+                'gateway_transaction_guard'
+            )
+        ) {
+            $invoice->setAttribute(
+                'gateway_transaction_guard',
+                InvoiceTransaction::gatewayTransactionGuard(
+                    $invoice->gateway_id,
+                    $invoice->transaction_id
+                )
+            );
+        }
+        app(CapacityInvoicePaymentService::class)
+            ->assertPaymentAttemptAllowed((int) $invoice->invoice_id);
+        $this->assertAtomicSucceededPayment($invoice);
         event(new InvoiceTransactionEvent\Creating($invoice));
     }
 
@@ -28,6 +49,59 @@ class InvoiceTransactionObserver
      */
     public function updating(InvoiceTransaction $invoice): void
     {
+        if ($invoice->isDirty(['gateway_id', 'transaction_id'])) {
+            throw new \RuntimeException(
+                'A persisted gateway transaction identity is immutable.'
+            );
+        }
+        if (
+            $invoice->isDirty([
+                'invoice_id',
+                'amount',
+                'is_credit_transaction',
+            ])
+            && $this->wasInFlightOrSucceededCapacityEvidence($invoice)
+        ) {
+            throw new \RuntimeException(
+                'Processing and succeeded capacity payment evidence identity and amount are immutable.'
+            );
+        }
+        if (
+            $invoice->isDirty('status')
+            && $this->wasSucceededCapacityEvidence($invoice)
+        ) {
+            throw new \RuntimeException(
+                'Succeeded capacity payment evidence is immutable.'
+            );
+        }
+        if (
+            $invoice->isDirty('status')
+            && $this->wasProcessingCapacityEvidence($invoice)
+            && !app(CapacityInvoicePaymentService::class)
+                ->isRecordingPaymentEvidence(
+                    (int) $invoice->getRawOriginal('invoice_id')
+                )
+        ) {
+            throw new \RuntimeException(
+                'Processing capacity payment evidence must be finalized through the atomic payment coordinator.'
+            );
+        }
+        $evidenceFields = [
+            'invoice_id',
+            'gateway_id',
+            'amount',
+            'fee',
+            'transaction_id',
+            'status',
+            'is_credit_transaction',
+        ];
+        if ($invoice->isDirty($evidenceFields)) {
+            app(CapacityInvoicePaymentService::class)
+                ->assertPaymentAttemptAllowed((int) $invoice->invoice_id);
+        }
+        if ($invoice->isDirty('status')) {
+            $this->assertAtomicSucceededPayment($invoice);
+        }
         event(new InvoiceTransactionEvent\Updating($invoice));
     }
 
@@ -45,5 +119,101 @@ class InvoiceTransactionObserver
     public function deleted(InvoiceTransaction $invoice): void
     {
         event(new InvoiceTransactionEvent\Deleted($invoice));
+    }
+
+    public function deleting(InvoiceTransaction $invoice): void
+    {
+        app(CapacityInvoicePaymentService::class)
+            ->assertPaymentAttemptAllowed((int) $invoice->invoice_id);
+        if ($this->isInFlightOrSucceededCapacityEvidence($invoice)) {
+            throw new \RuntimeException(
+                'Processing or succeeded capacity payment evidence cannot be deleted.'
+            );
+        }
+    }
+
+    private function assertAtomicSucceededPayment(InvoiceTransaction $transaction): void
+    {
+        $status = $transaction->status instanceof InvoiceTransactionStatus
+            ? $transaction->status
+            : InvoiceTransactionStatus::tryFrom((string) $transaction->status);
+
+        if (
+            $status === InvoiceTransactionStatus::Succeeded
+            && app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator(
+                    (int) $transaction->invoice_id
+                )
+            && (
+                DB::transactionLevel() === 0
+                || !app(CapacityInvoicePaymentService::class)
+                    ->isRecordingPaymentEvidence(
+                        (int) $transaction->invoice_id
+                    )
+            )
+        ) {
+            throw new \RuntimeException(
+                'Succeeded capacity invoice transactions must be recorded through the atomic payment coordinator.'
+            );
+        }
+    }
+
+    private function isInFlightOrSucceededCapacityEvidence(
+        InvoiceTransaction $transaction
+    ): bool {
+        $status = $transaction->status instanceof InvoiceTransactionStatus
+            ? $transaction->status
+            : InvoiceTransactionStatus::tryFrom(
+                (string) $transaction->status
+            );
+
+        return in_array($status, [
+            InvoiceTransactionStatus::Processing,
+            InvoiceTransactionStatus::Succeeded,
+        ], true)
+            && app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator(
+                    (int) $transaction->invoice_id
+                );
+    }
+
+    private function wasSucceededCapacityEvidence(
+        InvoiceTransaction $transaction
+    ): bool {
+        return $this->originalCapacityEvidenceHasStatus(
+            $transaction,
+            InvoiceTransactionStatus::Succeeded
+        );
+    }
+
+    private function wasProcessingCapacityEvidence(
+        InvoiceTransaction $transaction
+    ): bool {
+        return $this->originalCapacityEvidenceHasStatus(
+            $transaction,
+            InvoiceTransactionStatus::Processing
+        );
+    }
+
+    private function wasInFlightOrSucceededCapacityEvidence(
+        InvoiceTransaction $transaction
+    ): bool {
+        return $this->wasProcessingCapacityEvidence($transaction)
+            || $this->wasSucceededCapacityEvidence($transaction);
+    }
+
+    private function originalCapacityEvidenceHasStatus(
+        InvoiceTransaction $transaction,
+        InvoiceTransactionStatus $expected
+    ): bool {
+        $status = InvoiceTransactionStatus::tryFrom(
+            (string) $transaction->getRawOriginal('status')
+        );
+
+        return $status === $expected
+            && app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator(
+                    (int) $transaction->getRawOriginal('invoice_id')
+                );
     }
 }

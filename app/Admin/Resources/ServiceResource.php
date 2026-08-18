@@ -14,9 +14,8 @@ use App\Helpers\ExtensionHelper;
 use App\Models\Currency;
 use App\Models\Product;
 use App\Models\Service;
+use App\Models\ServiceUpgrade;
 use Filament\Actions\Action;
-use Filament\Actions\BulkActionGroup;
-use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
@@ -43,12 +42,61 @@ class ServiceResource extends Resource
 
     public static function getNavigationBadge(): ?string
     {
-        return Service::where('status', 'pending')->count() ?: null;
+        return Service::query()
+            ->whereIn('status', [
+                Service::STATUS_PENDING,
+                Service::STATUS_PROVISIONING,
+                Service::STATUS_PROVISIONING_FAILED,
+                Service::STATUS_CANCELLATION_PENDING,
+            ])
+            ->count() ?: null;
     }
 
     public static function getNavigationBadgeColor(): ?string
     {
-        return 'warning';
+        return Service::query()
+            ->where('status', Service::STATUS_PROVISIONING_FAILED)
+            ->exists()
+                ? 'danger'
+                : 'warning';
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function statusOptions(): array
+    {
+        return [
+            Service::STATUS_ACTIVE => 'Active',
+            Service::STATUS_PENDING => 'Pending',
+            Service::STATUS_PROVISIONING => 'Provisioning',
+            Service::STATUS_PROVISIONING_FAILED => 'Provisioning Failed',
+            Service::STATUS_CANCELLATION_PENDING => 'Cancellation Pending',
+            Service::STATUS_SUSPENDED => 'Suspended',
+            Service::STATUS_CANCELLED => 'Cancelled',
+        ];
+    }
+
+    public static function statusColor(string $status): string
+    {
+        return match ($status) {
+            Service::STATUS_ACTIVE => 'success',
+            Service::STATUS_PROVISIONING => 'info',
+            Service::STATUS_PROVISIONING_FAILED,
+            Service::STATUS_CANCELLED => 'danger',
+            Service::STATUS_CANCELLATION_PENDING,
+            Service::STATUS_SUSPENDED => 'warning',
+            Service::STATUS_PENDING => 'gray',
+            default => 'gray',
+        };
+    }
+
+    private static function hasActiveUpgrade(?Service $service): bool
+    {
+        return $service?->exists === true
+            && $service->upgrade()
+                ->whereIn('status', ServiceUpgrade::activeStatuses())
+                ->exists();
     }
 
     protected static ?string $cluster = Services::class;
@@ -69,6 +117,7 @@ class ServiceResource extends Resource
                     ->searchable()
                     ->live()
                     ->preload()
+                    ->disabledOn('edit')
                     ->placeholder('Select the product'),
                 Select::make('plan_id')
                     ->label('Plan')
@@ -76,30 +125,35 @@ class ServiceResource extends Resource
                     ->relationship('plan', 'name', fn (Builder $query, Get $get) => $query->where('priceable_id', $get('product_id'))->where('priceable_type', Product::class))
                     ->searchable()
                     ->preload()
-                    ->disabled(fn (Get $get) => !$get('product_id'))
+                    ->disabled(
+                        fn (Get $get, ?Service $record): bool => $record?->exists === true
+                            || !$get('product_id')
+                    )
                     ->placeholder('Select the plan'),
                 UserComponent::make('user_id'),
                 Select::make('status')
                     ->label('Status')
                     ->required()
-                    ->options([
-                        // active, pending, suspended, cancelled
-                        'active' => 'Active',
-                        'pending' => 'Pending',
-                        'suspended' => 'Suspended',
-                        'cancelled' => 'Cancelled',
-                    ])
+                    ->options(self::statusOptions())
+                    ->disabledOn('edit')
                     ->default('pending'),
                 TextInput::make('quantity')
                     ->label('Quantity')
                     ->required()
+                    ->disabledOn('edit')
                     ->placeholder('Enter the quantity'),
                 DatePicker::make('expires_at')
                     ->label('Expires At')
+                    ->disabled(
+                        fn (?Service $record): bool => self::hasActiveUpgrade($record)
+                    )
                     ->required(fn (Get $get) => $get('plan')?->type != 'one-time' && $get('plan')?->type != 'free' && $get('status') !== 'pending')
                     ->placeholder('Select the expiration date'),
                 Select::make('coupon_id')
                     ->label('Coupon')
+                    ->disabled(
+                        fn (?Service $record): bool => self::hasActiveUpgrade($record)
+                    )
                     ->relationship('coupon', 'code')
                     ->searchable()
                     ->preload()
@@ -124,6 +178,9 @@ class ServiceResource extends Resource
                 TextInput::make('price')
                     ->required()
                     ->label('Price')
+                    ->disabled(
+                        fn (?Service $record): bool => self::hasActiveUpgrade($record)
+                    )
                     // Suffix based on chosen currency
                     ->prefix(fn (Get $get) => Currency::where('code', $get('currency_code'))->first()?->prefix)
                     ->suffix(fn (Get $get) => Currency::where('code', $get('currency_code'))->first()?->suffix)
@@ -201,13 +258,10 @@ class ServiceResource extends Resource
                     ->sortable(),
                 TextColumn::make('status')
                     ->badge()
-                    ->color(fn (Service $record) => match ($record->status) {
-                        'pending' => 'gray',
-                        'active' => 'success',
-                        'cancelled' => 'danger',
-                        'suspended' => 'warning',
-                    })
-                    ->formatStateUsing(fn (string $state) => ucfirst($state))
+                    ->color(fn (Service $record) => self::statusColor($record->status))
+                    ->formatStateUsing(
+                        fn (string $state) => ucwords(str_replace('_', ' ', $state))
+                    )
                     ->label('Status')
                     ->searchable()
                     ->sortable(),
@@ -220,12 +274,7 @@ class ServiceResource extends Resource
             ->filters([
                 SelectFilter::make('status')
                     ->label('Status')
-                    ->options([
-                        'active' => 'Active',
-                        'pending' => 'Pending',
-                        'suspended' => 'Suspended',
-                        'cancelled' => 'Cancelled',
-                    ]),
+                    ->options(self::statusOptions()),
                 SelectFilter::make('user')
                     ->label('User')
                     ->relationship('user', 'id')
@@ -261,11 +310,7 @@ class ServiceResource extends Resource
             ->recordActions([
                 EditAction::make(),
             ])
-            ->toolbarActions([
-                BulkActionGroup::make([
-                    DeleteBulkAction::make(),
-                ]),
-            ]);
+            ->toolbarActions([]);
     }
 
     public static function getRelations(): array

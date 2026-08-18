@@ -10,8 +10,11 @@ use App\Http\Requests\Api\Admin\Services\GetServicesRequest;
 use App\Http\Requests\Api\Admin\Services\UpdateServiceRequest;
 use App\Http\Resources\ServiceResource;
 use App\Models\Service;
+use App\Services\Service\DurableFulfillmentService;
+use App\Services\Service\ServiceBillingAnchorMutationCoordinator;
 use Dedoc\Scramble\Attributes\Group;
 use Dedoc\Scramble\Attributes\QueryParameter;
+use Illuminate\Http\Response;
 use Spatie\QueryBuilder\QueryBuilder;
 
 #[Group(name: 'Services', weight: 3)]
@@ -74,8 +77,9 @@ class ServiceController extends ApiController
      */
     public function update(UpdateServiceRequest $request, Service $service)
     {
-        // Validate and update the service
-        $service->update($request->validated());
+        $service = app(
+            ServiceBillingAnchorMutationCoordinator::class
+        )->update($service, $request->validated());
 
         // Return the updated service as a JSON response
         return new ServiceResource($service);
@@ -86,6 +90,22 @@ class ServiceController extends ApiController
      */
     public function destroy(DeleteServiceRequest $request, Service $service)
     {
+        $fulfillment = app(DurableFulfillmentService::class);
+        if ($fulfillment->isReservationBacked($service)) {
+            try {
+                $fulfillment->requestCancellation($service);
+            } catch (\RuntimeException $exception) {
+                return response()->json([
+                    'message' => $exception->getMessage(),
+                ], Response::HTTP_CONFLICT);
+            }
+
+            return response()->json([
+                'message' => 'Cancellation was queued. The service is retained as a durable fulfillment record.',
+                'service' => new ServiceResource($service->fresh()),
+            ], Response::HTTP_ACCEPTED);
+        }
+
         // Delete the service
         $service->delete();
 

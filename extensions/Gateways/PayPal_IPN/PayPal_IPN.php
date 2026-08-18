@@ -19,6 +19,15 @@ use Illuminate\Support\Facades\Http;
 )]
 class PayPal_IPN extends Gateway
 {
+    public function supportsDurablePaymentInitiations(): bool
+    {
+        // Reopening the legacy PayPal URL can submit another independent
+        // payment. There is no provider idempotency key or exact remote
+        // payment identity to reconcile, so the generic coordinator must
+        // treat any retry as indeterminate and fail closed.
+        return false;
+    }
+
     public function boot()
     {
         require __DIR__ . '/routes.php';
@@ -56,6 +65,7 @@ class PayPal_IPN extends Gateway
      */
     public function pay(Invoice $invoice, $total)
     {
+        $this->assertPaymentAttemptAllowed($invoice);
         $paypal_url = $this->config('test_mode') ? 'https://www.sandbox.paypal.com/cgi-bin/webscr' : 'https://www.paypal.com/cgi-bin/webscr';
         $paypal_email = $this->config('email');
         $return_url = route('invoices.show', $invoice);
@@ -90,7 +100,25 @@ class PayPal_IPN extends Gateway
 
         // Check if the response is verified
         if ($response->body() == 'VERIFIED') {
-            ExtensionHelper::addPayment($request->item_number, 'PayPal', $request->mc_gross, $request->mc_fee, transactionId: $request->txn_id);
+            // Validate owner and amount
+            if (strtolower($request->receiver_email) !== strtolower($this->config('email'))) {
+                return;
+            }
+            if ($request->payment_status !== 'Completed') {
+                return;
+            }
+            // Validate currency and amount
+            $invoice = Invoice::find($request->item_number);
+            if (!$invoice || $request->mc_currency !== $invoice->currency_code) {
+                return;
+            }
+            ExtensionHelper::addPayment(
+                $request->item_number,
+                'PayPal_IPN',
+                $request->mc_gross,
+                $request->mc_fee,
+                transactionId: $request->txn_id
+            );
         }
     }
 }

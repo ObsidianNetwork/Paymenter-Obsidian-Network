@@ -2,6 +2,8 @@
 
 namespace App\Classes;
 
+use App\Admin\Actions\ResetColorsAction;
+use App\Admin\Actions\SendTestEmailAction;
 use App\Models\Currency;
 use App\Models\Setting;
 use App\Models\TaxRate;
@@ -54,10 +56,20 @@ class Settings
                     'type' => 'select',
                     // Read languages from resources/lang directory
                     // The ternary operator is only present for now. Since there are no lang files, it returns [], which breaks the frontend, so we return ['en']
-                    'options' => glob(base_path('lang/*'), GLOB_ONLYDIR) ? array_map('basename', glob(base_path('lang/*'), GLOB_ONLYDIR)) : ['en'],
+                    'options' => self::getAvailableLanguages(),
                     'required' => true,
-                    'validation' => 'in:' . implode(',', glob(base_path('lang/*'), GLOB_ONLYDIR) ? array_map('basename', glob(base_path('lang/*'), GLOB_ONLYDIR)) : ['en']),
+                    'validation' => 'in:' . implode(',', self::getAvailableLanguages()),
                     'override' => 'app.locale',
+                ],
+                [
+                    'name' => 'allowed_languages',
+                    'label' => 'Allowed Languages',
+                    'type' => 'select',
+                    'options' => array_combine(self::getAvailableLanguages(), array_map('strtoupper', self::getAvailableLanguages())),
+                    'database_type' => 'array',
+                    'multiple' => true,
+                    'default' => self::getAvailableLanguages(),
+                    'required' => true,
                 ],
                 [
                     'name' => 'app_url',
@@ -125,18 +137,19 @@ class Settings
                         'hcaptcha' => 'hCaptcha',
                     ],
                     'default' => 'disabled',
+                    'live' => true,
                 ],
                 [
                     'name' => 'captcha_site_key',
                     'label' => 'Captcha Site Key',
                     'type' => 'text',
-                    'required' => false,
+                    'required' => fn (Get $get) => $get('captcha') && $get('captcha') !== 'disabled',
                 ],
                 [
                     'name' => 'captcha_secret',
                     'label' => 'Captcha Secret',
                     'type' => 'text',
-                    'required' => false,
+                    'required' => fn (Get $get) => $get('captcha') && $get('captcha') !== 'disabled',
                 ],
 
                 [
@@ -148,6 +161,24 @@ class Settings
                     'nested_validation' => [
                         new Cidr(allowWildCard: true),
                     ],
+                ],
+                [
+                    'name' => 'session_validation',
+                    'label' => 'Session Validation',
+                    'type' => 'select',
+                    'options' => [
+                        'none' => 'None',
+                        'ip_admin' => 'Lock session to IP address (Admin)',
+                        'ip_client' => 'Lock session to IP address (Client)',
+                        'ip_both' => 'Lock session to IP address (Admin & Client)',
+                        'user_agent_admin' => 'Lock session to User Agent (Admin)',
+                        'user_agent_client' => 'Lock session to User Agent (Client)',
+                        'user_agent' => 'Lock session to User Agent (Admin & Client)',
+                        'ip_user_agent_admin' => 'Lock session to IP address and User Agent (Admin)',
+                        'ip_user_agent_client' => 'Lock session to IP address and User Agent (Client)',
+                        'ip_user_agent_both' => 'Lock session to IP address and User Agent (Admin & Client)',
+                    ],
+                    'default' => 'none',
                 ],
             ],
 
@@ -258,6 +289,7 @@ class Settings
                     'type' => 'text',
                     'required' => fn (Get $get) => !$get('mail_disable'),
                     'override' => 'mail.mailers.smtp.host',
+                    'action' => SendTestEmailAction::class,
                 ],
                 [
                     'name' => 'mail_port',
@@ -337,6 +369,14 @@ class Settings
             ],
             'tickets' => [
                 [
+                    'name' => 'tickets_disabled',
+                    'label' => 'Disable Tickets',
+                    'type' => 'checkbox',
+                    'database_type' => 'boolean',
+                    'default' => false,
+                    'description' => 'Disable the ticket system. This will disable all client side ticket functionality, including the ability to create new tickets and view existing tickets.',
+                ],
+                [
                     'name' => 'ticket_departments',
                     'label' => 'Ticket Departments',
                     'type' => 'tags',
@@ -395,7 +435,7 @@ class Settings
                     'type' => 'time',
                     'default' => '00:00',
                     'required' => true,
-                    'description' => 'Time the cron job should run daily (in 24 hour format, e.g. 14:00 for 2 PM).',
+                    'description' => 'Time the cron job should run daily.',
                 ],
                 [
                     'name' => 'cronjob_invoice',
@@ -505,6 +545,7 @@ class Settings
                     // Read themes from themes directory
                     'options' => array_map('basename', glob(base_path('themes/*'), GLOB_ONLYDIR)),
                     'validation' => 'in:' . implode(',', array_map('basename', glob(base_path('themes/*'), GLOB_ONLYDIR))),
+                    'action' => ResetColorsAction::class,
                 ],
             ],
             'invoices' => [
@@ -570,7 +611,6 @@ class Settings
                         'wavatar' => 'Wavatar',
                         'retro' => 'Retro',
                         'robohash' => 'Robohash',
-                        'blank' => 'Blank',
                     ],
                     'default' => 'wavatar',
                 ],
@@ -589,14 +629,6 @@ class Settings
                     'database_type' => 'boolean',
                     'default' => false,
                     'description' => 'Only allow existing users to log in. This will hide the registration page and prevent new users from signing up.',
-                ],
-                [
-                    'name' => 'tickets_disabled',
-                    'label' => 'Disable Tickets',
-                    'type' => 'checkbox',
-                    'database_type' => 'boolean',
-                    'default' => false,
-                    'description' => 'Disable the ticket system. This will disable all client side ticket functionality, including the ability to create new tickets and view existing tickets.',
                 ],
                 [
                     'name' => 'pagination',
@@ -621,6 +653,15 @@ class Settings
         $settings['theme'] = [...$settings['theme'], ...Theme::getSettings()];
 
         return $settings;
+    }
+
+    private static function getAvailableLanguages(): array
+    {
+        return once(
+            fn () => glob(base_path('lang/*'), GLOB_ONLYDIR)
+            ? array_map('basename', glob(base_path('lang/*'), GLOB_ONLYDIR))
+            : ['en']
+        );
     }
 
     public static function tax(?User $user = null)

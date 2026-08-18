@@ -8,29 +8,36 @@
             <div class="bg-secondary/10 p-2 rounded-lg">
                 <x-ri-instance-line class="size-5 text-secondary" />
             </div>
-            <span class="font-medium">{{ $service->product->name }}</span>
+            <span class="font-medium">{{ $service->label }}</span>
             </div>
             <div class="size-5 rounded-md p-0.5
                 @if ($service->status == 'active') text-success bg-success/20 
-                @elseif($service->status == 'suspended' || $service->status == 'cancelled') text-inactive bg-inactive/20
+                @elseif(in_array($service->status, ['suspended', 'cancelled', 'provisioning_failed'])) text-inactive bg-inactive/20
                 @else text-warning bg-warning/20 
                 @endif">
                 @if ($service->status == 'active')
                     <x-ri-checkbox-circle-fill />
-                @elseif($service->status == 'suspended' || $service->status == 'cancelled')
+                @elseif(in_array($service->status, ['suspended', 'cancelled', 'provisioning_failed']))
                     <x-ri-forbid-fill />
-                @elseif($service->status == 'pending')
+                @elseif(in_array($service->status, ['pending', 'provisioning', 'cancellation_pending']))
                     <x-ri-error-warning-fill />
                 @endif
             </div>
         </div>
-        <p class="text-base text-sm">Product(s): {{ $service->product->category->name }} {{
-                in_array($service->plan->type, ['recurring']) ? ' - ' . __('services.every_period', [
+        <div class="text-base text-sm flex gap-1">
+            {{
+                in_array($service->plan->type, ['recurring']) ?  __('services.every_period', [
                 'period' => $service->plan->billing_period > 1 ? $service->plan->billing_period : '',
                 'unit' => trans_choice(__('services.billing_cycles.' . $service->plan->billing_unit),
                 $service->plan->billing_period)
-                ]) : '' }} {{ $service->expires_at ? '- ' . __('services.expires_at') . ': '. $service->expires_at->format('M d, Y') : ''}}</p>
-        </p>
+                ]) : '' }}
+                @if($service->expires_at && $service->expires_at > now())
+                -  {{ __('services.renews_in') }} 
+                <x-tooltip :message="$service->expires_at->format('M d, Y')">
+                    {{ $service->expires_at->longAbsoluteDiffForHumans() }}
+                </x-tooltip>
+                @endif
+            </div>
         </div>
     </a>
     @empty

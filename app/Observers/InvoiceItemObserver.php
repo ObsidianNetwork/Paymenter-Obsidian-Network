@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Events\InvoiceItem as InvoiceItemEvent;
 use App\Models\InvoiceItem;
+use App\Services\Invoice\CapacityInvoicePaymentService;
 
 class InvoiceItemObserver
 {
@@ -12,6 +13,17 @@ class InvoiceItemObserver
      */
     public function creating(InvoiceItem $invoice): void
     {
+        if (
+            $invoice->invoice_id !== null
+            && app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator(
+                    (int) $invoice->invoice_id
+                )
+        ) {
+            throw new \RuntimeException(
+                'Durable fulfillment lines are immutable.'
+            );
+        }
         event(new InvoiceItemEvent\Creating($invoice));
     }
 
@@ -28,7 +40,51 @@ class InvoiceItemObserver
      */
     public function updating(InvoiceItem $invoice): void
     {
+        $sourceInvoiceId = $invoice->getRawOriginal('invoice_id');
+        $destinationInvoiceId = $invoice->invoice_id;
+        $payments = app(CapacityInvoicePaymentService::class);
+        if (
+            $invoice->isDirty([
+                'invoice_id',
+                'quantity',
+                'price',
+                'reference_id',
+                'reference_type',
+            ])
+            && (
+                (
+                    $sourceInvoiceId !== null
+                    && $payments->requiresFulfillmentCoordinator(
+                        (int) $sourceInvoiceId
+                    )
+                )
+                || (
+                    $destinationInvoiceId !== null
+                    && $payments->requiresFulfillmentCoordinator(
+                        (int) $destinationInvoiceId
+                    )
+                )
+            )
+        ) {
+            throw new \RuntimeException(
+                'Durable fulfillment lines are immutable.'
+            );
+        }
+
         event(new InvoiceItemEvent\Updating($invoice));
+    }
+
+    public function deleting(InvoiceItem $invoice): void
+    {
+        if (
+            $invoice->invoice !== null
+            && app(CapacityInvoicePaymentService::class)
+                ->requiresFulfillmentCoordinator($invoice->invoice)
+        ) {
+            throw new \RuntimeException(
+                'Durable-fulfillment invoice lines cannot be deleted.'
+            );
+        }
     }
 
     /**

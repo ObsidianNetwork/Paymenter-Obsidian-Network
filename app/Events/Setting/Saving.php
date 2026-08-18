@@ -22,8 +22,8 @@ class Saving
             try {
                 $setting->value = Crypt::encryptString($setting->value);
             } catch (Throwable $th) {
-                // Normal `throw new Exception($th)` wasn't working here, so we are using dump-and-die for now.
-                dd($th, $setting->value);
+                report($th);
+                throw $th;
             }
 
             // An encrypted value can only be a string, so we refrain from converting its type
@@ -33,10 +33,13 @@ class Saving
         switch ($setting->type) {
             case 'boolean':
                 $setting->value = (bool) $setting->value;
+                break;
             case 'integer':
                 $setting->value = (int) $setting->value;
+                break;
             case 'float':
                 $setting->value = (float) $setting->value;
+                break;
             case 'array':
                 if (!is_string($setting->value) || is_null(json_decode($setting->value))) {
                     $setting->value = json_encode($setting->value);

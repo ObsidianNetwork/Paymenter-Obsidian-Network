@@ -45,6 +45,15 @@ class OrderObserver
         event(new OrderEvent\Updated($order));
     }
 
+    public function deleting(Order $order): void
+    {
+        if ($order->services()->exists()) {
+            throw new \RuntimeException(
+                'Orders with fulfillment history cannot be deleted. Cancel and retain their services instead.'
+            );
+        }
+    }
+
     /**
      * Handle the Order "deleted" event.
      */

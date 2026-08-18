@@ -4,13 +4,16 @@ namespace Tests\Feature;
 
 use App\Models\ConfigOption;
 use App\Models\ConfigOptionProduct;
+use App\Models\Coupon;
 use App\Models\Plan;
 use App\Models\Price;
 use App\Models\Product;
 use App\Models\Service;
 use App\Models\ServiceConfig;
+use App\Models\TaxRate;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Once;
 use Tests\TestCase;
 
 /**
@@ -184,5 +187,63 @@ class ServiceRecalculationTest extends TestCase
 
         // Only plan price, no slider charge
         $this->assertEquals('10.00', $calculated);
+    }
+
+    public function test_fixed_coupon_is_applied_after_exclusive_tax(): void
+    {
+        config([
+            'settings.tax_enabled' => true,
+            'settings.tax_type' => 'exclusive',
+        ]);
+        TaxRate::create([
+            'name' => 'GST',
+            'country' => 'all',
+            'rate' => 20,
+        ]);
+        Once::flush();
+        $user = User::factory()->create();
+        $product = Product::factory()->create([
+            'name' => 'Taxed service',
+            'description' => 'Test',
+        ]);
+        $plan = Plan::factory()->create([
+            'priceable_id' => $product->id,
+            'priceable_type' => Product::class,
+            'name' => 'Monthly',
+            'billing_unit' => 'month',
+            'billing_period' => 1,
+            'type' => 'recurring',
+        ]);
+        Price::factory()->create([
+            'plan_id' => $plan->id,
+            'price' => '100.00',
+            'setup_fee' => '0.00',
+            'currency_code' => 'USD',
+        ]);
+        $coupon = Coupon::create([
+            'type' => 'fixed',
+            'applies_to' => 'all',
+            'recurring' => 0,
+            'code' => 'TEN-AFTER-TAX',
+            'value' => 10,
+        ]);
+        $service = Service::factory()->create([
+            'user_id' => $user->id,
+            'product_id' => $product->id,
+            'plan_id' => $plan->id,
+            'coupon_id' => $coupon->id,
+            'status' => Service::STATUS_ACTIVE,
+            'currency_code' => 'USD',
+            'billing_cycles_completed' => 1,
+        ])->fresh([
+            'plan.prices',
+            'configs.configOption',
+            'properties',
+            'coupon',
+            'currency',
+            'user.properties',
+        ]);
+
+        $this->assertSame('110.00', $service->calculatePrice());
     }
 }

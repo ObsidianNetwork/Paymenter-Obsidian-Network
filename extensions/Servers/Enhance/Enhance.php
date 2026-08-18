@@ -295,11 +295,18 @@ class Enhance extends Server
             throw new Exception('Service does not exist');
         }
 
-        if (!$service->properties()->where('key', 'subscription_id')->exists()) {
-            throw new Exception('Missing user organization ID');
+        $organizationId = trim((string) data_get(
+            $properties,
+            '_provisioner_user_identity.enhance_org_id',
+            ''
+        ));
+        if ($organizationId === '') {
+            throw new Exception(
+                'The signed Enhance organization identity is missing'
+            );
         }
 
-        $this->request('/orgs/' . $service->user->properties()->where('key', 'enhance_orgId')->first()->value . '/subscriptions/' . $properties['subscription_id'], 'patch', [
+        $this->request('/orgs/' . $organizationId . '/subscriptions/' . $properties['subscription_id'], 'patch', [
             'planId' => (int) ($properties['plan'] ?? $settings['plan']),
         ]);
 

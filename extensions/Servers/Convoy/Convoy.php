@@ -8,6 +8,7 @@ use App\Models\Service;
 use Exception;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use Paymenter\Extensions\Servers\Convoy\Rules\Hostname;
 
 class Convoy extends Server
 {
@@ -163,7 +164,7 @@ class Convoy extends Server
                 'label' => 'Hostname',
                 'placeholder' => 'server.example.com',
                 'required' => true,
-                'validation' => 'required|string|max:40',
+                'validation' => ['required', 'string', 'max:40', new Hostname],
             ],
         ];
     }
@@ -258,7 +259,7 @@ class Convoy extends Server
         $data = [
             'node_id' => (int) $node,
             'user_id' => $user['id'],
-            'name' => $hostname . ' ' . $service->user->name,
+            'name' => Str::substr($hostname . ' ' . $service->user->name, 0, 40), // The server name must not be greater than 40 characters
             'hostname' => $hostname,
             'vmid' => null,
             'limits' => [

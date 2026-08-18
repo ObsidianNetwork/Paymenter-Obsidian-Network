@@ -1,5 +1,6 @@
 import { Livewire, Alpine } from '../../../vendor/livewire/livewire/dist/livewire.esm';
-import dynamicSliderGroup from '../../../resources/js/dynamic-slider-group';
+import anchor from '@alpinejs/anchor'
+import dynamicResourceStock from './dynamic-resource-stock'
 
 document.addEventListener('livewire:init', () => {
     Livewire.hook('request', ({ fail }) => {
@@ -97,16 +98,13 @@ Alpine.store('confirmation', {
     }
 })
 
-Alpine.data('dynamicSliderGroup', dynamicSliderGroup)
-
+Alpine.data('dynamicResourceStock', dynamicResourceStock)
+Alpine.plugin(anchor)
 if ('serviceWorker' in navigator) {
     navigator.serviceWorker
         .register('/service-worker.js')
         .then(function (registration) {
-            console.log(
-                'Service Worker registered with scope:',
-                registration.scope
-            )
+            // Yay! Registration successful
         })
         .catch(function (error) {
             console.log('Service Worker registration failed:', error)

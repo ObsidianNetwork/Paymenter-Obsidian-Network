@@ -4,13 +4,15 @@ use App\Http\Middleware\Api\AdminApi;
 use App\Http\Middleware\CheckoutParameterMiddleware;
 use App\Http\Middleware\EnsureUserHasPermissions;
 use App\Http\Middleware\ImpersonateMiddleware;
+use App\Http\Middleware\LockSession;
 use App\Http\Middleware\ProxyMiddleware;
+use App\Http\Middleware\ResolveUserSession;
 use App\Http\Middleware\SetLocale;
 use App\Models\DebugLog;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
-use Laravel\Passport\Http\Middleware\CheckForAnyScope;
+use Laravel\Passport\Http\Middleware\CheckTokenForAnyScope;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -23,13 +25,15 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->append(ProxyMiddleware::class);
         $middleware->alias([
             'has' => EnsureUserHasPermissions::class,
-            'scope' => CheckForAnyScope::class,
+            'scope' => CheckTokenForAnyScope::class,
             'api.admin' => AdminApi::class,
             'checkout' => CheckoutParameterMiddleware::class,
         ]);
         $middleware->web([
-            SetLocale::class,
+            ResolveUserSession::class,
+            LockSession::class,
             ImpersonateMiddleware::class,
+            SetLocale::class,
         ]);
     })
     ->withEvents(discover: [

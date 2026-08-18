@@ -41,6 +41,8 @@ return [
 
     'statuses' => [
         'pending' => 'Pending',
+        'provisioning' => 'Provisioning',
+        'provisioning_failed' => 'Provisioning Failed',
         'active' => 'Active',
         'cancelled' => 'Cancelled',
         'suspended' => 'Suspended',
@@ -55,7 +57,8 @@ return [
     'every_period' => 'Every :period :unit',
     'price_every_period' => ':price per :period :unit',
     'price_one_time' => ':price one time',
-    'expires_at' => 'Expires at',
+    'renews_in' => 'Renews in',
+    'renews_on' => 'Renews on',
     'auto_pay' => 'Auto paying using',
     'auto_pay_not_configured' => 'Not configured',
 
@@ -66,4 +69,10 @@ return [
 
     'remove_payment_method' => 'Remove Payment Method',
     'remove_payment_method_confirm' => 'Are you sure you want to remove the payment method ":name" from this service? Your service will no longer be able to auto pay its invoices.',
+
+    'label' => 'Label',
+    'label_placeholder' => 'Enter a custom label for this service',
+    'label_modal_title' => 'Edit Service Label',
+    'update_label' => 'Update Label',
+
 ];

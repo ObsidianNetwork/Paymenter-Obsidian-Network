@@ -7,6 +7,7 @@ use App\Helpers\ExtensionHelper;
 use Arr;
 use Filament\Resources\Pages\CreateRecord;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 
 class CreateGateway extends CreateRecord
 {
@@ -21,26 +22,32 @@ class CreateGateway extends CreateRecord
 
     protected function handleRecordCreation(array $data): Model
     {
-        $data['enabled'] = true;
-        $record = static::getModel()::create(Arr::except($data, ['settings']));
+        // Extension activation may mutate a remote gateway. Do not enable
+        // automatic database retries around a non-repeatable external hook.
+        return DB::transaction(function () use ($data): Model {
+            $data['enabled'] = true;
+            $record = static::getModel()::create(
+                Arr::except($data, ['settings'])
+            );
 
-        if (!isset($data['settings'])) {
-            return $record;
-        }
-
-        foreach ($data['settings'] as $key => $value) {
-            if (is_null($value)) {
-                continue;
+            foreach ($data['settings'] ?? [] as $key => $value) {
+                if (is_null($value)) {
+                    continue;
+                }
+                $record->settings()->updateOrCreate([
+                    'key' => $key,
+                ], [
+                    'value' => $value,
+                ]);
             }
-            $record->settings()->updateOrCreate([
-                'key' => $key,
-            ], [
-                'value' => $value,
-            ]);
-        }
 
-        ExtensionHelper::call($record, 'enabled', [$record], mayFail: true);
+            $record->unsetRelation('settings');
 
-        return $record;
+            if (ExtensionHelper::hasFunction($record, 'enabled')) {
+                ExtensionHelper::call($record, 'enabled', [$record]);
+            }
+
+            return $record;
+        });
     }
 }

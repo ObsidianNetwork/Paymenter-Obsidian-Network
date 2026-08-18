@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Actions\Auth\Login;
 use App\Models\User;
-use Illuminate\Support\Facades\Auth;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\Session;
 use Laravel\Socialite\Facades\Socialite;
 use Laravel\Socialite\Two\GithubProvider;
 use Laravel\Socialite\Two\GoogleProvider;
@@ -54,6 +56,7 @@ class SocialLoginController extends Controller
 
     public function handle($provider)
     {
+        $action = new Login;
         if ($provider == 'discord') {
             $oauth_user = $this->discord_driver->user();
 
@@ -61,38 +64,44 @@ class SocialLoginController extends Controller
                 return redirect()->route('login')->with('error', __('auth.oauth.unverified_discord_account'));
             }
 
-            $user = User::where('email', $oauth_user->email)->first();
-            if (!$user) {
-                return redirect()->route('register')->with('error', __('auth.oauth.account_not_registered'));
-            }
-
-            Auth::login($user, true);
-
-            return redirect()->route('home');
+            return $this->findUserAndLogin($oauth_user->email);
         } elseif ($provider == 'google') {
             $oauth_user = $this->google_driver->user();
 
-            $user = User::where('email', $oauth_user->email)->first();
-            if (!$user) {
-                return redirect()->route('register')->with('error', __('auth.oauth.account_not_registered'));
+            if (!$oauth_user->user['email_verified']) {
+                return redirect()->route('login')->with('error', __('auth.oauth.unverified_google_account'));
             }
 
-            Auth::login($user, true);
-
-            return redirect()->route('home');
+            return $this->findUserAndLogin($oauth_user->email);
         } elseif ($provider == 'github') {
             $oauth_user = $this->github_driver->user();
 
-            $user = User::where('email', $oauth_user->email)->first();
-            if (!$user) {
-                return redirect()->route('register')->with('error', __('auth.oauth.account_not_registered'));
-            }
-
-            Auth::login($user, true);
-
-            return redirect()->route('home');
+            return $this->findUserAndLogin($this->github_driver->user()->email);
         } else {
             return redirect()->route('login');
         }
+    }
+
+    private function findUserAndLogin(string $email): RedirectResponse
+    {
+        $user = User::where('email', $email)->first();
+
+        if (!$user) {
+            return redirect()->route('register')->with('error', __('auth.oauth.account_not_registered'));
+        }
+
+        if ($user->tfa_secret) {
+            Session::put('2fa', [
+                'user_id' => $user->id,
+                'remember' => true,
+                'expires' => now()->addMinutes(5),
+            ]);
+
+            return redirect()->route('2fa');
+        }
+
+        (new Login)->execute($user, true);
+
+        return redirect()->route('home');
     }
 }

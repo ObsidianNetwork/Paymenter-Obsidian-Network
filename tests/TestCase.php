@@ -2,6 +2,11 @@
 
 namespace Tests;
 
+use App\Models\Plan;
+use App\Models\Price;
+use App\Models\Product;
+use App\Models\User;
+use App\Models\UserSession;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 
 abstract class TestCase extends BaseTestCase
@@ -13,7 +18,7 @@ abstract class TestCase extends BaseTestCase
     {
 
         // Create product + plan + price
-        $product = \App\Models\Product::factory()->create(array_merge([
+        $product = Product::factory()->create(array_merge([
             'name' => 'Test Product',
             'description' => 'This is a test product.',
         ], $attributes));
@@ -24,9 +29,9 @@ abstract class TestCase extends BaseTestCase
             'description' => 'This is a test product.',
         ]);
 
-        $plan = \App\Models\Plan::factory()->create([
+        $plan = Plan::factory()->create([
             'priceable_id' => $product->id,
-            'priceable_type' => \App\Models\Product::class,
+            'priceable_type' => Product::class,
             'name' => 'Test Plan',
             'billing_unit' => 'month',
             'billing_period' => 1,
@@ -41,7 +46,7 @@ abstract class TestCase extends BaseTestCase
             'type' => 'recurring',
         ]);
 
-        \App\Models\Price::factory()->create([
+        Price::factory()->create([
             'plan_id' => $plan->id,
             'price' => 10.00,
             'currency_code' => 'USD',
@@ -57,5 +62,23 @@ abstract class TestCase extends BaseTestCase
             'product' => $product,
             'plan' => $plan,
         ];
+    }
+
+    /**
+     * Helper to create a user session and set it in the session
+     */
+    protected function loginUser(User $user, array $sessionData = []): array
+    {
+        $userSession = UserSession::create([
+            'user_id' => $user->id,
+            'ip_address' => request()->ip(),
+            'user_agent' => substr(request()->userAgent() ?? '', 0, 512),
+            'last_activity' => now(),
+            'expires_at' => null,
+        ]);
+
+        return array_merge([
+            'user_session' => $userSession->ulid,
+        ], $sessionData);
     }
 }

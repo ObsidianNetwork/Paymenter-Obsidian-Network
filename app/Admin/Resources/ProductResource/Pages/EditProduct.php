@@ -13,6 +13,7 @@ use Filament\Notifications\Notification;
 use Filament\Resources\Pages\EditRecord;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class EditProduct extends EditRecord
@@ -94,33 +95,50 @@ class EditProduct extends EditRecord
 
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
-        $record->update(Arr::except($data, ['settings']));
+        return DB::transaction(function () use ($record, $data): Model {
+            Product::query()
+                ->whereKey($record->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+            $record->update(Arr::except($data, ['settings']));
 
-        if (!isset($data['settings'])) {
+            if (!isset($data['settings'])) {
+                return $record;
+            }
+
+            $productConfig = ExtensionHelper::getProductConfig(
+                Server::findOrFail($data['server_id']),
+                $data['settings']
+            );
+
+            $settings = array_map(function ($option) use ($data, $record) {
+                return [
+                    'key' => $option['name'],
+                    'settingable_id' => $record->id,
+                    'settingable_type' => $record->getMorphClass(),
+                    'type' => $option['database_type'] ?? 'string',
+                    'value' => isset($data['settings'][$option['name']])
+                        ? (
+                            is_array($data['settings'][$option['name']])
+                                ? json_encode(
+                                    $data['settings'][$option['name']]
+                                )
+                                : $data['settings'][$option['name']]
+                        )
+                        : null,
+                ];
+            }, $productConfig);
+
+            $record->settings()->upsert($settings, uniqueBy: [
+                'key',
+                'settingable_id',
+                'settingable_type',
+            ], update: [
+                'type',
+                'value',
+            ]);
+
             return $record;
-        }
-
-        $product_config = ExtensionHelper::getProductConfig(Server::findOrFail($data['server_id']), $data['settings']);
-
-        $things = array_map(function ($option) use ($data, $record) {
-            return [
-                'key' => $option['name'],
-                'settingable_id' => $record->id,
-                'settingable_type' => $record->getMorphClass(),
-                'type' => $option['database_type'] ?? 'string',
-                'value' => isset($data['settings'][$option['name']]) ? (is_array($data['settings'][$option['name']]) ? json_encode($data['settings'][$option['name']]) : $data['settings'][$option['name']]) : null,
-            ];
-        }, $product_config);
-
-        $record->settings()->upsert($things, uniqueBy: [
-            'key',
-            'settingable_id',
-            'settingable_type',
-        ], update: [
-            'type',
-            'value',
-        ]);
-
-        return $record;
+        }, 5);
     }
 }

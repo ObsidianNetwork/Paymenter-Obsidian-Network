@@ -4,6 +4,7 @@ namespace App\Admin\Resources\ExtensionResource\Pages;
 
 use App\Admin\Resources\ExtensionResource;
 use App\Helpers\ExtensionHelper;
+use App\Services\Extensions\ExtensionLifecycleGuard;
 use Filament\Actions\Action;
 use Filament\Resources\Pages\EditRecord;
 use Illuminate\Database\Eloquent\Model;
@@ -22,6 +23,8 @@ class EditExtension extends EditRecord
                 ->label('Uninstall Extension')
                 ->modalDescription('Are you sure you want to uninstall this extension? This will remove all its data and settings.')
                 ->action(function (Model $record) {
+                    app(ExtensionLifecycleGuard::class)
+                        ->assertCanDeactivate($record);
                     // Call the extension's uninstalled method
                     ExtensionHelper::call($record, 'uninstalled', mayFail: true);
                     // Delete the record
@@ -53,8 +56,12 @@ class EditExtension extends EditRecord
         if ($record->enabled != $data['enabled']) {
             // if the extension is being enabled, we need to run the extension's setup method
             if ($data['enabled']) {
+                app(ExtensionLifecycleGuard::class)
+                    ->assertCanActivate($record);
                 ExtensionHelper::call($record, 'enabled', [$record], mayFail: true);
             } else {
+                app(ExtensionLifecycleGuard::class)
+                    ->assertCanDeactivate($record);
                 ExtensionHelper::call($record, 'disabled', [$record], mayFail: true);
             }
         }

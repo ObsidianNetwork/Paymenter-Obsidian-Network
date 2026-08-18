@@ -1,13 +1,19 @@
 {
     "name": "paymenter/paymenter",
     "type": "project",
-    "description": "The skeleton application for the Laravel framework.",
+    "description": "Paymenter is a self-hosted, open-source, and free invoicing and billing software built with Laravel.",
     "keywords": [
+        "invoicing",
+        "billing",
         "laravel",
-        "framework"
+        "open-source",
+        "self-hosted",
+        "subscription",
+        "payment",
+        "invoice",
+        "billing software"
     ],
     "license": "MIT",
-    "version": "1.4.7",
     "require": {
         "php": "^8.3 || ^8.4",
         "ext-intl": "*",
@@ -20,12 +26,13 @@
         "barryvdh/laravel-dompdf": "^3.0",
         "directorytree/imapengine": "^1.15",
         "endroid/qr-code": "^5.0",
-        "filament/filament": "^4.0.0",
+        "filament/filament": "^5.0",
         "flowframe/laravel-trend": "^0.4.0",
         "laravel/framework": "^12.0",
-        "laravel/passport": "^12.0",
+        "laravel/passport": "^13.7",
         "laravel/socialite": "^5.14",
         "laravel/tinker": "^2.9",
+        "livewire/livewire": "^4.0",
         "minishlink/web-push": "9",
         "owen-it/laravel-auditing": "^14.0",
         "qirolab/laravel-themer": "^2.2.1",
@@ -40,13 +47,13 @@
         "barryvdh/laravel-debugbar": "^3.13",
         "dedoc/scramble": "^0.12.21",
         "fakerphp/faker": "^1.23",
+        "filament/upgrade": "~5.0",
         "larastan/larastan": "^3.0",
         "laravel/pint": "^1.13",
         "laravel/sail": "^1.26",
-        "livewire/livewire": "^3.4",
         "mockery/mockery": "^1.6",
         "nunomaduro/collision": "^8.0",
-        "phpunit/phpunit": "^11.0",
+        "phpunit/phpunit": "^12.5",
         "spatie/laravel-ignition": "^2.4"
     },
     "autoload": {
@@ -91,6 +98,9 @@
     },
     "config": {
         "optimize-autoloader": true,
+        "platform": {
+            "php": "8.3.0"
+        },
         "preferred-install": "dist",
         "sort-packages": true,
         "allow-plugins": {

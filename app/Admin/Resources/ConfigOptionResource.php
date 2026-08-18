@@ -10,7 +10,6 @@ use App\Rules\DynamicSliderPricingRule;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\Checkbox;
 use Filament\Forms\Components\Hidden;
-use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -48,6 +47,11 @@ class ConfigOptionResource extends Resource
                                 ->required()
                                 ->maxLength(255)
                                 ->placeholder('Enter the name of the configuration option'),
+                            TextInput::make('description')
+                                ->label('Description')
+                                ->columnSpanFull()
+                                ->maxLength(255)
+                                ->placeholder('Enter the description of the configuration option'),
                             TextInput::make('env_variable')
                                 ->label('Environment Variable')
                                 ->maxLength(255)
@@ -69,13 +73,9 @@ class ConfigOptionResource extends Resource
                             Checkbox::make('hidden')
                                 ->label('Hidden'),
                             Checkbox::make('upgradable')
-                                ->visible(fn (Get $get): bool => in_array($get('type'), ['select', 'radio', 'slider'], true))
+                                ->visible(fn (Get $get): bool => in_array($get('type'), ['select', 'radio', 'slider', 'dynamic_slider'], true))
                                 ->label('Upgradable')
                                 ->helperText('If enabled, this configuration option can be upgraded in the future.'),
-                            Placeholder::make('upgradable_dynamic_slider_notice')
-                                ->label('Upgradable')
-                                ->content('Dynamic sliders are not yet upgradable.')
-                                ->visible(fn (Get $get): bool => $get('type') === 'dynamic_slider'),
                             Select::make('products')
                                 ->label('Products')
                                 ->relationship('products', 'name')
@@ -128,7 +128,7 @@ class ConfigOptionResource extends Resource
                             ->schema([
                                 // Hidden field for server-side pricing validation
                                 Hidden::make('metadata.pricing')
-                                    ->rules([new DynamicSliderPricingRule()])
+                                    ->rules([new DynamicSliderPricingRule])
                                     ->dehydrated(true),
                                 Select::make('metadata.resource_type')
                                     ->label('Resource Type')
@@ -225,12 +225,6 @@ class ConfigOptionResource extends Resource
                                         ->required()
                                         ->reactive()
                                         ->columnSpanFull(),
-                                    TextInput::make('metadata.pricing.base_price')
-                                        ->label('Base Price')
-                                        ->numeric()
-                                        ->default(0)
-                                        ->prefix('$')
-                                        ->helperText('Fixed base price added to the calculation'),
                                     // Linear pricing fields
                                     TextInput::make('metadata.pricing.rate_per_unit')
                                         ->label('Rate per Display Unit')

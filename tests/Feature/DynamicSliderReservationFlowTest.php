@@ -3,199 +3,214 @@
 namespace Tests\Feature;
 
 use App\Events\Auth\Login;
-use App\Livewire\Products\Checkout;
 use App\Listeners\UserAuthListener;
 use App\Models\Cart;
-use App\Models\CartItem;
-use App\Models\ConfigOption;
-use App\Models\ConfigOptionProduct;
-use App\Models\Product;
+use App\Models\Extension;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
+use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Str;
-use Livewire\Livewire;
-use Paymenter\Extensions\Others\DynamicPterodactyl\Services\NodeSelectionService;
+use Mockery;
+use Paymenter\Extensions\Others\DynamicPterodactyl\Services\ReservationService;
 use Tests\TestCase;
 
 class DynamicSliderReservationFlowTest extends TestCase
 {
     use RefreshDatabase;
 
-    protected function setUp(): void
+    protected function tearDown(): void
     {
-        parent::setUp();
-
-        require base_path('extensions/Others/DynamicPterodactyl/routes/api.php');
-        $this->withoutMiddleware(VerifyCsrfToken::class);
-
-        $nodeSelectionService = $this->mock(NodeSelectionService::class);
-        $nodeSelectionService->shouldReceive('selectBestNode')
-            ->byDefault()
-            ->andReturn(['node_id' => 1, 'name' => 'Node 1']);
+        Mockery::close();
+        parent::tearDown();
     }
 
-    public function test_slider_change_creates_reservation(): void
+    public function test_browser_reservation_protocol_is_absent(): void
     {
-        $fixture = $this->createSliderCheckoutFixture();
+        $checkoutView = file_get_contents(resource_path('../themes/default/views/products/checkout.blade.php'));
+        $themeJavascript = file_get_contents(resource_path('../themes/default/js/app.js'));
 
-        $response = $this->get(route('products.checkout', [
-            $fixture->product->category->slug,
-            $fixture->product->slug,
-        ]));
-
-        $response->assertOk();
-        $response->assertSee('dynamicSliderGroup(', false);
-        $response->assertSee('slider-change', false);
+        $this->assertStringNotContainsString('dynamicSliderGroup', $checkoutView);
+        $this->assertStringNotContainsString('dp_reservation_token', $checkoutView);
+        $this->assertStringNotContainsString('dynamicSliderGroup', $themeJavascript);
     }
 
-    public function test_add_to_cart_persists_reservation_token(): void
-    {
-        $fixture = $this->createSliderCheckoutFixture();
-
-        Livewire::test(Checkout::class, [
-            'category' => $fixture->product->category,
-            'product' => $fixture->product->slug,
-        ])
-            ->set('checkoutConfig.dp_reservation_token', 'token-123')
-            ->call('checkout');
-
-        $this->assertDatabaseHas('cart_items', [
-            'product_id' => $fixture->product->id,
-        ]);
-
-        $cartItem = CartItem::query()->where('product_id', $fixture->product->id)->latest('id')->firstOrFail();
-        $this->assertSame('token-123', $cartItem->checkout_config['dp_reservation_token'] ?? null);
-    }
-
-    public function test_checkout_confirms_reservation(): void
+    public function test_checkout_uses_server_owned_refresh_and_binding(): void
     {
         $contents = file_get_contents(app_path('Livewire/Cart.php'));
 
-        $this->assertStringContainsString("dp_reservation_token", $contents);
-        $this->assertStringContainsString("->confirm(", $contents);
+        $this->assertStringContainsString(
+            'CapacityConfigurationLockService::class',
+            $contents
+        );
+        $this->assertStringContainsString(
+            ')->lockProduct((int) $item->product_id)',
+            $contents
+        );
+        $this->assertStringNotContainsString(
+            '$item->product->lockForUpdate();',
+            $contents
+        );
+        $this->assertStringContainsString(
+            '$requiresPayment = $cart->items->contains(',
+            $contents
+        );
+        $this->assertStringNotContainsString(
+            'if ($this->total->price > 0)',
+            $contents
+        );
+        $this->assertStringContainsString('->reserveForCartItem($item)', $contents);
+        $this->assertStringContainsString('->bindCartItemToService(', $contents);
+        $invoiceLine = strpos(
+            $contents,
+            '$invoice->items()->create(['
+        );
+        $binding = strpos(
+            $contents,
+            '$binding[\'reservation_service\']->bindCartItemToService('
+        );
+        $bindingQueue = strpos($contents, '$capacityBindings = [];');
+        $bindingSort = strpos($contents, 'usort(');
+        $this->assertNotFalse($invoiceLine);
+        $this->assertNotFalse($binding);
+        $this->assertNotFalse($bindingQueue);
+        $this->assertNotFalse($bindingSort);
+        $this->assertLessThan($invoiceLine, $bindingQueue);
+        $this->assertLessThan($bindingSort, $invoiceLine);
+        $this->assertLessThan($binding, $invoiceLine);
+        $this->assertStringContainsString(
+            'CapacityServiceCreationCoordinator::run(',
+            $contents
+        );
+        $this->assertStringNotContainsString('dp_reservation_token', $contents);
+        $this->assertStringNotContainsString('->confirm(', $contents);
     }
 
-    public function test_checkout_blocks_on_capacity_failure(): void
+    public function test_capacity_configuration_snapshot_uses_one_lock_order(): void
     {
-        $contents = file_get_contents(app_path('Livewire/Cart.php'));
+        $contents = file_get_contents(
+            app_path('Services/Service/CapacityConfigurationLockService.php')
+        );
+        $product = strpos($contents, 'Product::query()');
+        $pivot = strpos($contents, "DB::table('config_option_products')");
+        $option = strpos($contents, 'ConfigOption::query()');
+        $plan = strpos($contents, 'Plan::query()');
+        $price = strpos($contents, 'Price::query()');
 
-        $this->assertStringContainsString('$service->delete()', $contents);
-        $this->assertStringContainsString('Capacity hold expired during checkout. Please refresh and reconfigure.', $contents);
-        $this->assertStringContainsString('$this->addError("checkout.', $contents);
+        $this->assertNotFalse($product);
+        $this->assertNotFalse($pivot);
+        $this->assertNotFalse($option);
+        $this->assertNotFalse($plan);
+        $this->assertNotFalse($price);
+        $this->assertLessThan($pivot, $product);
+        $this->assertLessThan($option, $pivot);
+        $this->assertLessThan($plan, $option);
+        $this->assertLessThan($price, $plan);
+        $this->assertGreaterThanOrEqual(
+            4,
+            substr_count($contents, '->lockForUpdate()')
+        );
+        $this->assertStringContainsString(
+            'Capacity configuration locks must be acquired inside the transaction',
+            $contents
+        );
     }
 
-    public function test_extension_disabled_checkout_still_works(): void
+    public function test_guest_login_transfers_cart_and_holds_in_one_path(): void
     {
-        $contents = file_get_contents(app_path('Livewire/Cart.php'));
-
-        $this->assertStringContainsString('class_exists($reservationServiceClass)', $contents);
-    }
-
-    public function test_guest_can_create_reservation(): void
-    {
-        $contents = file_get_contents(base_path('extensions/Others/DynamicPterodactyl/routes/api.php'));
-
-        $this->assertStringContainsString("['web', 'checkout', 'throttle:10,1']", $contents);
-    }
-
-    public function test_guest_reservation_token_persists_through_login(): void
-    {
-        $fixture = $this->createSliderCheckoutFixture();
         $user = User::factory()->create();
-        $cart = $this->createCartWithReservationToken($fixture->product, $fixture->plan->id, 'guest-token');
-
-        app('request')->cookies->set('cart', $cart->ulid);
-
-        (new UserAuthListener())->handle(new Login($user));
-
-        $cart->refresh();
-        $cartItem = $cart->items()->firstOrFail();
-
-        $this->assertSame($user->id, $cart->user_id);
-        $this->assertSame('guest-token', $cartItem->checkout_config['dp_reservation_token'] ?? null);
-    }
-
-    private function createSliderCheckoutFixture(): object
-    {
-        $fixture = $this->createProduct();
-
-        $fixture->product->settings()->create([
-            'key' => 'location_ids',
-            'value' => json_encode([1]),
-            'type' => 'array',
-        ]);
-
-        foreach ([
-            'memory' => ['name' => 'Memory', 'min' => 1024, 'max' => 8192, 'step' => 1024, 'default' => 4096],
-            'cpu' => ['name' => 'CPU', 'min' => 100, 'max' => 400, 'step' => 100, 'default' => 200],
-            'disk' => ['name' => 'Disk', 'min' => 10240, 'max' => 102400, 'step' => 10240, 'default' => 51200],
-        ] as $resourceType => $slider) {
-            $option = ConfigOption::create([
-                'name' => $slider['name'],
-                'env_variable' => strtoupper($resourceType),
-                'type' => 'dynamic_slider',
-                'sort' => 1,
-                'hidden' => false,
-                'upgradable' => false,
-                'metadata' => [
-                    'resource_type' => $resourceType,
-                    'min' => $slider['min'],
-                    'max' => $slider['max'],
-                    'step' => $slider['step'],
-                    'default' => $slider['default'],
-                    'unit' => $resourceType === 'cpu' ? '%' : 'MB',
-                    'display_unit' => $resourceType === 'cpu' ? '%' : 'MB',
-                    'display_divisor' => 1,
-                    'pricing' => [
-                        'model' => 'linear',
-                        'base_price' => 0,
-                        'rate_per_unit' => 1,
-                    ],
-                ],
-            ]);
-
-            ConfigOptionProduct::create([
-                'product_id' => $fixture->product->id,
-                'config_option_id' => $option->id,
-            ]);
-        }
-
-        return $fixture;
-    }
-
-    private function createCartWithReservationToken(Product $product, int $planId, ?string $token): Cart
-    {
         $cart = Cart::create([
             'ulid' => (string) Str::ulid(),
             'currency_code' => 'USD',
         ]);
 
-        $configOptions = $product->configOptions()
-            ->get()
-            ->map(function ($option) {
-                $default = $option->getMetadata('default', $option->getMetadata('min', 0));
+        Cookie::queue('cart', $cart->ulid);
+        app('request')->cookies->set('cart', $cart->ulid);
 
-                return [
-                    'option_id' => $option->id,
-                    'option_type' => 'dynamic_slider',
-                    'option_name' => $option->name,
-                    'option_env_variable' => $option->env_variable,
-                    'value' => $default,
-                ];
-            })
-            ->values()
-            ->all();
-
-        CartItem::create([
-            'cart_id' => $cart->id,
-            'product_id' => $product->id,
-            'plan_id' => $planId,
-            'config_options' => $configOptions,
-            'checkout_config' => $token ? ['dp_reservation_token' => $token] : [],
-            'quantity' => 1,
+        $reservationService = Mockery::mock(ReservationService::class);
+        $reservationService->shouldReceive('transferCartOwnership')
+            ->once()
+            ->with($cart->id, $user->id)
+            ->andReturn(0);
+        $this->app->instance(ReservationService::class, $reservationService);
+        Extension::create([
+            'name' => 'Dynamic Pterodactyl',
+            'extension' => 'DynamicPterodactyl',
+            'type' => 'other',
+            'enabled' => true,
         ]);
 
-        return $cart->load('items.plan', 'items.product', 'items.product.configOptions.children.plans.prices');
+        (new UserAuthListener)->handle(new Login($user));
+
+        $this->assertSame($user->id, $cart->fresh()->user_id);
+    }
+
+    public function test_free_service_dispatch_is_durably_recorded(): void
+    {
+        $contents = file_get_contents(app_path('Livewire/Cart.php'));
+
+        $this->assertStringContainsString(
+            '->requestCreate($service)',
+            $contents
+        );
+    }
+
+    public function test_paid_service_dispatch_is_durably_recorded(): void
+    {
+        $contents = file_get_contents(app_path('Services/Service/RenewServiceService.php'));
+
+        $this->assertStringContainsString(
+            '->requestCreate($service)',
+            $contents
+        );
+    }
+
+    public function test_termination_requires_the_durable_runtime_before_external_delete(): void
+    {
+        $contents = file_get_contents(app_path('Jobs/Server/TerminateJob.php'));
+        $terminal = strpos(
+            $contents,
+            '->cancellationIsDurablyComplete($this->service)'
+        );
+        $preflight = strpos($contents, '->assertRuntimeAvailable($this->service)');
+        $externalDelete = strpos($contents, 'ExtensionHelper::terminateServer($this->service)');
+        $completion = strpos($contents, '->completeCancellation($this->service)');
+
+        $this->assertNotFalse($terminal);
+        $this->assertNotFalse($preflight);
+        $this->assertNotFalse($externalDelete);
+        $this->assertNotFalse($completion);
+        $this->assertLessThan($preflight, $terminal);
+        $this->assertLessThan($externalDelete, $preflight);
+        $this->assertLessThan($completion, $externalDelete);
+        $this->assertStringContainsString(
+            'Reservation-backed server cancellation requires operator intervention.',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'NotificationHelper::sendSystemEmailNotification(',
+            $contents
+        );
+    }
+
+    public function test_provisioning_failure_has_a_missing_runtime_operator_fallback(): void
+    {
+        $contents = file_get_contents(app_path('Jobs/Server/CreateJob.php'));
+
+        $this->assertStringContainsString(
+            '->isReservationBacked($this->service)',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'Reservation-backed server provisioning requires operator intervention.',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'NotificationHelper::sendSystemEmailNotification(',
+            $contents
+        );
+        $this->assertStringContainsString(
+            'recording_error',
+            $contents
+        );
     }
 }

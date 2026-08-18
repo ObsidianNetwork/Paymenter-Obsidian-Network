@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Classes\Synths\PriceSynth;
+use App\Exceptions\ErrorHandler;
 use App\Helpers\ExtensionHelper;
 use App\Models\EmailLog;
 use App\Models\Extension;
@@ -14,6 +15,7 @@ use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
 use Dedoc\Scramble\Support\Generator\SecurityScheme;
 use Exception;
+use Illuminate\Auth\Access\Response;
 use Illuminate\Foundation\Exceptions\Handler;
 use Illuminate\Http\Request;
 use Illuminate\Queue\Events\JobFailed;
@@ -123,7 +125,7 @@ class AppServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(Handler::class, function ($app) {
-            return new \App\Exceptions\ErrorHandler($app);
+            return new ErrorHandler($app);
         });
 
     }
@@ -146,6 +148,8 @@ class AppServiceProvider extends ServiceProvider
         Event::listen(function (SocialiteWasCalled $event) {
             $event->extendSocialite('discord', Provider::class);
         });
+
+        Gate::defaultDenialResponse(Response::denyAsNotFound());
 
         try {
             foreach (
@@ -186,9 +190,11 @@ class AppServiceProvider extends ServiceProvider
                 new TableExtension,
             ]);
         });
-        Passport::clientModel(OauthClient::class);
+        Passport::useClientModel(OauthClient::class);
         Passport::ignoreRoutes();
         Passport::tokensCan(ScopeRegistry::getAll());
+        Passport::authorizationView('vendor.passport.authorize');
+        Passport::$validateKeyPermissions = false;
 
         if (class_exists(Scramble::class)) {
             Scramble::configure()

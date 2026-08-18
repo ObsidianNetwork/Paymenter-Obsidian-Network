@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\SerializesCapacityConfigurationMutations;
 use App\Observers\PropertyObserver;
 use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -10,7 +11,7 @@ use OwenIt\Auditing\Contracts\Auditable;
 #[ObservedBy([PropertyObserver::class])]
 class Property extends Model implements Auditable
 {
-    use \App\Models\Traits\Auditable, HasFactory;
+    use HasFactory, SerializesCapacityConfigurationMutations, Traits\Auditable;
 
     public $guarded = [];
 

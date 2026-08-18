@@ -11,12 +11,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Code checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+          cache: npm
 
       - uses: shivammathur/setup-php@15c43e89cdef867065b0213be354c2841860869e
         with:
@@ -24,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           composer install -q --no-dev --optimize-autoloader --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
-          npm i
+          npm ci
 
       - name: Build
         run: npm run build
@@ -39,7 +40,6 @@ jobs:
           git checkout -b $BRANCH
           git push -u origin $BRANCH
           sed -i "s/    'version' => 'development',/    'version' => '${REF:11}',/" config/app.php
-          sed -i "s/\"version\": \"dev-master\",/\"version\": \"${REF:11}\",/" composer.json
           git add config/app.php composer.json
           git commit -m "ci(release): bump version"
           git push
@@ -56,7 +56,7 @@ jobs:
         
       - name: Create release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload release archive
         id: upload-release-archive
-        uses: actions/upload-release-asset@v1
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -76,7 +76,7 @@ jobs:
 
       - name: Upload release checksum
         id: upload-release-checksum
-        uses: actions/upload-release-asset@v1
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

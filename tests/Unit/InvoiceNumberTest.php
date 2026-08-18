@@ -2,7 +2,10 @@
 
 namespace Tests\Unit;
 
+use App\Helpers\ExtensionHelper;
 use App\Models\Invoice;
+use App\Models\Setting;
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -15,9 +18,10 @@ class InvoiceNumberTest extends TestCase
      */
     public function test_invoice_number_generation(): void
     {
-        $user = \App\Models\User::factory()->create();
+        $user = User::factory()->create();
         // Generate first invoice
-        config(['settings.invoice_number' => 1000]);
+        Setting::updateOrCreate(['key' => 'invoice_number'], ['value' => 1000]);
+        Setting::updateOrCreate(['key' => 'invoice_number_format'], ['value' => '{number}']);
 
         $invoice = new Invoice;
         $invoice->user_id = $user->id;
@@ -26,8 +30,10 @@ class InvoiceNumberTest extends TestCase
 
         $this->assertEquals(1001, $invoice->number);
 
-        // Config should be set to 1001
-        $this->assertEquals(1001, config('settings.invoice_number'));
+        $this->assertDatabaseHas('settings', [
+            'key' => 'invoice_number',
+            'value' => 1001,
+        ]);
 
         // Do it once more for good measure
         $invoice2 = new Invoice;
@@ -38,15 +44,19 @@ class InvoiceNumberTest extends TestCase
         $this->assertEquals(1002, $invoice2->number);
 
         // Config should be set to 1002
-        $this->assertEquals(1002, config('settings.invoice_number'));
+        $this->assertDatabaseHas('settings', [
+            'key' => 'invoice_number',
+            'value' => 1002,
+        ]);
     }
 
     public function test_invoice_number_generation_proforma(): void
     {
-        $user = \App\Models\User::factory()->create();
+        $user = User::factory()->create();
         // Generate first invoice
-        config(['settings.invoice_number' => 2000]);
-        config(['settings.invoice_proforma' => true]);
+        Setting::updateOrCreate(['key' => 'invoice_number'], ['value' => 2000]);
+        Setting::updateOrCreate(['key' => 'invoice_number_format'], ['value' => '{number}']);
+        Setting::updateOrCreate(['key' => 'invoice_proforma'], ['value' => true]);
 
         $invoice = new Invoice;
         $invoice->user_id = $user->id;
@@ -66,9 +76,7 @@ class InvoiceNumberTest extends TestCase
         $this->assertEquals(2000, config('settings.invoice_number'));
 
         // Add paid transaction
-        $invoice->transactions()->create([
-            'amount' => 10,
-        ]);
+        ExtensionHelper::addPayment($invoice->id, null, 10);
 
         // Refresh invoice
         $invoice->refresh();

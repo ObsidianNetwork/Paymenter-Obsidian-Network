@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Category;
 use App\Models\ConfigOption;
 use App\Models\CustomProperty;
+use App\Models\InvoiceTransaction;
 use App\Models\Product;
 use App\Models\Service;
 use App\Models\Setting;
@@ -122,6 +123,33 @@ class ImportFromWhmcs extends Command
         }
 
         return text($question, required: true, placeholder: $placeholder);
+    }
+
+    protected function validateDate($date): ?string
+    {
+        if (empty($date) || $date === '0000-00-00' || $date === '0000-00-00 00:00:00') {
+            return null;
+        }
+
+        try {
+            $dateTime = \DateTime::createFromFormat('Y-m-d H:i:s', $date);
+            if (!$dateTime) {
+                $dateTime = \DateTime::createFromFormat('Y-m-d', $date);
+            }
+            if (!$dateTime) {
+                return null;
+            }
+
+            // Validate year is reasonable (between 1900 and 2100)
+            $year = (int) $dateTime->format('Y');
+            if ($year < 1900 || $year > 2100) {
+                return null;
+            }
+
+            return $dateTime->format('Y-m-d H:i:s');
+        } catch (\Exception $e) {
+            return null;
+        }
     }
 
     protected function migrateInBatch(string $table, string $query, Closure $processor)
@@ -718,8 +746,8 @@ class ImportFromWhmcs extends Command
                         default => 'medium',
                     },
                     'department' => $departmentName ?? null,
-                    'created_at' => $record['date'],
-                    'updated_at' => $record['lastreply'],
+                    'created_at' => $this->validateDate($record['date']),
+                    'updated_at' => $this->validateDate($record['lastreply']),
                 ];
 
                 // Get ticket messages
@@ -734,8 +762,8 @@ class ImportFromWhmcs extends Command
                         'ticket_id' => $record['id'],
                         'user_id' => $userId,
                         'message' => $message['message'],
-                        'created_at' => $message['date'],
-                        'updated_at' => $message['date'],
+                        'created_at' => $this->validateDate($message['date']),
+                        'updated_at' => $this->validateDate($message['date']),
                     ];
                 }
             }
@@ -767,8 +795,8 @@ class ImportFromWhmcs extends Command
                     'id' => $record['id'],
                     'user_id' => $record['userid'],
                     'currency_code' => $user['code'],
-                    'created_at' => $record['date'],
-                    'updated_at' => $record['date'],
+                    'created_at' => $this->validateDate($record['date']),
+                    'updated_at' => $this->validateDate($record['date']),
                 ];
             }
 
@@ -826,9 +854,9 @@ class ImportFromWhmcs extends Command
                     'user_id' => $record['userid'],
                     'plan_id' => $planId,
                     'currency_code' => $user['code'],
-                    'expires_at' => $record['nextduedate'] != '0000-00-00' ? $record['nextduedate'] : null,
-                    'created_at' => $record['regdate'],
-                    'updated_at' => $record['regdate'],
+                    'expires_at' => $this->validateDate($record['nextduedate']),
+                    'created_at' => $this->validateDate($record['regdate']),
+                    'updated_at' => $this->validateDate($record['regdate']),
                 ];
             }
 
@@ -848,8 +876,8 @@ class ImportFromWhmcs extends Command
                     'service_id' => $record['relid'],
                     'reason' => mb_substr($record['reason'], 0, 255),
                     'type' => $record['type'] == 'End of Billing Period' ? 'end_of_period' : 'immediate',
-                    'created_at' => $record['date'],
-                    'updated_at' => $record['date'],
+                    'created_at' => $this->validateDate($record['date']),
+                    'updated_at' => $this->validateDate($record['date']),
                 ];
             }
 
@@ -863,6 +891,8 @@ class ImportFromWhmcs extends Command
 
         $this->migrateInBatch('tblinvoices', 'SELECT * FROM tblinvoices LIMIT :limit OFFSET :offset', function ($records) {
             $data = [];
+            $existingNumbers = DB::table('invoices')->whereNotNull('number')->pluck('number')->flip();
+
             foreach ($records as $record) {
                 // Get currency from user
                 $user = $this->pdo->prepare('SELECT * FROM tblcurrencies WHERE id = (SELECT currency FROM tblclients WHERE id = :client_id LIMIT 1) LIMIT 1');
@@ -873,9 +903,18 @@ class ImportFromWhmcs extends Command
                     continue;
                 }
 
+                $invoiceNumber = !empty($record['invoicenum']) ? $record['invoicenum'] : null;
+
+                // If invoice number already exists, set it to null to avoid duplicate key error
+                if ($invoiceNumber && isset($existingNumbers[$invoiceNumber])) {
+                    $invoiceNumber = null;
+                } elseif ($invoiceNumber) {
+                    $existingNumbers[$invoiceNumber] = true;
+                }
+
                 $data[] = [
                     'id' => $record['id'],
-                    'number' => !empty($record['invoicenum']) ? $record['invoicenum'] : null,
+                    'number' => $invoiceNumber,
                     'user_id' => $record['userid'],
                     'status' => match ($record['status']) {
                         'Paid' => 'paid',
@@ -885,8 +924,8 @@ class ImportFromWhmcs extends Command
                         default => 'unpaid',
                     },
                     'currency_code' => $user['code'],
-                    'created_at' => $record['date'],
-                    'updated_at' => $record['date'],
+                    'created_at' => $this->validateDate($record['date']),
+                    'updated_at' => $this->validateDate($record['date']),
                 ];
             }
 
@@ -894,7 +933,7 @@ class ImportFromWhmcs extends Command
         });
 
         // Set invoice number in settings to highest imported invoice number + 1
-        $highestInvoiceNumber = DB::table('invoices')->max('number');
+        $highestInvoiceNumber = DB::table('invoices')->max('id');
         Setting::updateOrCreate(
             ['key' => 'invoice_number'],
             ['value' => $highestInvoiceNumber + 1]
@@ -951,8 +990,12 @@ class ImportFromWhmcs extends Command
                     'invoice_id' => $record['invoiceid'],
                     'amount' => $record['amountin'],
                     'transaction_id' => $record['transid'],
-                    'created_at' => $record['date'],
-                    'updated_at' => $record['date'],
+                    'gateway_transaction_guard' => InvoiceTransaction::gatewayTransactionGuard(
+                        null,
+                        $record['transid']
+                    ),
+                    'created_at' => $this->validateDate($record['date']),
+                    'updated_at' => $this->validateDate($record['date']),
                 ];
             }
 

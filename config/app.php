@@ -1,6 +1,9 @@
 <?php
 
+use App\Classes\Cart;
+use App\Helpers\ExtensionHelper;
 use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\Facades\Redis;
 
 return [
 
@@ -17,7 +20,7 @@ return [
 
     'name' => env('APP_NAME', 'Paymenter'),
 
-    'version' => '1.4.7',
+    'version' => 'development',
 
     'commit' => '',
 
@@ -91,22 +94,30 @@ return [
     'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
 
     'available_locales' => [
-        'ar' => 'Arabic',
-        'de' => 'German',
+        'ar' => 'العربية',
+        'bn' => 'বাংলা',
+        'da' => 'Dansk',
+        'de' => 'Deutsch',
         'en' => 'English',
-        'es' => 'Spanish',
-        'fi' => 'Finnish',
-        'fr' => 'French',
-        'id' => 'Indonesian',
-        'it' => 'Italian',
-        'sv' => 'Swedish',
-        'uk' => 'Ukrainian',
-        'ko' => 'Korean',
-        'lv' => 'Latvian',
-        'nl' => 'Dutch',
-        'no' => 'Norwegian',
-        'pt' => 'Portuguese',
-        'sr' => 'Serbian',
+        'es' => 'Español',
+        'fi' => 'Suomi',
+        'fr' => 'Français',
+        'he' => 'עברית',
+        'hi' => 'हिन्दी',
+        'hu' => 'Magyar',
+        'id' => 'Bahasa Indonesia',
+        'it' => 'Italiano',
+        'ko' => '한국어',
+        'lv' => 'Latviešu',
+        'nl' => 'Nederlands',
+        'no' => 'Norsk',
+        'pl' => 'Polski',
+        'pt' => 'Português',
+        'sr' => 'Српски',
+        'sv' => 'Svenska',
+        'tr' => 'Türkçe',
+        'uk' => 'Українська',
+        'zh' => '中文',
     ],
 
     'rtl_locales' => [
@@ -155,9 +166,9 @@ return [
     ],
 
     'aliases' => Facade::defaultAliases()->merge([
-        'Redis' => Illuminate\Support\Facades\Redis::class,
-        'Cart' => App\Classes\Cart::class,
-        'ExtensionHelper' => App\Helpers\ExtensionHelper::class,
+        'Redis' => Redis::class,
+        'Cart' => Cart::class,
+        'ExtensionHelper' => ExtensionHelper::class,
     ])->toArray(),
 
     'countries' => [

@@ -67,7 +67,14 @@ class Affiliates extends Extension
 
     public function installed()
     {
-        ExtensionHelper::runMigrations('extensions/Others/Affiliates/database/migrations');
+        ExtensionHelper::runMigrationsOrFail(
+            'extensions/Others/Affiliates/database/migrations'
+        );
+    }
+
+    public function upgraded($oldVersion = null)
+    {
+        $this->installed();
     }
 
     public function uninstalled()

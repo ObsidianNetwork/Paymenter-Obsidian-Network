@@ -11,9 +11,12 @@ class DynamicSliderPriceErrorStateTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_dynamic_slider_renders_pricing_error_state_bindings(): void
+    public function test_dynamic_slider_renders_capacity_failure_bindings(): void
     {
         $fixture = $this->createProduct();
+        $fixture->plan->forceFill([
+            'dynamic_slider_base_price' => 5,
+        ])->save();
 
         $option = ConfigOption::create([
             'name' => 'Memory',
@@ -51,8 +54,41 @@ class DynamicSliderPriceErrorStateTest extends TestCase
             'showPriceTag' => true,
         ])->render();
 
-        $this->assertStringContainsString("pricingState: 'idle'", $html);
-        $this->assertStringContainsString('aria-live="assertive"', $html);
-        $this->assertStringContainsString('pricingError', $html);
+        $this->assertStringContainsString('stockDisabled: false', $html);
+        $this->assertStringContainsString(
+            'dynamic-capacity-failed.window',
+            $html
+        );
+        $this->assertStringContainsString(
+            'dynamic-capacity-failed.window="if (stockManaged) stockDisabled = false"',
+            $html
+        );
+        $this->assertStringContainsString(':disabled="stockDisabled"', $html);
+        $this->assertStringContainsString('basePrice: 0', $html);
+        $this->assertStringNotContainsString(
+            'basePrice: 5',
+            $html
+        );
+    }
+
+    public function test_checkout_renders_the_plan_shared_base_once(): void
+    {
+        $source = file_get_contents(
+            base_path(
+                'themes/default/views/products/checkout.blade.php'
+            )
+        );
+
+        $this->assertSame(
+            1,
+            substr_count(
+                $source,
+                '$plan->dynamicSliderBasePrice()'
+            )
+        );
+        $this->assertStringContainsString(
+            'Dynamic resource base:',
+            $source
+        );
     }
 }

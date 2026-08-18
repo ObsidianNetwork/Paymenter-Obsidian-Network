@@ -1,14 +1,38 @@
-<div class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
-    @if ($this->hasDynamicSliderOptions())
-        x-data="dynamicSliderGroup({
-            productId: {{ $product->id }},
-            planId: $wire.entangle('plan_id').live,
-            locationId: {{ $this->reservationLocationId ?? 'null' }},
-            initialToken: @js($checkoutConfig['dp_reservation_token'] ?? null),
-        })"
-    @else
-        x-data="{ error: null, status: '' }"
-    @endif>
+@php
+    $usesDynamicStock = $this->hasDynamicSliderOptions();
+    $dynamicStockOptionIds = $usesDynamicStock
+        ? $product->configOptions
+            ->filter(fn ($option) => $option->isDynamicSlider()
+                && in_array(
+                    strtolower((string) $option->getMetadata('resource_type', '')),
+                    ['memory', 'cpu', 'disk'],
+                    true
+                ))
+            ->map(fn ($option) => (int) $option->id)
+            ->values()
+            ->all()
+        : [];
+    $dynamicStockConfig = [
+        'enabled' => $usesDynamicStock,
+        'endpoint' => $usesDynamicStock
+            ? url('/api/dynamic-pterodactyl/products/' . $product->id . '/resource-quote')
+            : null,
+        'cartItemId' => $cartProductKey,
+        'expectedBoundIds' => $dynamicStockOptionIds,
+    ];
+    $hasDynamicSliderPricing = $product->configOptions
+        ->contains(fn ($option) => $option->isDynamicSlider());
+    $sharedDynamicSliderBasePrice = $hasDynamicSliderPricing
+        ? $plan->dynamicSliderBasePrice()
+        : 0.0;
+@endphp
+<div
+    class="container mt-14 flex flex-col md:grid md:grid-cols-4 gap-6"
+    x-data="dynamicResourceStock(@js($dynamicStockConfig))"
+    x-on:slider-change="queueQuote()"
+    x-on:change="queueQuote()"
+    x-on:dynamic-stock-refresh-required.window="retryQuote()"
+>
     <div class="flex flex-col gap-4 w-full col-span-3">
         <h1 class="text-3xl font-bold">{{ $product->name }}</h1>
         <div class="flex flex-row w-full gap-4">
@@ -22,8 +46,7 @@
             </div>
         </div>
         @if ($product->availablePlans()->count() > 1)
-            <x-form.select wire:model.live="plan_id" class="text-white bg-primary-800 px-2.5 py-2.5 rounded-md w-full"
-                name="plan_id" label="Select a plan">
+            <x-form.select wire:model.live="plan_id" name="plan_id" label="Select a plan">
                 @foreach ($product->availablePlans() as $availablePlan)
                     <option value="{{ $availablePlan->id }}">
                         {{ $availablePlan->name }} -
@@ -38,18 +61,18 @@
 
         @foreach ($product->configOptions as $configOption)
             @php
-                $showPriceTag = $configOption->children->filter(fn ($value) => !$value->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit)->is_free)->count() > 0;
+                $showPriceTag = $configOption->availableChildren->filter(fn ($value) => !$value->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit)->is_free)->count() > 0;
             @endphp
             <x-form.configoption :config="$configOption" :name="'configOptions.' . $configOption->id" :showPriceTag="$showPriceTag" :plan="$plan">
                 @if ($configOption->type == 'select')
-                    @foreach ($configOption->children as $configOptionValue)
+                    @foreach ($configOption->availableChildren as $configOptionValue)
                         <option value="{{ $configOptionValue->id }}">
                             {{ $configOptionValue->name }}
                             {{ ($showPriceTag && $configOptionValue->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit)->available) ? ' - ' . $configOptionValue->price(billing_period: $plan->billing_period, billing_unit: $plan->billing_unit) : '' }}
                         </option>
                     @endforeach
                 @elseif($configOption->type == 'radio')
-                    @foreach ($configOption->children as $configOptionValue)
+                    @foreach ($configOption->availableChildren as $configOptionValue)
                         <div class="flex items-center gap-2">
                             <input type="radio" id="{{ $configOptionValue->id }}" name="{{ $configOption->id }}"
                                 wire:model.live="configOptions.{{ $configOption->id }}"
@@ -86,11 +109,55 @@
                 @endif
             </x-form.configoption>
         @endforeach
+        @if ($this->hasDynamicSliderOptions())
+            <div
+                x-show="quoteState === 'loading'"
+                id="dynamic-resource-stock-status"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                class="text-sm text-primary-500"
+            >
+                Checking live resource availability…
+            </div>
+            <div
+                x-show="quoteState === 'error'"
+                role="alert"
+                aria-atomic="true"
+                class="flex flex-col items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-500"
+            >
+                <span x-text="quoteError"></span>
+                <button
+                    type="button"
+                    x-ref="retryResourceQuote"
+                    x-bind:disabled="!canRetry"
+                    x-bind:aria-disabled="(!canRetry).toString()"
+                    x-on:click="
+                        retryQuote();
+                        $nextTick(() => $root.querySelector('.dynamic-slider-input')?.focus());
+                    "
+                    aria-controls="dynamic-resource-stock-status"
+                    class="rounded underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
+                >
+                    <span x-show="canRetry">Retry availability check</span>
+                    <span
+                        x-show="!canRetry"
+                        x-text="`Retry available in ${retryWaitSeconds} seconds`"
+                    ></span>
+                </button>
+            </div>
+        @endif
     </div>
     <div class="flex flex-col gap-2 w-full col-span-1 bg-background-secondary p-3 rounded-md h-fit">
         <h2 class="text-2xl font-semibold  mb-2">
             {{ __('product.order_summary') }}
         </h2>
+        @if ($sharedDynamicSliderBasePrice > 0)
+            <div class="font-semibold flex justify-between">
+                <h4>Dynamic resource base:</h4>
+                {{ $total->format($sharedDynamicSliderBasePrice) }}
+            </div>
+        @endif
         @if ($total->total_tax > 0)
             <div class="font-semibold flex justify-between">
                 <h4>{{ __('invoices.subtotal') }}:</h4> {{ $total->format($total->subtotal) }}
@@ -102,7 +169,7 @@
         <div class="text-lg font-semibold flex justify-between">
             <h4>{{ __('product.total_today') }}:</h4> {{ $total }}
         </div>
-        @if ($total->setup_fee && $plan->type == 'recurring')
+        @if ($total->setup_fee > 0 && $plan->type == 'recurring')
             <div class="text- font-semibold flex justify-between ">
                 <h4>{{ __('product.then_after_x', ['time' => $plan->billing_period . ' ' . trans_choice(__('services.billing_cycles.' . $plan->billing_unit), $plan->billing_period)]) }}:
                 </h4> {{ $total->format($total->price) }}
@@ -110,15 +177,18 @@
         @endif
         @if (($product->stock > 0 || !$product->stock) && $product->price()->available)
             <div>
-                <x-button.primary wire:click="checkout" wire:loading.attr="disabled" x-bind:disabled="!!error">
+                <x-button.primary
+                    wire:click="checkout"
+                    wire:loading.attr="disabled"
+                    x-bind:disabled="!canCheckout"
+                    x-bind:aria-disabled="(!canCheckout).toString()"
+                >
                     <x-loading target="checkout" />
                     <div wire:loading.remove wire:target="checkout">
                         {{ __('product.checkout') }}
                     </div>
                 </x-button.primary>
             </div>
-            <p x-show="error" class="text-sm text-red-500" x-text="error"></p>
-            <p x-show="status" class="text-sm text-primary-500" x-text="status"></p>
         @endif
     </div>
 </div>

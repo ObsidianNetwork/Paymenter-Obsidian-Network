@@ -56,9 +56,12 @@ class PasswordReset extends Command implements PromptsForMissingInput
         $password = Str::password(16);
         $user->forceFill([
             'password' => Hash::make($password),
-        ])->setRememberToken(Str::random(60));
+        ]);
 
         $user->save();
+
+        // Revoke all existing sessions
+        $user->sessions()->delete();
 
         // Output the new password to the console
         $this->info("Password for user with email '{$email}' has been reset.");

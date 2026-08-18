@@ -2,15 +2,18 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\SerializesCapacityConfigurationMutations;
+use App\Services\ServiceUpgrade\CouponUpgradeMutationGuard;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use OwenIt\Auditing\Contracts\Auditable;
 
 class Coupon extends Model implements Auditable
 {
-    use \App\Models\Traits\Auditable, HasFactory;
+    use HasFactory, SerializesCapacityConfigurationMutations, Traits\Auditable;
 
     protected $fillable = [
         'type',
+        'applies_to',
         'time',
         'code',
         'value',
@@ -29,12 +32,32 @@ class Coupon extends Model implements Auditable
         'value' => 'float',
     ];
 
+    protected static function booted(): void
+    {
+        static::saving(function (Coupon $coupon): void {
+            if ($coupon->exists) {
+                app(CouponUpgradeMutationGuard::class)
+                    ->assertMutable((int) $coupon->id);
+            }
+        });
+        static::deleting(function (Coupon $coupon): void {
+            app(CouponUpgradeMutationGuard::class)
+                ->assertMutable((int) $coupon->id);
+            if ($coupon->services()->exists()) {
+                throw new \RuntimeException(
+                    'Coupons referenced by service billing history cannot be deleted. Disable or expire the coupon instead.'
+                );
+            }
+        });
+    }
+
     /**
      * Get the products that belong to the option.
      */
     public function products()
     {
-        return $this->belongsToMany(Product::class, 'coupon_products');
+        return $this->belongsToMany(Product::class, 'coupon_products')
+            ->using(CouponProduct::class);
     }
 
     public function services()

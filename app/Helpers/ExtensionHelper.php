@@ -5,28 +5,38 @@ namespace App\Helpers;
 use App\Attributes\ExtensionMeta;
 use App\Classes\FilamentInput;
 use App\Enums\InvoiceTransactionStatus;
+use App\Exceptions\LateCapacityPaymentException;
 use App\Models\BillingAgreement;
+use App\Models\BillingChargeAttempt;
 use App\Models\Extension;
 use App\Models\Gateway;
 use App\Models\Invoice;
+use App\Models\InvoicePaymentInitiation;
 use App\Models\InvoiceTransaction;
 use App\Models\Product;
 use App\Models\Server;
 use App\Models\Service;
 use App\Models\User;
+use App\Services\Invoice\BillingChargeAttemptService;
+use App\Services\Invoice\CapacityInvoicePaymentService;
+use App\Services\Invoice\InvoicePaymentInitiationService;
+use App\Services\Service\DurableFulfillmentService;
 use Exception;
 use Filament\Forms\Components\Placeholder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\Migrations\Migrator;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Livewire\Features\SupportFileUploads\TemporaryUploadedFile;
 use OwenIt\Auditing\Events\AuditCustom;
 use ReflectionClass;
+use Throwable;
 
 class ExtensionHelper
 {
@@ -381,8 +391,23 @@ class ExtensionHelper
         $gateways = [];
 
         foreach (Gateway::with('settings')->get() as $gateway) {
+            $extension = self::getExtension(
+                'gateway',
+                $gateway->extension,
+                $gateway->settings
+            );
+            if (
+                in_array(
+                    $type,
+                    ['cart', 'invoice', 'credits'],
+                    true
+                )
+                && !$extension->supportsDurablePaymentInitiations()
+            ) {
+                continue;
+            }
             if (self::hasFunction($gateway, 'canUseGateway')) {
-                if (self::getExtension('gateway', $gateway->extension, $gateway->settings)->canUseGateway($total, $currency, $type, $items)) {
+                if ($extension->canUseGateway($total, $currency, $type, $items)) {
                     $gateways[] = $gateway;
                 }
             } else {
@@ -398,21 +423,214 @@ class ExtensionHelper
      */
     public static function pay($gateway, $invoice)
     {
-        return self::getExtension('gateway', $gateway->extension, $gateway->settings)->pay($invoice, $invoice->remaining);
+        $initiation = app(
+            InvoicePaymentInitiationService::class
+        )->create($invoice, $gateway);
+
+        return app(InvoicePaymentInitiationService::class)
+            ->execute($initiation);
+    }
+
+    public static function payInvoiceInitiation(
+        InvoicePaymentInitiation $initiation
+    ): mixed {
+        $gateway = Gateway::withTrashed()
+            ->whereKey($initiation->gateway_snapshot_id)
+            ->with('settings')
+            ->firstOrFail();
+        if (
+            $gateway->trashed()
+            || !(bool) $gateway->enabled
+            || !hash_equals(
+                (string) $gateway->extension,
+                (string) $initiation->gateway_extension
+            )
+        ) {
+            throw new \RuntimeException(
+                'The frozen provider gateway is unavailable.'
+            );
+        }
+
+        return self::getExtension(
+            'gateway',
+            $gateway->extension,
+            $gateway->settings
+        )->payInvoiceInitiation($initiation);
+    }
+
+    public static function supportsDurablePaymentInitiations(
+        Gateway $gateway
+    ): bool {
+        return self::getExtension(
+            'gateway',
+            $gateway->extension,
+            $gateway->settings
+        )->supportsDurablePaymentInitiations();
+    }
+
+    public static function paymentInitiationIdempotencyRetryWindowSeconds(
+        Gateway $gateway
+    ): int {
+        return max(
+            0,
+            min(
+                365 * 24 * 60 * 60,
+                self::getExtension(
+                    'gateway',
+                    $gateway->extension,
+                    $gateway->settings
+                )->paymentInitiationIdempotencyRetryWindowSeconds()
+            )
+        );
+    }
+
+    /**
+     * Re-read (and, after the abandonment window, safely cancel) the exact
+     * provider object frozen by one durable interactive payment generation.
+     */
+    public static function reconcileInvoicePaymentInitiation(
+        InvoicePaymentInitiation $initiation,
+        bool $cancelIfSafe = false
+    ): array {
+        $gateway = Gateway::withTrashed()
+            ->whereKey($initiation->gateway_snapshot_id)
+            ->with('settings')
+            ->firstOrFail();
+        if (
+            $gateway->trashed()
+            || !(bool) $gateway->enabled
+            || !hash_equals(
+                (string) $gateway->extension,
+                (string) $initiation->gateway_extension
+            )
+        ) {
+            throw new \RuntimeException(
+                'The frozen provider gateway is unavailable for reconciliation.'
+            );
+        }
+        $extension = self::getExtension(
+            'gateway',
+            $gateway->extension,
+            $gateway->settings
+        );
+        if (!$extension->supportsDurablePaymentInitiations()) {
+            throw new \RuntimeException(
+                'The frozen provider gateway cannot safely reconcile interactive payments.'
+            );
+        }
+
+        return $extension->reconcileInvoicePaymentInitiation(
+            $initiation,
+            $cancelIfSafe
+        );
     }
 
     public static function charge(Gateway $gateway, Invoice $invoice, BillingAgreement $billingAgreement): bool
     {
-        return self::getExtension('gateway', $gateway->extension, $gateway->settings)->charge($invoice, $invoice->remaining, $billingAgreement);
+        $billingAttempts = app(BillingChargeAttemptService::class);
+        $billingAttempts->createForManualPayment(
+            $invoice,
+            $billingAgreement
+        );
+
+        return $billingAttempts->chargeSavedMethod(
+            $invoice,
+            $billingAgreement
+        );
     }
 
-    public static function getBillingAgreementGateways()
-    {
+    public static function chargeBillingAttempt(
+        BillingChargeAttempt $attempt
+    ): array {
+        $gateway = Gateway::withTrashed()
+            ->whereKey($attempt->gateway_snapshot_id)
+            ->with('settings')
+            ->firstOrFail();
+        if (
+            $gateway->trashed()
+            || !(bool) $gateway->enabled
+            || !hash_equals(
+                (string) $gateway->extension,
+                (string) $attempt->gateway_extension
+            )
+        ) {
+            throw new \RuntimeException(
+                'The frozen billing gateway is unavailable.'
+            );
+        }
+
+        return self::getExtension(
+            'gateway',
+            $gateway->extension,
+            $gateway->settings
+        )->chargeBillingAttempt($attempt);
+    }
+
+    public static function billingAttemptProviderCustomerReference(
+        Gateway $gateway,
+        BillingAgreement $billingAgreement
+    ): ?string {
+        $extension = self::getExtension(
+            'gateway',
+            $gateway->extension,
+            $gateway->settings
+        );
+        if (!$extension->supportsDurableBillingAttempts()) {
+            throw new \RuntimeException(
+                'This saved-payment gateway does not implement durable automatic charge reconciliation.'
+            );
+        }
+        $reference =
+            $extension->billingAttemptProviderCustomerReference(
+                $billingAgreement
+            );
+        if ($reference === null) {
+            return null;
+        }
+        if (
+            !is_string($reference)
+            || trim($reference) === ''
+            || strlen(trim($reference)) > 255
+        ) {
+            throw new \RuntimeException(
+                'The gateway returned an invalid durable customer identity.'
+            );
+        }
+
+        return trim($reference);
+    }
+
+    public static function supportsCustomerInitiatedBillingAttempts(
+        Gateway $gateway
+    ): bool {
+        return self::getExtension(
+            'gateway',
+            $gateway->extension,
+            $gateway->settings
+        )->supportsCustomerInitiatedBillingAttempts();
+    }
+
+    public static function getBillingAgreementGateways(
+        bool $customerInitiated = false
+    ) {
         $gateways = [];
 
         foreach (Gateway::with('settings')->get() as $gateway) {
             if (self::hasFunction($gateway, 'supportsBillingAgreements')) {
-                if (self::getExtension('gateway', $gateway->extension, $gateway->settings)->supportsBillingAgreements()) {
+                $extension = self::getExtension(
+                    'gateway',
+                    $gateway->extension,
+                    $gateway->settings
+                );
+                if (
+                    $extension->supportsBillingAgreements()
+                    && $extension->supportsDurableBillingAttempts()
+                    && (
+                        !$customerInitiated
+                        || $extension
+                            ->supportsCustomerInitiatedBillingAttempts()
+                    )
+                ) {
                     $gateways[] = $gateway;
                 }
             }
@@ -424,8 +642,8 @@ class ExtensionHelper
     /**
      * Create billing agreement
      *
-     * @param  \App\Models\User  $user
-     * @param  \App\Models\Gateway  $gateway
+     * @param  User  $user
+     * @param  Gateway  $gateway
      * @return string|view
      */
     public static function createBillingAgreement($user, $gateway)
@@ -440,7 +658,33 @@ class ExtensionHelper
      */
     public static function cancelBillingAgreement(BillingAgreement $billingAgreement)
     {
-        return self::getExtension('gateway', $billingAgreement->gateway->extension, $billingAgreement->gateway->settings)->cancelBillingAgreement($billingAgreement);
+        $extension = null;
+        $resolutionError = null;
+        try {
+            $gateway = $billingAgreement->gateway()
+                ->with('settings')
+                ->firstOrFail();
+            $extension = self::getExtension(
+                'gateway',
+                $gateway->extension,
+                $gateway->settings
+            );
+        } catch (Throwable $exception) {
+            $resolutionError = $exception;
+        }
+
+        // Revoke the method locally before the network request. The model's
+        // coordinated delete locks and rechecks unresolved charge attempts,
+        // then detaches every future renewal in the same transaction. A
+        // missing extension or provider outage can therefore require remote
+        // cleanup, but can never leave Paymenter able to charge a method the
+        // customer removed.
+        $billingAgreement->delete();
+        if ($resolutionError !== null) {
+            throw $resolutionError;
+        }
+
+        return $extension->cancelBillingAgreement($billingAgreement);
     }
 
     public static function makeBillingAgreement(User $user, $gateway, $name, $externalReference, $type = null, $expiry = null)
@@ -465,62 +709,592 @@ class ExtensionHelper
      *
      * @param  Invoice|int  $invoice
      */
-    public static function addPayment($invoice, $gateway, $amount, $fee = null, $transactionId = null, InvoiceTransactionStatus $status = InvoiceTransactionStatus::Succeeded, $isCreditTransaction = false)
-    {
-        if (isset($gateway)) {
-            $gateway = Gateway::where('extension', $gateway)->first();
+    public static function addPayment(
+        $invoice,
+        $gateway,
+        $amount,
+        $fee = null,
+        $transactionId = null,
+        InvoiceTransactionStatus $status =
+            InvoiceTransactionStatus::Succeeded,
+        $isCreditTransaction = false,
+        ?int $billingChargeAttemptId = null,
+        ?string $providerCurrency = null,
+        ?string $providerResourceReference = null
+    ) {
+        $invoiceId = $invoice instanceof Invoice
+            ? (int) $invoice->id
+            : (int) $invoice;
+        $capacityPayments = app(CapacityInvoicePaymentService::class);
+        $gatewayId = self::resolveGatewayId($gateway);
+        $transactionId = $transactionId === null
+            || (string) $transactionId === ''
+                ? null
+                : (string) $transactionId;
+        $billingAttempts = app(BillingChargeAttemptService::class);
+        if (
+            $billingAttempts->shouldCoordinateProviderEvidence(
+                $invoiceId,
+                $billingChargeAttemptId,
+                $gatewayId,
+                $transactionId
+            )
+        ) {
+            return $billingAttempts->recordProviderEvidence(
+                $invoiceId,
+                $gatewayId,
+                $amount,
+                $transactionId,
+                $status,
+                $billingChargeAttemptId,
+                static fn () => self::addPayment(
+                    $invoiceId,
+                    $gateway,
+                    $amount,
+                    $fee,
+                    $transactionId,
+                    $status,
+                    $isCreditTransaction,
+                    $billingChargeAttemptId,
+                    $providerCurrency,
+                    $providerResourceReference
+                )
+            );
         }
+        $paymentInitiations = app(
+            InvoicePaymentInitiationService::class
+        );
+        if (
+            $paymentInitiations
+                ->shouldCoordinateProviderEvidence(
+                    $invoiceId,
+                    $gatewayId,
+                    $transactionId,
+                    $providerResourceReference
+                )
+        ) {
+            return $paymentInitiations->recordProviderEvidence(
+                $invoiceId,
+                $gatewayId,
+                $amount,
+                $transactionId,
+                $status,
+                static fn () => self::addPayment(
+                    $invoiceId,
+                    $gateway,
+                    $amount,
+                    $fee,
+                    $transactionId,
+                    $status,
+                    $isCreditTransaction,
+                    $billingChargeAttemptId,
+                    $providerCurrency,
+                    $providerResourceReference
+                ),
+                $providerCurrency,
+                $providerResourceReference
+            );
+        }
+        $existingEvidence = self::existingPaymentEvidence(
+            $invoiceId,
+            $gatewayId,
+            $transactionId,
+            $amount,
+            $status,
+            (bool) $isCreditTransaction,
+        );
+        if ($existingEvidence['exact'] ?? false) {
+            // Exact replays are read-only. The locked proof below is required
+            // only for an insert or processing-to-terminal mutation.
+            return $existingEvidence['transaction'];
+        }
+        $persist = static fn () => $capacityPayments->recordPaymentEvidence(
+            $invoiceId,
+            static function () use (
+                $invoiceId,
+                $gatewayId,
+                $amount,
+                $fee,
+                $transactionId,
+                $status,
+                $isCreditTransaction,
+                $billingChargeAttemptId
+            ) {
+                $invoice = Invoice::query()
+                    ->whereKey($invoiceId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                app(CapacityInvoicePaymentService::class)
+                    ->assertPaymentAttemptAllowed($invoice);
+                $lateAttentionReason = app(
+                    CapacityInvoicePaymentService::class
+                )->incomingEvidenceAttentionReason(
+                    $invoice,
+                    $status,
+                    $gatewayId,
+                    $transactionId,
+                    $amount,
+                    $billingChargeAttemptId
+                );
+                if (
+                    $lateAttentionReason !== null
+                    && app(CapacityInvoicePaymentService::class)
+                        ->paymentEvidenceRecoveryReason($invoiceId) === null
+                ) {
+                    throw new LateCapacityPaymentException(
+                        $lateAttentionReason
+                    );
+                }
 
-        $invoice = Invoice::findOrFail($invoice);
+                if ($transactionId === null) {
+                    return $invoice->transactions()->create([
+                        'gateway_id' => $gatewayId,
+                        'amount' => $amount,
+                        'fee' => $fee,
+                        'status' => $status,
+                        'is_credit_transaction' => $isCreditTransaction,
+                    ]);
+                }
 
-        if (!$transactionId) {
-            $transaction = $invoice->transactions()->create([
-                'gateway_id' => $gateway?->id,
-                'amount' => $amount,
-                'fee' => $fee,
-                'status' => $status,
-                'is_credit_transaction' => $isCreditTransaction,
-            ]);
-        } else {
-            $updateData = [
-                'gateway_id' => $gateway?->id,
-                'amount' => $amount,
-                'status' => $status,
-                'is_credit_transaction' => $isCreditTransaction,
-            ];
-            if ($fee !== null) {
-                $updateData['fee'] = $fee;
+                $updateData = [
+                    'gateway_id' => $gatewayId,
+                    'transaction_id' => $transactionId,
+                    'amount' => $amount,
+                    'status' => $status,
+                    'is_credit_transaction' => $isCreditTransaction,
+                ];
+                if ($fee !== null) {
+                    $updateData['fee'] = $fee;
+                }
+
+                $guard =
+                    InvoiceTransaction::gatewayTransactionGuard(
+                        $gatewayId,
+                        $transactionId
+                    );
+                $identity = Schema::hasColumn(
+                    'invoice_transactions',
+                    'gateway_transaction_guard'
+                )
+                    ? ['gateway_transaction_guard' => $guard]
+                    : [
+                        'gateway_id' => $gatewayId,
+                        'transaction_id' => $transactionId,
+                    ];
+
+                $existing = $invoice->transactions()
+                    ->where($identity)
+                    ->lockForUpdate()
+                    ->first();
+                if ($existing !== null) {
+                    // The optimistic precheck is not authoritative: a
+                    // concurrent callback can insert or finalize this row
+                    // before the invoice and evidence locks are acquired.
+                    // Re-prove every immutable field and the exact allowed
+                    // status transition against the locked row.
+                    $exact = self::assertPaymentEvidenceReplay(
+                        $existing,
+                        $invoiceId,
+                        $gatewayId,
+                        $transactionId,
+                        $amount,
+                        $status,
+                        (bool) $isCreditTransaction
+                    );
+                    if ($exact) {
+                        return $existing;
+                    }
+
+                    // Only status and the gateway-reported fee may change;
+                    // equivalent-but-differently-cast immutable fields are
+                    // deliberately left untouched.
+                    $existing->status = $status;
+                    if ($fee !== null) {
+                        $existing->fee = $fee;
+                    }
+                    $existing->save();
+
+                    return $existing;
+                }
+
+                return $invoice->transactions()->create($updateData);
+            }
+        );
+
+        $invoiceState = Invoice::query()->findOrFail($invoiceId);
+        $lateAttentionReason =
+            $capacityPayments->incomingEvidenceAttentionReason(
+                $invoiceState,
+                $status,
+                $gatewayId,
+                $transactionId,
+                $amount,
+                $billingChargeAttemptId
+            );
+        if ($lateAttentionReason !== null) {
+            return $capacityPayments->recoverPaymentEvidence(
+                $invoiceId,
+                $lateAttentionReason,
+                $persist
+            );
+        }
+        if (
+            $existingEvidence !== null
+            && in_array($status, [
+                InvoiceTransactionStatus::Succeeded,
+                InvoiceTransactionStatus::Failed,
+            ], true)
+            && $capacityPayments->requiresAttention($invoiceState)
+        ) {
+            $attentionReason = trim(
+                (string) $invoiceState->payment_attention_reason
+            );
+
+            return $capacityPayments->recoverPaymentEvidence(
+                $invoiceId,
+                $attentionReason !== ''
+                    ? $attentionReason
+                    : 'The capacity-backed invoice remains under manual payment review.',
+                $persist
+            );
+        }
+        $capacityPayments->assertPaymentAttemptAllowed($invoiceState);
+
+        try {
+            return $persist();
+        } catch (Throwable $exception) {
+            if ($exception instanceof LateCapacityPaymentException) {
+                return $capacityPayments->recoverPaymentEvidence(
+                    $invoiceId,
+                    $exception->getMessage(),
+                    $persist
+                );
+            }
+            $existingEvidence = self::existingPaymentEvidence(
+                $invoiceId,
+                $gatewayId,
+                $transactionId,
+                $amount,
+                $status,
+                (bool) $isCreditTransaction,
+            );
+            if ($existingEvidence['exact'] ?? false) {
+                return $existingEvidence['transaction'];
+            }
+            if ($existingEvidence !== null) {
+                try {
+                    return $persist();
+                } catch (Throwable $retryException) {
+                    $exception = $retryException;
+                }
+            }
+            if ($status !== InvoiceTransactionStatus::Succeeded) {
+                throw $exception;
+            }
+            if ($capacityPayments->requiresAttention($invoiceId)) {
+                throw $exception;
+            }
+            if (
+                !$capacityPayments->requiresFulfillmentCoordinator(
+                    $invoiceId
+                )
+            ) {
+                throw $exception;
             }
 
-            $transaction = $invoice->transactions()->updateOrCreate(
-                [
-                    'transaction_id' => $transactionId,
-                ],
-                $updateData
+            $reason = 'External payment was recorded, but fulfillment could '
+                . 'not be committed atomically: '
+                . \Illuminate\Support\Str::limit(
+                    $exception->getMessage(),
+                    1000,
+                    ''
+                )
+                . '. Do not provision; refund or account-credit review is required.';
+
+            return $capacityPayments->recoverPaymentEvidence(
+                $invoiceId,
+                $reason,
+                $persist
+            );
+        }
+    }
+
+    /**
+     * Return exact evidence for an idempotent callback, allow the one valid
+     * processing-to-terminal transition, and reject every conflicting reuse.
+     *
+     * @return array{transaction: InvoiceTransaction, exact: bool}|null
+     */
+    private static function existingPaymentEvidence(
+        int $invoiceId,
+        ?int $gatewayId,
+        mixed $transactionId,
+        mixed $amount,
+        InvoiceTransactionStatus $status,
+        bool $isCreditTransaction
+    ): ?array {
+        if ($transactionId === null || (string) $transactionId === '') {
+            return null;
+        }
+
+        $transactionId = (string) $transactionId;
+        $existing = self::paymentEvidenceByIdentity(
+            $gatewayId,
+            $transactionId
+        );
+        if ($existing === null) {
+            return null;
+        }
+        $exact = self::assertPaymentEvidenceReplay(
+            $existing,
+            $invoiceId,
+            $gatewayId,
+            $transactionId,
+            $amount,
+            $status,
+            $isCreditTransaction
+        );
+
+        return [
+            'transaction' => $existing,
+            'exact' => $exact,
+        ];
+    }
+
+    /**
+     * Re-prove a gateway replay against one authoritative evidence row.
+     *
+     * @return bool true for an exact replay, false for the one permitted
+     *              processing-to-terminal transition
+     */
+    private static function assertPaymentEvidenceReplay(
+        InvoiceTransaction $existing,
+        int $invoiceId,
+        ?int $gatewayId,
+        string $transactionId,
+        mixed $amount,
+        InvoiceTransactionStatus $status,
+        bool $isCreditTransaction
+    ): bool {
+        if ((int) $existing->invoice_id !== $invoiceId) {
+            throw new \RuntimeException(
+                'This gateway transaction was already recorded for a different invoice.'
+            );
+        }
+        $recordedGatewayId = $existing->gateway_id === null
+            ? null
+            : (int) $existing->gateway_id;
+        if (
+            $recordedGatewayId !== $gatewayId
+            || !hash_equals(
+                (string) $existing->transaction_id,
+                $transactionId
+            )
+        ) {
+            throw new \RuntimeException(
+                'The replayed gateway transaction identity conflicts with the recorded payment evidence.'
             );
         }
 
-        return $transaction;
+        $incomingAmount = self::canonicalInvoiceTransactionAmount(
+            $amount
+        );
+        if (
+            $incomingAmount === null
+            || !hash_equals((string) $existing->amount, $incomingAmount)
+            || (bool) $existing->is_credit_transaction
+                !== $isCreditTransaction
+        ) {
+            throw new \RuntimeException(
+                'The replayed gateway transaction does not match the recorded payment evidence.'
+            );
+        }
+
+        $existingStatus = $existing->status
+            instanceof InvoiceTransactionStatus
+                ? $existing->status
+                : InvoiceTransactionStatus::tryFrom(
+                    (string) $existing->status
+                );
+        if ($existingStatus === $status) {
+            return true;
+        }
+        if (
+            $existingStatus === InvoiceTransactionStatus::Processing
+            && in_array($status, [
+                InvoiceTransactionStatus::Succeeded,
+                InvoiceTransactionStatus::Failed,
+            ], true)
+        ) {
+            return false;
+        }
+
+        throw new \RuntimeException(
+            'The replayed gateway transaction status conflicts with the recorded payment evidence.'
+        );
     }
 
-    public static function addProcessingPayment($invoice, $gateway, $amount, $fee = null, $transactionId = null)
-    {
-        return self::addPayment($invoice, $gateway, $amount, $fee, $transactionId, InvoiceTransactionStatus::Processing);
+    private static function canonicalInvoiceTransactionAmount(
+        mixed $amount
+    ): ?string {
+        try {
+            $transaction = new InvoiceTransaction;
+            $transaction->setAttribute('amount', $amount);
+            $canonical = $transaction->getAttribute('amount');
+
+            return is_string($canonical)
+                && preg_match(
+                    '/^-?(?:0|[1-9]\d*)\.\d{2}$/D',
+                    $canonical
+                ) === 1
+                    ? $canonical
+                    : null;
+        } catch (Throwable) {
+            return null;
+        }
     }
 
-    public static function addFailedPayment($invoice, $gateway, $amount, $fee = null, $transactionId = null)
-    {
-        return self::addPayment($invoice, $gateway, $amount, $fee, $transactionId, InvoiceTransactionStatus::Failed);
+    public static function addProcessingPayment(
+        $invoice,
+        $gateway,
+        $amount,
+        $fee = null,
+        $transactionId = null,
+        ?int $billingChargeAttemptId = null,
+        ?string $providerCurrency = null,
+        ?string $providerResourceReference = null
+    ) {
+        return self::addPayment(
+            $invoice,
+            $gateway,
+            $amount,
+            $fee,
+            $transactionId,
+            InvoiceTransactionStatus::Processing,
+            false,
+            $billingChargeAttemptId,
+            $providerCurrency,
+            $providerResourceReference
+        );
     }
 
-    public static function addPaymentFee($transactionId, $fee)
-    {
-        $transaction = InvoiceTransaction::where('transaction_id', $transactionId)->firstOrFail();
+    public static function addFailedPayment(
+        $invoice,
+        $gateway,
+        $amount,
+        $fee = null,
+        $transactionId = null,
+        ?int $billingChargeAttemptId = null,
+        ?string $providerCurrency = null,
+        ?string $providerResourceReference = null
+    ) {
+        return self::addPayment(
+            $invoice,
+            $gateway,
+            $amount,
+            $fee,
+            $transactionId,
+            InvoiceTransactionStatus::Failed,
+            false,
+            $billingChargeAttemptId,
+            $providerCurrency,
+            $providerResourceReference
+        );
+    }
+
+    public static function addPaymentFee(
+        $transactionId,
+        $fee,
+        $gateway = null
+    ) {
+        $transactionId = (string) $transactionId;
+        if ($gateway !== null) {
+            $transaction = self::paymentEvidenceByIdentity(
+                self::resolveGatewayId($gateway),
+                $transactionId
+            );
+        } else {
+            $matches = InvoiceTransaction::query()
+                ->where('transaction_id', $transactionId)
+                ->orderBy('id')
+                ->get()
+                ->filter(
+                    fn (InvoiceTransaction $candidate): bool => hash_equals(
+                        (string) $candidate->transaction_id,
+                        $transactionId
+                    )
+                )
+                ->values();
+            if ($matches->count() > 1) {
+                throw new \RuntimeException(
+                    'The transaction reference is ambiguous across gateways; provide the gateway identity before updating its fee.'
+                );
+            }
+            $transaction = $matches->first();
+        }
+        if (!$transaction instanceof InvoiceTransaction) {
+            throw (new ModelNotFoundException)
+                ->setModel(InvoiceTransaction::class);
+        }
 
         $transaction->fee = $fee;
         $transaction->save();
 
         return $transaction;
+    }
+
+    private static function resolveGatewayId(mixed $gateway): ?int
+    {
+        $resolvedGatewayId = $gateway instanceof Gateway
+            ? $gateway->id
+            : (
+                isset($gateway)
+                    ? Gateway::query()
+                        ->where('extension', (string) $gateway)
+                        ->value('id')
+                    : null
+            );
+
+        return $resolvedGatewayId !== null
+            ? (int) $resolvedGatewayId
+            : null;
+    }
+
+    private static function paymentEvidenceByIdentity(
+        ?int $gatewayId,
+        string $transactionId
+    ): ?InvoiceTransaction {
+        $guard = InvoiceTransaction::gatewayTransactionGuard(
+            $gatewayId,
+            $transactionId
+        );
+        if (
+            $guard !== null
+            && Schema::hasColumn(
+                'invoice_transactions',
+                'gateway_transaction_guard'
+            )
+        ) {
+            return InvoiceTransaction::query()
+                ->where('gateway_transaction_guard', $guard)
+                ->orderBy('id')
+                ->first();
+        }
+
+        $query = InvoiceTransaction::query()
+            ->where('transaction_id', $transactionId);
+        $gatewayId === null
+            ? $query->whereNull('gateway_id')
+            : $query->where('gateway_id', $gatewayId);
+
+        return $query->orderBy('id')
+            ->get()
+            ->first(
+                fn (InvoiceTransaction $candidate): bool => hash_equals(
+                    (string) $candidate->transaction_id,
+                    $transactionId
+                )
+            );
     }
 
     /**
@@ -551,7 +1325,21 @@ class ExtensionHelper
             $properties[$property->key] = $property->value;
         }
         foreach ($service->configs as $config) {
-            $properties[$config->configOption->env_variable] = $config->configValue->env_variable ?? $config->configValue->name;
+            $configOption = $config->configOption;
+            if (!$configOption) {
+                continue;
+            }
+
+            if ($configOption->type === 'dynamic_slider') {
+                if ($config->slider_value !== null) {
+                    $properties[$configOption->env_variable ?: $configOption->name] = $config->slider_value;
+                }
+
+                continue;
+            }
+
+            $properties[$configOption->env_variable] = $config->configValue?->env_variable
+                ?? $config->configValue?->name;
         }
 
         return $properties;
@@ -559,10 +1347,18 @@ class ExtensionHelper
 
     protected static function checkServer(Service $service, $action)
     {
-        $server = $service->product->server;
+        $reservedServerId = app(DurableFulfillmentService::class)
+            ->reservedServerExtensionId($service);
+        $server = $reservedServerId !== null
+            ? Server::query()->find($reservedServerId)
+            : $service->product->server;
 
         if (!$server) {
-            throw new Exception('No server assigned to this product');
+            throw new Exception(
+                $reservedServerId !== null
+                    ? 'The server extension pinned by this capacity reservation is unavailable'
+                    : 'No server assigned to this product'
+            );
         }
 
         // Does server support this action?
@@ -625,6 +1421,9 @@ class ExtensionHelper
      */
     public static function terminateServer(Service $service)
     {
+        app(BillingChargeAttemptService::class)
+            ->assertServiceTerminationAllowed($service);
+
         $server = self::checkServer($service, 'terminateServer');
 
         self::recordAudit($service, 'extension_action', [], ['action' => 'terminate_server']);
@@ -635,13 +1434,27 @@ class ExtensionHelper
     /**
      * Upgrade server
      */
-    public static function upgradeServer(Service $service)
-    {
-        $server = self::checkServer($service, 'upgradeServer');
+    public static function upgradeServer(
+        Service $service,
+        ?Product $targetProduct = null,
+        ?array $targetProperties = null
+    ) {
+        $targetProduct ??= $service->product;
+        $server = $targetProduct->server;
+        if (!$server) {
+            throw new Exception('No server assigned to this product');
+        }
+        if (!self::hasFunction($server, 'upgradeServer')) {
+            throw new Exception('Server does not support the action: upgradeServer');
+        }
 
         self::recordAudit($service, 'extension_action', [], ['action' => 'upgrade_server']);
 
-        return self::getExtension('server', $server->extension, $server->settings)->upgradeServer($service, self::settingsToArray($service->product->settings), self::getServiceProperties($service));
+        return self::getExtension('server', $server->extension, $server->settings)->upgradeServer(
+            $service,
+            self::settingsToArray($targetProduct->settings),
+            $targetProperties ?? self::getServiceProperties($service)
+        );
     }
 
     /**
@@ -705,14 +1518,33 @@ class ExtensionHelper
      */
     public static function runMigrations($path)
     {
-        $migrator = app(Migrator::class);
-
         try {
-            $ranMigrations = $migrator->run(base_path($path));
-
-            Log::debug('Migrations output: ', $ranMigrations);
+            return self::runMigrationsOrFail($path);
         } catch (Exception $e) {
             report($e);
+
+            return [];
         }
+    }
+
+    /**
+     * Run extension migrations and propagate every failure to the caller.
+     *
+     * Extension installers and deployment commands must use this strict path;
+     * otherwise Paymenter can enable code whose required schema was never applied.
+     *
+     * @return array<int, string>
+     */
+    public static function runMigrationsOrFail(string $path): array
+    {
+        $fullPath = base_path($path);
+        if (!is_dir($fullPath)) {
+            throw new \RuntimeException("Extension migration path does not exist: {$path}");
+        }
+
+        $ranMigrations = app(Migrator::class)->run($fullPath);
+        Log::debug('Extension migrations output: ', $ranMigrations);
+
+        return $ranMigrations;
     }
 }
