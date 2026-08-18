@@ -14,7 +14,7 @@ app/Classes/
 │   └── PriceSynth.php    # Livewire synth for App\Classes\Price (hydrate/dehydrate across requests)
 ├── helpers.php           # theme($key, $default), hook($event) — loaded via include_once in SettingsProvider::boot
 ├── Cart.php              # session cart + checkout state (225 LOC)
-├── FilamentInput.php     # reusable form fields for Filament 4 admin (307 LOC)
+├── FilamentInput.php     # reusable form fields for Filament 5 admin (307 LOC)
 ├── Navigation.php        # public-site nav tree (260 LOC)
 ├── PDF.php + Pdf/        # dompdf wrappers (Content/File)
 ├── Price.php             # money value object; pairs with Synths/PriceSynth

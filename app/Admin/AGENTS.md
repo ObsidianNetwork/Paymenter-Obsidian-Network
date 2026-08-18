@@ -1,4 +1,4 @@
-# app/Admin — Filament 4 Admin Panel
+# app/Admin — Filament 5 Admin Panel
 
 Filament-discovered admin panel root. Panel wired in `app/Providers/Filament/AdminPanelProvider.php` (path `/admin`, id `admin`, SPA mode, `command+k`/`ctrl+k` global search).
 
@@ -37,6 +37,6 @@ app/Admin/
 
 - Do not create `app/Filament/` — it is not discovered. Everything under `app/Admin/`.
 - Do not register resources via `->resources([...])` in the provider; rely on `discover*` auto-discovery.
-- Do not import Filament v3 APIs (Forms/Tables namespaces changed in v4). Check `filament/filament ^4.0.0` docs.
+- Do not import Filament v4 APIs without checking the installed v5 contracts. Check `filament/filament ^5.0` docs.
 - Do not hardcode colors; use `Filament\Support\Colors\Color` (panel primary is `Color::Blue`).
 - Do not embed admin-only Livewire components here — those belong in `app/Livewire/Components/` or under the resource directory if Filament-owned.
