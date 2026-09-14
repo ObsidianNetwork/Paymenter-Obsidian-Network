@@ -8,6 +8,10 @@ on:
     types:
       - published
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   push:
     name: Push
